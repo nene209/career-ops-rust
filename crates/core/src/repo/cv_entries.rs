@@ -3,7 +3,6 @@
 //! Entries are ordered by `sort_order`. New entries append to the end by
 //! default. `reorder` accepts a full ordering in one transaction.
 
-use chrono::Utc;
 use sqlx::SqlitePool;
 
 use crate::error::{CoreError, Result};

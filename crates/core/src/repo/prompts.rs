@@ -5,7 +5,6 @@
 //! `prompt_hash` records in `evaluation_reports` remain stable identifiers.
 
 use chrono::Utc;
-use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use crate::error::Result;

@@ -207,7 +207,6 @@ fn is_valid_transition(from: ApplicationStatus, to: ApplicationStatus) -> bool {
             | (Applied, Ready)
             | (Applied, Interviewing)
             | (Applied, Rejected)
-            | (Interviewing, Applied)
             | (Interviewing, Offer)
             | (Interviewing, Rejected)
             | (Rejected, Discovered)

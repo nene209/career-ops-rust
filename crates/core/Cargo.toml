@@ -55,6 +55,6 @@ keyring = { version = "3", optional = true, features = [
 ] }
 
 [dev-dependencies]
-keyring = { version = "3", features = ["mock"] }
+keyring = "3"
 tempfile = "3"
 tokio = { workspace = true, features = ["full"] }

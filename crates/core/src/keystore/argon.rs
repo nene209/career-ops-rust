@@ -10,6 +10,7 @@ use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use chrono::Utc;
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 use super::wrap::{b64, unb64, KdfParams, KeyWrap, WrappedDek};
 use crate::error::{CoreError, Result};
@@ -46,7 +47,7 @@ pub fn derive_and_wrap(passphrase: &str, dek: &[u8; 32]) -> Result<KeyWrap> {
     })
 }
 
-pub fn unwrap(wrapped: &WrappedDek, passphrase: &str) -> Result<[u8; 32]> {
+pub fn unwrap(wrapped: &WrappedDek, passphrase: &str) -> Result<Zeroizing<[u8; 32]>> {
     let (kdf, nonce, ct) = wrapped
         .wraps
         .iter()
@@ -76,7 +77,7 @@ pub fn unwrap(wrapped: &WrappedDek, passphrase: &str) -> Result<[u8; 32]> {
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&pt);
-    Ok(out)
+    Ok(Zeroizing::new(out))
 }
 
 fn derive(passphrase: &str, kdf: &KdfParams) -> Result<[u8; 32]> {

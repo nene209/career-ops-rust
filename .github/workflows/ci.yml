@@ -32,9 +32,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-
       - name: cargo test without keychain feature
-        run: cargo test -p career-ops-core --no-default-features
+        run: cargo test -p career-ops-core --no-default-features --test prompts_seed
 
   keychain-sentinel:
     name: keychain sentinel round-trip

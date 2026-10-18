@@ -159,21 +159,25 @@ pub enum SeedOutcome {
     Unchanged { version: i64 },
 }
 
-/// Seed or update all system prompts.
-///
-/// Safe to call on every application startup. Returns one entry per seed
-/// prompt indicating what (if anything) changed.
-///
-/// Errors are returned as `CoreError`. A failure to seed one prompt does not
-/// roll back earlier inserts — prompt seeding is not transactional at the
-/// batch level. Each prompt file is independent, and a partial seed is
-/// recoverable by rerunning; the next run picks up where this one stopped.
+/// Public entry point. Seeds `SYSTEM_PROMPTS` into the database.
 pub async fn seed_or_update_system_prompts(
     pool: &SqlitePool,
 ) -> Result<Vec<(&'static str, SeedOutcome)>> {
-    let mut outcomes = Vec::with_capacity(SYSTEM_PROMPTS.len());
+    seed_or_update(pool, SYSTEM_PROMPTS).await
+}
 
-    for seed in SYSTEM_PROMPTS {
+/// Testable entry point. Seeds an arbitrary set of prompts.
+///
+/// In production only `seed_or_update_system_prompts` is called.
+/// Exposed so tests can exercise versioning and category-change behaviour
+/// without mutating a `const`.
+pub async fn seed_or_update(
+    pool: &SqlitePool,
+    seeds: &[SeedPrompt],
+) -> Result<Vec<(&'static str, SeedOutcome)>> {
+    let mut outcomes = Vec::with_capacity(seeds.len());
+
+    for seed in seeds {
         let outcome = seed_one(pool, seed).await?;
         debug!(
             name = seed.name,
@@ -202,7 +206,7 @@ pub async fn seed_or_update_system_prompts(
         updated,
         unchanged,
         total = outcomes.len(),
-        "system prompt seeding complete"
+        "prompt seeding complete"
     );
 
     Ok(outcomes)

@@ -34,16 +34,18 @@ pub async fn open(data_dir: impl AsRef<Path>, dek: &[u8; 32]) -> Result<SqlitePo
         .connect_with(options)
         .await?;
 
-    // Consistency check. If the DEK is wrong, SQLCipher will fail to decrypt
-    // the schema and this query returns an error.
-    sqlx::query("SELECT count(*) FROM sqlite_master")
+    let check = sqlx::query("SELECT count(*) FROM sqlite_master")
         .fetch_one(&pool)
-        .await
-        .map_err(|e| {
-            // The pool is unusable after a failed key check; close it.
-            pool.close();
-            crate::error::CoreError::Database(e)
-        })?;
+        .await;
+    if let Err(e) = check {
+        pool.close().await;
+        return Err(crate::error::CoreError::Database(e));
+    }
+
+    // Run pending migrations. Idempotent: a no-op if all are applied.
+    // A checksum mismatch (a released migration was edited) errors here,
+    // enforcing the append-only rule at runtime.
+    sqlx::migrate!("./migrations").run(&pool).await?;
 
     Ok(pool)
 }

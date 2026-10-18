@@ -40,21 +40,43 @@ views are placeholders.
   state machine is real; the rendering is not.
 - **`data_dir()`** — reads `CAREER_OPS_DATA_DIR` from the environment. In
   production, use the `directories` crate.
-- **Prompt and template seeding** — the mechanism exists
-  (`prompts::seed_if_empty`), but the embedded prompt list from
-  `modes/*.md` is not wired in. Enumerate the original project's files and
-  add them to the `SYSTEM_PROMPTS` constant.
+- **Template seeding** — the `templates` table and repository are in place,
+  but no template `.html` files exist yet. Seeding a template system is a
+  **Phase 4** deliverable, and Phase 4 should model it on `prompts_seed.rs`
+  (update-aware seeding) rather than the current
+  `templates::seed_if_empty` pattern, which does not handle content
+  changes across releases.
 - **Recovery screen actions** — the state exists; the five actions
   (unlock, retry, locate, export, reset) are not wired to UI events.
 - **First-launch wizard content** — the passphrase and acknowledgement
   steps are described, not rendered.
-- **Keychain mock setup** — tests use `keyring::mock`; production builds
-  use the platform backend via the `keychain` feature. The sentinel test
-  guards against missing platform features.
 - **Argon2id tuning** — parameters are the RustCrypto Book minimums
   (19 MiB, 2 iterations, 1 parallelism). They are safe but may not hit the
   250–500 ms target on all hardware. Benchmark on your target hardware
   before tuning (Q-3).
+
+## What is now implemented (moved out of "stubbed" since the first draft)
+
+- **Prompt seeding** — `crates/core/src/prompts_seed.rs` embeds the
+  original `modes/*.md` files at compile time and seeds them into the
+  `prompts` table. The seeding function is update-aware: it inserts new
+  versions when content changes between releases, preserving historical
+  reports that reference old content hashes. Wired into
+  `AppState::post_unlock` and `AppState::complete_first_launch`, non-fatal
+  on failure so a prompt-seeding error does not block the pipeline UI.
+- **Repositories** — `cv_entries`, `applications`, `job_descriptions`,
+  `portals`, `settings`, `templates`, `profile`, and `prompts` are all
+  implemented. `job_descriptions` includes content-hash dedup (added in
+  Phase 1 to remove the Phase 2 migration the original plan assumed).
+  `applications` enforces the human-in-the-loop invariant at the
+  repository layer: `mark_applied` is the only path to `applied`, and it
+  requires the current status to be `ready`.
+- **Test harness** — `crates/core/tests/common/mod.rs` provides
+  `TestDb::new_raw()` (no keystore, works without the `keychain` feature)
+  and `TestDb::new_via_keystore()` (full keystore flow, requires
+  `keychain`). Integration tests for prompt seeding are in
+  `crates/core/tests/prompts_seed.rs`.
+- **Keychain mock** — `setup_keyring_mock()` in the shared harness.
 
 ## Known risks to resolve during compilation
 
@@ -80,6 +102,13 @@ views are placeholders.
 6. **`sqlx::migrate!("./migrations")` path.** The macro resolves relative
    to `CARGO_MANIFEST_DIR` of the crate that invokes it. The path
    `./migrations` is correct for `crates/core`.
+7. **`templates::seed_if_empty` uses the pre-`prompts_seed.rs` pattern.**
+   It seeds only when the table is empty and does not handle content
+   changes across releases. Phase 4 must replace it with
+   `seed_or_update_system_templates` modeled on `prompts_seed.rs`, or the
+   same "how do we ship a template change in a new release?" problem will
+   surface. This is a Phase 4 concern, not a Phase 1 blocker, but it
+   should be tracked in the Phase 4 plan.
 
 ## What "done" would look like
 
