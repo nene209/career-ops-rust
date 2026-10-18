@@ -15,10 +15,7 @@ use super::content_hash;
 /// Seed the templates table if it is empty.
 ///
 /// `seeds` is `(name, kind, content)`. `kind` is `"cv"` or `"cover_letter"`.
-pub async fn seed_if_empty(
-    pool: &SqlitePool,
-    seeds: &[(&str, &str, &str)],
-) -> Result<()> {
+pub async fn seed_if_empty(pool: &SqlitePool, seeds: &[(&str, &str, &str)]) -> Result<()> {
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM templates")
         .fetch_one(pool)
         .await?;
@@ -45,11 +42,7 @@ pub async fn seed_if_empty(
     Ok(())
 }
 
-pub async fn active(
-    pool: &SqlitePool,
-    name: &str,
-    kind: &str,
-) -> Result<Option<Template>> {
+pub async fn active(pool: &SqlitePool, name: &str, kind: &str) -> Result<Option<Template>> {
     let row = sqlx::query_as::<_, Template>(
         "SELECT * FROM templates
          WHERE name = ? AND kind = ?

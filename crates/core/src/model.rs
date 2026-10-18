@@ -174,7 +174,7 @@ pub struct Portal {
     pub id: i64,
     pub company_name: String,
     pub url: String,
-    pub render_mode: String, // "static" | "browser"
+    pub render_mode: String,            // "static" | "browser"
     pub scraper_config: Option<String>, // JSON
     pub last_verified_at: Option<DateTime<Utc>>,
 }

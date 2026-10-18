@@ -38,10 +38,9 @@ pub struct NewPortal {
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Portal>> {
-    let rows =
-        sqlx::query_as::<_, Portal>("SELECT * FROM portals ORDER BY company_name ASC")
-            .fetch_all(pool)
-            .await?;
+    let rows = sqlx::query_as::<_, Portal>("SELECT * FROM portals ORDER BY company_name ASC")
+        .fetch_all(pool)
+        .await?;
     Ok(rows)
 }
 
@@ -80,7 +79,9 @@ pub async fn create(pool: &SqlitePool, input: NewPortal) -> Result<Portal> {
     .fetch_one(pool)
     .await?;
 
-    get(pool, id).await?.ok_or(CoreError::Internal("portals::create"))
+    get(pool, id)
+        .await?
+        .ok_or(CoreError::Internal("portals::create"))
 }
 
 pub async fn update(pool: &SqlitePool, id: i64, input: NewPortal) -> Result<Portal> {
@@ -107,7 +108,9 @@ pub async fn update(pool: &SqlitePool, id: i64, input: NewPortal) -> Result<Port
         return Err(CoreError::Internal("portals::update: row not found"));
     }
 
-    get(pool, id).await?.ok_or(CoreError::Internal("portals::update"))
+    get(pool, id)
+        .await?
+        .ok_or(CoreError::Internal("portals::update"))
 }
 
 pub async fn delete(pool: &SqlitePool, id: i64) -> Result<()> {

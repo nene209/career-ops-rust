@@ -27,11 +27,10 @@ pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<Application>> {
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Application>> {
-    let rows = sqlx::query_as::<_, Application>(
-        "SELECT * FROM applications ORDER BY updated_at DESC",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows =
+        sqlx::query_as::<_, Application>("SELECT * FROM applications ORDER BY updated_at DESC")
+            .fetch_all(pool)
+            .await?;
     Ok(rows)
 }
 
@@ -62,29 +61,28 @@ pub async fn create(pool: &SqlitePool, job_description_id: i64) -> Result<Applic
     .bind(now)
     .fetch_one(pool)
     .await?;
-    get(pool, id).await?.ok_or(CoreError::Internal("applications::create"))
+    get(pool, id)
+        .await?
+        .ok_or(CoreError::Internal("applications::create"))
 }
 
 /// Move an application to a new status.
 ///
 /// Rejects `to == Applied` with a clear error — use `mark_applied` instead.
 /// Uses compare-and-set on the current status to avoid a lost-update race.
-pub async fn transition(
-    pool: &SqlitePool,
-    id: i64,
-    to: ApplicationStatus,
-) -> Result<Application> {
+pub async fn transition(pool: &SqlitePool, id: i64, to: ApplicationStatus) -> Result<Application> {
     if to == ApplicationStatus::Applied {
         return Err(CoreError::Internal(
             "applications::transition cannot reach 'applied'; use mark_applied",
         ));
     }
 
-    let current = get(pool, id)
-        .await?
-        .ok_or(CoreError::Internal("applications::transition: row not found"))?;
-    let current_status = ApplicationStatus::parse(&current.status)
-        .ok_or(CoreError::Internal("applications::transition: unknown current status"))?;
+    let current = get(pool, id).await?.ok_or(CoreError::Internal(
+        "applications::transition: row not found",
+    ))?;
+    let current_status = ApplicationStatus::parse(&current.status).ok_or(CoreError::Internal(
+        "applications::transition: unknown current status",
+    ))?;
 
     if !is_valid_transition(current_status, to) {
         return Err(CoreError::Internal(
@@ -110,9 +108,9 @@ pub async fn transition(
         ));
     }
 
-    get(pool, id)
-        .await?
-        .ok_or(CoreError::Internal("applications::transition: row vanished"))
+    get(pool, id).await?.ok_or(CoreError::Internal(
+        "applications::transition: row vanished",
+    ))
 }
 
 /// Mark an application as applied. The only path to `applied`.
@@ -137,9 +135,9 @@ pub async fn mark_applied(pool: &SqlitePool, id: i64) -> Result<Application> {
         ));
     }
 
-    get(pool, id)
-        .await?
-        .ok_or(CoreError::Internal("applications::mark_applied: row vanished"))
+    get(pool, id).await?.ok_or(CoreError::Internal(
+        "applications::mark_applied: row vanished",
+    ))
 }
 
 pub async fn set_match_score(pool: &SqlitePool, id: i64, score: f64) -> Result<()> {
@@ -158,14 +156,12 @@ pub async fn set_match_score(pool: &SqlitePool, id: i64, score: f64) -> Result<(
 
 pub async fn attach_report(pool: &SqlitePool, id: i64, report_id: i64) -> Result<()> {
     let now: DateTime<Utc> = Utc::now();
-    sqlx::query(
-        "UPDATE applications SET evaluation_report_id = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(report_id)
-    .bind(now)
-    .bind(id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE applications SET evaluation_report_id = ?, updated_at = ? WHERE id = ?")
+        .bind(report_id)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

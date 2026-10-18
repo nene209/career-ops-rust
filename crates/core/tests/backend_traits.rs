@@ -92,7 +92,10 @@ async fn browser_backend_is_object_safe() {
     assert_eq!(backend.name(), "mock");
 
     let url = Url::parse("https://example.com/").unwrap();
-    let page = backend.fetch_rendered(&url, RenderOpts::default()).await.unwrap();
+    let page = backend
+        .fetch_rendered(&url, RenderOpts::default())
+        .await
+        .unwrap();
     assert_eq!(page.status, 200);
 
     // And the unsupported path is reachable through the trait object.

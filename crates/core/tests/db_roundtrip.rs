@@ -134,9 +134,7 @@ async fn migrations_are_idempotent() {
     // reopen, which runs migrations a second time via `db::open`.
     db.pool.close().await;
 
-    let pool = db::open(db.path(), &db.dek)
-        .await
-        .expect("reopen");
+    let pool = db::open(db.path(), &db.dek).await.expect("reopen");
 
     // Second run of the migration should not have changed anything. A
     // concrete assertion: the profile row we insert now is still the only

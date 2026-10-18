@@ -70,12 +70,11 @@ pub async fn create(pool: &SqlitePool, input: NewCvEntry) -> Result<CvEntry> {
     let sort_order = match input.sort_order {
         Some(n) => n,
         None => {
-            let max: Option<i64> = sqlx::query_scalar(
-                "SELECT MAX(sort_order) FROM cv_entries WHERE profile_id = ?",
-            )
-            .bind(input.profile_id)
-            .fetch_one(pool)
-            .await?;
+            let max: Option<i64> =
+                sqlx::query_scalar("SELECT MAX(sort_order) FROM cv_entries WHERE profile_id = ?")
+                    .bind(input.profile_id)
+                    .fetch_one(pool)
+                    .await?;
             max.unwrap_or(0) + 1
         }
     };
@@ -104,7 +103,9 @@ pub async fn create(pool: &SqlitePool, input: NewCvEntry) -> Result<CvEntry> {
     .fetch_one(pool)
     .await?;
 
-    get(pool, id).await?.ok_or(CoreError::Internal("cv_entries::create"))
+    get(pool, id)
+        .await?
+        .ok_or(CoreError::Internal("cv_entries::create"))
 }
 
 pub async fn update(pool: &SqlitePool, id: i64, input: NewCvEntry) -> Result<CvEntry> {
@@ -136,7 +137,9 @@ pub async fn update(pool: &SqlitePool, id: i64, input: NewCvEntry) -> Result<CvE
         return Err(CoreError::Internal("cv_entries::update: row not found"));
     }
 
-    get(pool, id).await?.ok_or(CoreError::Internal("cv_entries::update"))
+    get(pool, id)
+        .await?
+        .ok_or(CoreError::Internal("cv_entries::update"))
 }
 
 pub async fn delete(pool: &SqlitePool, id: i64) -> Result<()> {
@@ -153,14 +156,13 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> Result<()> {
 pub async fn reorder(pool: &SqlitePool, profile_id: i64, ordered_ids: &[i64]) -> Result<()> {
     let mut tx = pool.begin().await?;
     for (idx, id) in ordered_ids.iter().enumerate() {
-        let result = sqlx::query(
-            "UPDATE cv_entries SET sort_order = ? WHERE id = ? AND profile_id = ?",
-        )
-        .bind(idx as i64)
-        .bind(id)
-        .bind(profile_id)
-        .execute(&mut *tx)
-        .await?;
+        let result =
+            sqlx::query("UPDATE cv_entries SET sort_order = ? WHERE id = ? AND profile_id = ?")
+                .bind(idx as i64)
+                .bind(id)
+                .bind(profile_id)
+                .execute(&mut *tx)
+                .await?;
         if result.rows_affected() == 0 {
             tx.rollback().await.ok();
             return Err(CoreError::Internal("cv_entries::reorder: unknown id"));

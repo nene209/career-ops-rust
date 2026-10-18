@@ -18,9 +18,7 @@ use career_ops_core::repo::prompts;
 async fn first_seed_inserts_every_prompt() {
     let db = common::TestDb::new_raw().await;
 
-    let outcomes = seed_or_update_system_prompts(&db.pool)
-        .await
-        .expect("seed");
+    let outcomes = seed_or_update_system_prompts(&db.pool).await.expect("seed");
 
     assert_eq!(outcomes.len(), SYSTEM_PROMPTS.len());
     for (name, outcome) in &outcomes {
@@ -32,11 +30,10 @@ async fn first_seed_inserts_every_prompt() {
         );
     }
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM prompts WHERE is_system = 1")
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM prompts WHERE is_system = 1")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
     assert_eq!(count as usize, SYSTEM_PROMPTS.len());
 
     db.close().await;
@@ -46,7 +43,9 @@ async fn first_seed_inserts_every_prompt() {
 async fn re_seed_is_idempotent_when_content_unchanged() {
     let db = common::TestDb::new_raw().await;
 
-    seed_or_update_system_prompts(&db.pool).await.expect("first seed");
+    seed_or_update_system_prompts(&db.pool)
+        .await
+        .expect("first seed");
     let outcomes = seed_or_update_system_prompts(&db.pool)
         .await
         .expect("second seed");
@@ -60,11 +59,10 @@ async fn re_seed_is_idempotent_when_content_unchanged() {
         );
     }
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM prompts WHERE is_system = 1")
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM prompts WHERE is_system = 1")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
     assert_eq!(
         count as usize,
         SYSTEM_PROMPTS.len(),
@@ -196,13 +194,19 @@ async fn category_change_is_recorded_on_new_version() {
         content: "same content",
     }];
     let out = seed_or_update(&db.pool, v2).await.expect("v2");
-    assert!(matches!(out[1 - 1].1, SeedOutcome::Unchanged { version: 1 }));
+    assert!(matches!(
+        out[1 - 1].1,
+        SeedOutcome::Unchanged { version: 1 }
+    ));
 
     let active = prompts::active_system(&db.pool, "mover")
         .await
         .unwrap()
         .expect("active");
-    assert_eq!(active.category, "shared", "category change is not versioned");
+    assert_eq!(
+        active.category, "shared",
+        "category change is not versioned"
+    );
 
     db.close().await;
 }

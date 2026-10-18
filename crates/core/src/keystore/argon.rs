@@ -52,7 +52,12 @@ pub fn unwrap(wrapped: &WrappedDek, passphrase: &str) -> Result<Zeroizing<[u8; 3
         .wraps
         .iter()
         .find_map(|w| match w {
-            KeyWrap::Passphrase { kdf, nonce, ciphertext, .. } => Some((kdf, nonce, ciphertext)),
+            KeyWrap::Passphrase {
+                kdf,
+                nonce,
+                ciphertext,
+                ..
+            } => Some((kdf, nonce, ciphertext)),
             _ => None,
         })
         .ok_or_else(|| CoreError::CorruptWrap("no passphrase wrap present".into()))?;
@@ -73,7 +78,9 @@ pub fn unwrap(wrapped: &WrappedDek, passphrase: &str) -> Result<Zeroizing<[u8; 3
         .map_err(|_| CoreError::WrongPassphrase)?;
 
     if pt.len() != 32 {
-        return Err(CoreError::CorruptWrap("unwrap produced wrong length".into()));
+        return Err(CoreError::CorruptWrap(
+            "unwrap produced wrong length".into(),
+        ));
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&pt);

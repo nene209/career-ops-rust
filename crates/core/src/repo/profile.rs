@@ -17,7 +17,9 @@ pub async fn ensure_singleton(pool: &SqlitePool) -> Result<Profile> {
     .bind(now)
     .execute(pool)
     .await?;
-    get(pool).await?.ok_or(crate::error::CoreError::Internal("profile insert"))
+    get(pool)
+        .await?
+        .ok_or(crate::error::CoreError::Internal("profile insert"))
 }
 
 pub async fn get(pool: &SqlitePool) -> Result<Option<Profile>> {

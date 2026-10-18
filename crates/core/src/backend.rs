@@ -38,7 +38,7 @@ pub struct PdfOptions {
 impl Default for PdfOptions {
     fn default() -> Self {
         Self {
-            page_width_mm: 210.0,  // A4
+            page_width_mm: 210.0, // A4
             page_height_mm: 297.0,
             margin_mm: 10.0,
             print_background: false,
@@ -54,7 +54,9 @@ pub trait BrowserBackend: Send + Sync {
     /// Default implementation returns `BackendUnsupported`. Implementations
     /// that cannot render PDFs (Obscura) can rely on this default.
     async fn print_to_pdf(&self, _html: &str, _opts: PdfOptions) -> Result<Vec<u8>> {
-        Err(CoreError::BackendUnsupported("print_to_pdf not implemented"))
+        Err(CoreError::BackendUnsupported(
+            "print_to_pdf not implemented",
+        ))
     }
 
     fn name(&self) -> &'static str;
@@ -82,7 +84,9 @@ impl BrowserBackend for MockBrowserBackend {
 
     async fn print_to_pdf(&self, _html: &str, _opts: PdfOptions) -> Result<Vec<u8>> {
         if self.pdf_unsupported {
-            Err(CoreError::BackendUnsupported("mock: print_to_pdf not supported"))
+            Err(CoreError::BackendUnsupported(
+                "mock: print_to_pdf not supported",
+            ))
         } else {
             Ok(b"%PDF-mock".to_vec())
         }

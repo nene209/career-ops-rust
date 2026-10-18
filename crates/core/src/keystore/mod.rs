@@ -70,7 +70,10 @@ impl Keystore {
     /// KEKs, and writes `dek.wrapped.json`.
     ///
     /// **Refuses** if a wrapped file already exists at the target path.
-    pub fn initialize(data_dir: impl AsRef<Path>, passphrase: &str) -> Result<(Self, Zeroizing<[u8; 32]>)> {
+    pub fn initialize(
+        data_dir: impl AsRef<Path>,
+        passphrase: &str,
+    ) -> Result<(Self, Zeroizing<[u8; 32]>)> {
         let data_dir = data_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir)?;
 
@@ -129,7 +132,9 @@ impl Keystore {
     /// Re-wrap the DEK under a new passphrase KEK. Requires unlocking first.
     pub fn rotate_passphrase(&mut self, dek: &[u8; 32], new_passphrase: &str) -> Result<()> {
         let new_wrap = argon::derive_and_wrap(new_passphrase, dek)?;
-        self.wrapped.wraps.retain(|w| !matches!(w, KeyWrap::Passphrase { .. }));
+        self.wrapped
+            .wraps
+            .retain(|w| !matches!(w, KeyWrap::Passphrase { .. }));
         self.wrapped.wraps.push(new_wrap);
         let path = self.data_dir.join(WRAPPED_FILE);
         let tmp = path.with_extension("json.tmp");

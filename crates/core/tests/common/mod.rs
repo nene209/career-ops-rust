@@ -40,9 +40,7 @@ pub const TEST_PASSPHRASE: &str = "test-correct-horse-battery-staple";
 /// test binary that uses the keystore.
 pub fn setup_keyring_mock() {
     KEYRING_INIT.call_once(|| {
-        keyring::set_default_credential_builder(
-            keyring::mock::default_credential_builder(),
-        );
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
     });
 }
 
@@ -73,8 +71,8 @@ impl TestDb {
         setup_keyring_mock();
         let dir = tempfile::tempdir().expect("tempdir");
 
-        let (_ks, dek) = Keystore::initialize(dir.path(), TEST_PASSPHRASE)
-            .expect("Keystore::initialize");
+        let (_ks, dek) =
+            Keystore::initialize(dir.path(), TEST_PASSPHRASE).expect("Keystore::initialize");
 
         let pool = db::create_and_migrate(dir.path(), &dek)
             .await

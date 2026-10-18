@@ -95,7 +95,6 @@ pub const SYSTEM_PROMPTS: &[SeedPrompt] = &[
         category: "render",
         content: include_str!("../prompts/pdf.md"),
     },
-
     // ------------------------------------------------------------------
     // Optional — present in the original repo, useful in later phases.
     // Comment out any row whose file you did not copy.

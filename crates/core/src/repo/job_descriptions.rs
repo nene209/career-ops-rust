@@ -45,9 +45,8 @@ pub struct NewJobDescription {
 /// different hash, which is the conservative choice: an edited posting is
 /// treated as a new posting rather than silently overwriting the old one.
 fn hash_job(input: &NewJobDescription) -> String {
-    let mut combined = String::with_capacity(
-        input.title.len() + input.company.len() + input.raw_text.len() + 2,
-    );
+    let mut combined =
+        String::with_capacity(input.title.len() + input.company.len() + input.raw_text.len() + 2);
     combined.push_str(&input.title);
     combined.push('\n');
     combined.push_str(&input.company);
@@ -57,12 +56,10 @@ fn hash_job(input: &NewJobDescription) -> String {
 }
 
 pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<JobDescription>> {
-    let row = sqlx::query_as::<_, JobDescription>(
-        "SELECT * FROM job_descriptions WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let row = sqlx::query_as::<_, JobDescription>("SELECT * FROM job_descriptions WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row)
 }
 
@@ -152,11 +149,7 @@ async fn find_existing(
     Ok(None)
 }
 
-async fn insert(
-    pool: &SqlitePool,
-    input: NewJobDescription,
-    hash: &str,
-) -> Result<JobDescription> {
+async fn insert(pool: &SqlitePool, input: NewJobDescription, hash: &str) -> Result<JobDescription> {
     let now: DateTime<Utc> = Utc::now();
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO job_descriptions
@@ -175,7 +168,9 @@ async fn insert(
     .fetch_one(pool)
     .await?;
 
-    get(pool, id).await?.ok_or(CoreError::Internal("job_descriptions::insert"))
+    get(pool, id)
+        .await?
+        .ok_or(CoreError::Internal("job_descriptions::insert"))
 }
 
 async fn update(
@@ -204,7 +199,9 @@ async fn update(
     .execute(pool)
     .await?;
 
-    get(pool, id).await?.ok_or(CoreError::Internal("job_descriptions::update"))
+    get(pool, id)
+        .await?
+        .ok_or(CoreError::Internal("job_descriptions::update"))
 }
 
 fn is_unique_violation(e: &sqlx::Error) -> bool {

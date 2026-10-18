@@ -9,8 +9,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use keyring::credential::{
-    Credential, CredentialApi, CredentialBuilder, CredentialBuilderApi,
-    CredentialPersistence,
+    Credential, CredentialApi, CredentialBuilder, CredentialBuilderApi, CredentialPersistence,
 };
 use keyring::Error;
 

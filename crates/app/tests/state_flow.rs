@@ -45,7 +45,7 @@ fn setup_keyring_mock() {
 
 #[tokio::test]
 async fn first_launch_then_unlock_then_ready() {
-	let _guard = KEYCHAIN_TEST_LOCK.lock().await;
+    let _guard = KEYCHAIN_TEST_LOCK.lock().await;
     setup_keyring_mock();
     let dir = TempDir::new().unwrap();
 
@@ -92,7 +92,7 @@ async fn first_launch_then_unlock_then_ready() {
 
 #[tokio::test]
 async fn wrong_passphrase_reaches_recovery_not_ready() {
-	let _guard = KEYCHAIN_TEST_LOCK.lock().await;
+    let _guard = KEYCHAIN_TEST_LOCK.lock().await;
     setup_keyring_mock();
     let dir = TempDir::new().unwrap();
 
@@ -132,7 +132,7 @@ async fn wrong_passphrase_reaches_recovery_not_ready() {
 
 #[tokio::test]
 async fn correct_passphrase_reaches_ready() {
-	let _guard = KEYCHAIN_TEST_LOCK.lock().await;
+    let _guard = KEYCHAIN_TEST_LOCK.lock().await;
     setup_keyring_mock();
     let dir = TempDir::new().unwrap();
 

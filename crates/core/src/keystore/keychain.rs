@@ -12,14 +12,14 @@ use crate::error::{CoreError, Result};
 // ----------------------------------------------------------------------
 #[cfg(feature = "keychain")]
 mod inner {
-	use chacha20poly1305::aead::Aead;
-	use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-	use chrono::Utc;
-	use keyring::Entry;
-	use rand::RngCore;
-	use zeroize::Zeroizing;
-	
-	use super::super::wrap::{b64, unb64};
+    use chacha20poly1305::aead::Aead;
+    use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
+    use chrono::Utc;
+    use keyring::Entry;
+    use rand::RngCore;
+    use zeroize::Zeroizing;
+
+    use super::super::wrap::{b64, unb64};
     use super::{CoreError, KeyWrap, Result, WrappedDek};
 
     pub const SERVICE: &str = "com.career-ops.app";
@@ -43,7 +43,9 @@ mod inner {
             .wraps
             .iter()
             .find_map(|w| match w {
-                KeyWrap::Keychain { nonce, ciphertext, .. } => Some((nonce, ciphertext)),
+                KeyWrap::Keychain {
+                    nonce, ciphertext, ..
+                } => Some((nonce, ciphertext)),
                 _ => None,
             })
             .ok_or_else(|| CoreError::CorruptWrap("no keychain wrap present".into()))?;
