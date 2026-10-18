@@ -14,7 +14,6 @@
 // use std::sync::Once;
 
 use career_ops_app::state::{AppState, Screen};
-// use career_ops_test_support;
 use tempfile::TempDir;
 
 use tokio::sync::Mutex;
@@ -28,20 +27,11 @@ use tokio::sync::Mutex;
 /// race by ensuring only one test at a time is mutating the keychain.
 static KEYCHAIN_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-// static KEYRING_INIT: Once = Once::new();
-
 const PASSPHRASE: &str = "state-flow-test-passphrase";
 
 fn setup_keyring_mock() {
     career_ops_test_support::install();
 }
-// fn setup_keyring_mock() {
-//     KEYRING_INIT.call_once(|| {
-//         keyring::set_default_credential_builder(
-//             keyring::mock::default_credential_builder(),
-//         );
-//     });
-// }
 
 #[tokio::test]
 async fn first_launch_then_unlock_then_ready() {
