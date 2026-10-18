@@ -8,20 +8,11 @@ use career_ops_core::error::CoreError;
 use career_ops_core::keystore::{Keystore, UnlockOutcome, WRAPPED_FILE};
 use tempfile::tempdir;
 
-fn enable_keyring_mock() {
-    // Enable the in-process mock keychain for the whole test binary.
-    // SAFETY: `set_default_credential_builder` is documented as
-    // process-global; calling it once at the start of the binary is fine.
-    let _ = keyring::set_default_credential_builder(
-        keyring::mock::default_credential_builder(),
-    );
-}
-
 #[test]
 fn keychain_sentinel_round_trip() {
     // Fails loudly if the `keyring` crate was built without a platform
     // backend (a known hazard — see R-10 in the main plan).
-    enable_keyring_mock();
+    career_ops_test_support::install();
 
     let entry = keyring::Entry::new("com.career-ops.app.test", "sentinel").unwrap();
     entry.set_password("ping").unwrap();
@@ -53,7 +44,7 @@ async fn initialize_refuses_when_wrapped_file_exists() {
 
 #[tokio::test]
 async fn passphrase_unlock_succeeds() {
-    enable_keyring_mock();
+    career_ops_test_support::install();
     let dir = tempdir().unwrap();
     let _ = Keystore::initialize(dir.path(), "correct-passphrase").unwrap();
 
@@ -64,7 +55,7 @@ async fn passphrase_unlock_succeeds() {
 
 #[tokio::test]
 async fn wrong_passphrase_produces_no_dek() {
-    enable_keyring_mock();
+    career_ops_test_support::install();
     let dir = tempdir().unwrap();
     let _ = Keystore::initialize(dir.path(), "correct-passphrase").unwrap();
 

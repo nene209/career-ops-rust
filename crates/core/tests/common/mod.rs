@@ -39,9 +39,7 @@ pub const TEST_PASSPHRASE: &str = "test-correct-horse-battery-staple";
 /// Set up the in-process keychain mock. Idempotent: safe to call from every
 /// test binary that uses the keystore.
 pub fn setup_keyring_mock() {
-    KEYRING_INIT.call_once(|| {
-        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
-    });
+    career_ops_test_support::install();
 }
 
 pub struct TestDb {

@@ -47,6 +47,7 @@ keyring = { version = "3", optional = true, features = [
 ] }
 
 [dev-dependencies]
+career-ops-test-support = { workspace = true }
 keyring = "3"
 tempfile = "3"
 tokio = { workspace = true, features = ["full"] }
