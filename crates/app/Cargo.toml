@@ -16,11 +16,21 @@ keychain = ["career-ops-core/keychain"]
 [dependencies]
 career-ops-core = { path = "../core", features = [] }
 anyhow.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 # GPUI is pre-1.0. This dependency line will need adjustment — see
 # IMPLEMENTATION_NOTES.md.
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+
+[dev-dependencies]
+career-ops-core = { path = "../core", features = ["keychain"] }
+career-ops-test-support = { workspace = true }
+keyring = "3"
+sqlx = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["full"] }

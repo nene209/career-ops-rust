@@ -4,8 +4,6 @@
 //! would cause every read to return `NoEntry` silently — see the sentinel test
 //! in `tests/keystore_safety.rs`.
 
-use zeroize::Zeroizing;
-
 use super::wrap::{KeyWrap, WrappedDek};
 use crate::error::{CoreError, Result};
 
@@ -128,6 +126,9 @@ pub fn create_and_wrap(_dek: &[u8; 32]) -> Result<KeyWrap> {
         "built without `keychain` feature".into(),
     ))
 }
+
+#[cfg(not(feature = "keychain"))]
+use zeroize::Zeroizing;
 
 #[cfg(not(feature = "keychain"))]
 pub fn unwrap(_wrapped: &WrappedDek) -> Result<Zeroizing<[u8; 32]>> {

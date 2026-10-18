@@ -91,4 +91,12 @@ impl TestDb {
         self.pool.close().await;
         drop(self.dir);
     }
+
+    /// Reopen the encrypted database at `self.path()` with `self.dek`.
+    /// Returns a fresh pool. The original pool stays open; callers should
+    /// either close it first or accept two connections to the same file
+    /// (SQLite permits this — WAL mode is set in `db::create_and_migrate`).
+    pub async fn reopen(&self) -> Result<SqlitePool, career_ops_core::error::CoreError> {
+        career_ops_core::db::open(self.path(), &self.dek).await
+    }
 }

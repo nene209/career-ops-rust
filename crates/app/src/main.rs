@@ -4,13 +4,11 @@
 //! GPUI. The GPUI view layer (`screens.rs`) is a placeholder. When GPUI's
 //! API stabilises, the views will be filled in against the same state.
 
-mod screens;
-mod state;
+use career_ops_app::state::AppState;
 
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
-use state::AppState;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -21,7 +19,7 @@ fn main() -> Result<()> {
 
     // Phase 1: construct the state machine. The GPUI event loop is where the
     // view rendering would attach — see `screens.rs`.
-    let mut state = AppState::bootstrap(data_dir)?;
+    let state = AppState::bootstrap(data_dir)?;
 
     // In the finished application, this would be:
     //     gpui::Application::new().run(move |cx| {
