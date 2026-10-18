@@ -153,6 +153,19 @@ impl AppState {
             tracing::error!(error = %e, "prompt seeding failed; app continues");
         }
     }
+
+    /// Return to the `Unlocking` state from `KeychainUnavailable` so the
+    /// user can retry the keychain path after a transient failure.
+    pub fn retry_unlock(&mut self) -> Result<()> {
+        if matches!(self.screen, Screen::KeychainUnavailable { .. }) {
+            self.screen = Screen::Unlocking;
+            Ok(())
+        } else {
+            Err(CoreError::Internal(
+                "retry_unlock requires KeychainUnavailable state",
+            ))
+        }
+    }
 }
 
 #[cfg(test)]

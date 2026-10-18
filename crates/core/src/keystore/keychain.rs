@@ -3,6 +3,11 @@
 //! Uses the `keyring` crate with explicit platform features. A missing feature
 //! would cause every read to return `NoEntry` silently — see the sentinel test
 //! in `tests/keystore_safety.rs`.
+//!
+//! Platform failures (keychain unreachable, locked, or broken) are mapped to
+//! `CoreError::KeychainUnavailable` with a `"platform: "` prefix, so callers
+//! and tests can distinguish them from other keychain errors without
+//! depending on `keyring::Error`'s `Display` format.
 
 use super::wrap::{KeyWrap, WrappedDek};
 use crate::error::{CoreError, Result};
@@ -29,11 +34,8 @@ mod inner {
         let mut kek = Zeroizing::new([0u8; 32]);
         rand::thread_rng().fill_bytes(&mut *kek);
 
-        let entry = Entry::new(SERVICE, ACCOUNT_KEK)
-            .map_err(|e| CoreError::KeychainUnavailable(e.to_string()))?;
-        entry
-            .set_password(&b64(&*kek))
-            .map_err(|e| CoreError::KeychainUnavailable(e.to_string()))?;
+        let entry = Entry::new(SERVICE, ACCOUNT_KEK).map_err(map_keyring_error)?;
+        entry.set_password(&b64(&*kek)).map_err(map_keyring_error)?;
 
         wrap_with_kek(dek, &kek)
     }
@@ -50,13 +52,12 @@ mod inner {
             })
             .ok_or_else(|| CoreError::CorruptWrap("no keychain wrap present".into()))?;
 
-        let entry = Entry::new(SERVICE, ACCOUNT_KEK)
-            .map_err(|e| CoreError::KeychainUnavailable(e.to_string()))?;
-
+        let entry = Entry::new(SERVICE, ACCOUNT_KEK).map_err(map_keyring_error)?;
+    
         let kek_b64 = match entry.get_password() {
             Ok(v) => v,
             Err(keyring::Error::NoEntry) => return Err(CoreError::KeychainNoEntry),
-            Err(e) => return Err(CoreError::KeychainUnavailable(e.to_string())),
+            Err(e) => return Err(map_keyring_error(e)),
         };
 
         let kek_bytes = unb64(&kek_b64).map_err(|e| CoreError::Crypto(e.to_string()))?;
@@ -113,6 +114,23 @@ mod inner {
 
     fn unwrap_ciphertext(s: &str) -> Result<Vec<u8>> {
         unb64(s).map_err(|e| CoreError::Crypto(e.to_string()))
+    }
+    
+    /// Map a `keyring::Error` to a `CoreError`, prefixing platform
+    /// failures with a stable marker.
+    ///
+    /// The marker exists so tests can assert that a *platform* failure
+    /// (keychain unreachable, locked, or broken) is distinguished from
+    /// other keychain errors. Without it, the test would depend on the
+    /// `Display` format of `keyring::Error::PlatformFailure`, which is
+    /// an implementation detail of the crate.
+    fn map_keyring_error(e: keyring::Error) -> CoreError {
+        match e {
+            keyring::Error::PlatformFailure(inner) => {
+                CoreError::KeychainUnavailable(format!("platform: {inner}"))
+            }
+            other => CoreError::KeychainUnavailable(other.to_string()),
+        }
     }
 }
 
