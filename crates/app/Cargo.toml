@@ -1,0 +1,26 @@
+[package]
+name = "career-ops-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "career-ops"
+path = "src/main.rs"
+
+[features]
+default = ["keychain"]
+keychain = ["career-ops-core/keychain"]
+
+[dependencies]
+career-ops-core = { path = "../core", features = [] }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+
+# GPUI is pre-1.0. This dependency line will need adjustment — see
+# IMPLEMENTATION_NOTES.md.
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }

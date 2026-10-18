@@ -1,0 +1,60 @@
+[package]
+name = "career-ops-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# keychain backend for production; mock for tests uses the "mock" feature
+keychain = ["dep:keyring"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+rand = "0.8"
+sha2 = "0.10"
+url = { version = "2", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# crypto
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+
+# database
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "macros",
+    "migrate",
+    "chrono",
+    "uuid",
+    "json",
+] }
+# SQLCipher support is enabled by requesting the bundled-sqlcipher feature on
+# libsqlite3-sys. This is one of the P1-R1 friction points — see
+# IMPLEMENTATION_NOTES.md.
+libsqlite3-sys = { version = "0.30", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+# keychain (optional)
+keyring = { version = "3", optional = true, features = [
+    "apple-native",
+    "windows-native",
+    "linux-native",
+] }
+
+[dev-dependencies]
+keyring = { version = "3", features = ["mock"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["full"] }
