@@ -17,6 +17,8 @@
 //! 4. Nothing in this module creates a new DEK unless `initialize` is called
 //!    and the wrapped file is absent.
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 mod argon;
 mod keychain;
 mod wrap;

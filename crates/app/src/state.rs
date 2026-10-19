@@ -190,6 +190,17 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_without_db_goes_to_recovery() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(career_ops_core::keystore::WRAPPED_FILE),
+            b"{}",
+        ).unwrap();
+        let state = AppState::bootstrap(dir.path().to_path_buf()).unwrap();
+        assert!(matches!(state.current(), Screen::Recovery { .. }));
+    }
+
+    #[test]
     fn ready_is_unreachable_without_unlock() {
         let dir = tempdir().unwrap();
         let state = AppState::bootstrap(dir.path().to_path_buf()).unwrap();

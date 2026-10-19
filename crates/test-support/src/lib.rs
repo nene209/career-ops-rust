@@ -40,7 +40,7 @@ fn platform_failure() -> Error {
     // The concrete error type does not matter — only that it is a
     // PlatformFailure, which the keystore maps to KeychainUnavailable.
     Error::PlatformFailure(
-        std::io::Error::new(std::io::ErrorKind::Other, "injected test failure").into(),
+        std::io::Error::other("injected test failure").into(),
     )
 }
 

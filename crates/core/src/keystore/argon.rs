@@ -71,7 +71,10 @@ pub fn unwrap(wrapped: &WrappedDek, passphrase: &str) -> Result<Zeroizing<[u8; 3
     if nonce_bytes.len() != 24 {
         return Err(CoreError::CorruptWrap("nonce wrong length".into()));
     }
-    let nonce_arr: [u8; 24] = nonce_bytes.as_slice().try_into().unwrap();
+    let nonce_arr: [u8; 24] = nonce_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CoreError::CorruptWrap("nonce wrong length".into()))?;
 
     let pt = cipher
         .decrypt(&XNonce::from(nonce_arr), ct_bytes.as_slice())
