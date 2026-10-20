@@ -4,3 +4,4 @@
 **/*.db-wal
 **/dek.wrapped.json
 .env
+vendor/

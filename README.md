@@ -10,7 +10,8 @@ This is a port of the original
 [career-ops](https://github.com/career-ops-hq/career-ops) Node.js tool
 from a file-based CLI to a stateful, encrypted desktop application.
 
-**Status:** Phase 1 complete. Acquisition (Phase 2) is next.
+**Status:** Phase 1 complete. Phase 2 (acquisition) in progress — Week 1
+spike complete, Weeks 2–4 remaining.
 
 ---
 
@@ -30,6 +31,9 @@ from a file-based CLI to a stateful, encrypted desktop application.
 - **SQLCipher** is vendored via `libsqlite3-sys` with
   `bundled-sqlcipher-vendored-openssl`, so no system SQLCipher is
   required.
+- **Obscura** is required only for the acquisition test suite, not for
+  building the application. See [Vendored Obscura binary](#vendored-obscura-binary-test-only)
+  under Testing.
 
 ### Build
 
@@ -61,7 +65,7 @@ cargo test --workspace
 This is the primary command. It runs every test in every crate,
 including the keystore tests, the app state-flow tests, and the prompt
 seeding tests. It requires the platform keychain to be available
-(see Prerequisites).
+(see Prerequisites) and the Obscura binary (see below).
 
 ### Core crate, no keychain
 
@@ -71,7 +75,82 @@ cargo test -p career-ops-core --no-default-features
 
 This exercises the `keychain` stubs. It confirms that the codebase
 compiles and the tests that do not touch the keychain still pass in a
-build without a keychain backend. This is what runs in the `test-no-keychain-feature` CI job.
+build without a keychain backend. This is what runs in the
+`test-no-keychain-feature` CI job.
+
+### Vendored Obscura binary (test-only)
+
+The acquisition tests drive the [Obscura](https://github.com/h4ckf0r0day/obscura)
+headless browser over CDP. Obscura is not part of the application
+binary — it is a separate executable that the backend spawns as a
+sidecar process. For tests, the executable must be discoverable.
+
+The test harness resolves the Obscura binary in this order:
+
+1. The `OBSCURA_BIN` environment variable, if set
+2. `vendor/obscura` at the workspace root
+3. `obscura` on `PATH`
+
+The fallback to `vendor/obscura` is resolved from
+`env!("CARGO_MANIFEST_DIR")`, so it works regardless of the shell's
+current working directory. This is the recommended local-development
+setup.
+
+#### Download the release binary
+
+Download the archive for your platform from the Obscura
+[releases page](https://github.com/h4ckf0r0day/obscura/releases), then:
+
+```bash
+mkdir -p vendor
+cp path/to/extracted/obscura vendor/obscura
+chmod +x vendor/obscura
+```
+
+#### Build from source
+
+Building from source takes about five minutes on first build (V8 is
+compiled). The `render` feature is required if you want to test
+`Page.printToPDF` (the Phase 4 PDF evaluation will depend on it):
+
+```bash
+git clone https://github.com/h4ckf0r0day/obscura
+cd obscura
+cargo build --release -p obscura-cli --bins --features render
+mkdir -p /path/to/career-ops-rust/vendor
+cp target/release/obscura /path/to/career-ops-rust/vendor/obscura
+```
+
+#### Version requirements
+
+- **v0.2.5 or later.** Earlier versions have a CDP bug where
+  `TargetInfo` omits the `canAccessOpener` field, which strict CDP
+  clients (including `chromiumoxide`) reject. The symptom is a panic
+  reading `"Created target not present"` from `Browser::connect`.
+- **Built with `--features render`** if building from source, for
+  `Page.printToPDF` support.
+
+#### Override the path
+
+To use a different binary without moving it:
+
+```bash
+OBSCURA_BIN=/usr/local/bin/obscura cargo test -p career-ops-core --test obscura_spike
+```
+
+#### Repository policy
+
+`vendor/obscura` is a binary (~70 MB) and is not committed to the repository:
+
+- **Gitignore it.** Add `vendor/obscura` to `.gitignore` and rely on
+  this section for setup. Keeps the repo small; every contributor
+  downloads once.
+
+CI should use a download step rather than a committed binary, so that
+CI and developer machines run the same version and the repository
+stays portable. The binary is only needed for tests, not for the
+application itself — the production distribution model for Obscura is
+a Phase 6 concern.
 
 ### Individual test binaries
 
@@ -87,12 +166,16 @@ cargo test -p career-ops-core --test keystore_safety
 cargo test -p career-ops-core --test db_roundtrip
 
 # Backend traits — mock browser and PDF backends, including the
-# BackendUnsupported path that Obscura will use
+# BackendUnsupported path that Phase 2 leaves on ObscuraBrowserBackend
 cargo test -p career-ops-core --test backend_traits
 
 # Prompt seeding — first seed, idempotent re-seed, content-change
 # versioning, user-prompt collision
 cargo test -p career-ops-core --test prompts_seed
+
+# Obscura sidecar spike — CDP connection, post-JS DOM, printToPDF,
+# sidecar death detection. Requires the obscura binary.
+cargo test -p career-ops-core --test obscura_spike -- --nocapture
 
 # App state flow — full first-launch → unlock → ready lifecycle, plus
 # the recovery path for wrong passphrases
@@ -104,6 +187,14 @@ cargo test -p career-ops-app --test state_flow
 cargo test -p career-ops-app --test state_flow keychain
 ```
 
+The last command is a filtered run: `keychain` is a substring filter that
+matches only the tests whose names contain that word. The unfiltered
+`cargo test -p career-ops-app --test state_flow` runs the entire state-flow
+suite, which is what you want when working on the state machine generally.
+The filtered run is what you want when you are specifically touching the
+keychain failure paths, or when you want to reproduce exactly what the
+`keychain-failure-injection` CI job sees.
+
 ### Test notes
 
 - **The `state_flow.rs` tests serialize on a `tokio::sync::Mutex`.**
@@ -114,6 +205,10 @@ cargo test -p career-ops-app --test state_flow keychain
   persistent test backend in `crates/test-support/`. The built-in
   `keyring::mock` backend is entry-scoped and cannot support this test;
   the test-support crate exists to work around that limitation.
+- **The `obscura_spike` test requires the Obscura binary.** See
+  [Vendored Obscura binary](#vendored-obscura-binary-test-only). If
+  it fails with `No such file or directory`, the binary is not at
+  `vendor/obscura` and `OBSCURA_BIN` is not set.
 - **GPUI is compiled as part of `cargo test --workspace`.** The first
   run will be slow (several minutes). Subsequent runs use the cached
   build.
@@ -141,6 +236,12 @@ warning. Two recurring patterns are worth knowing:
   the `#[cfg]` block that needs it. An import at an outer scope that is
   only used by inner-scope code will be flagged.
 
+The keystore module carries an explicit
+`#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]`.
+`clippy::unwrap_used` and `clippy::expect_used` are restriction lints
+and are **not** enabled by `-D warnings` alone. This attribute is what
+makes the "no unwrap in keystore code" invariant real.
+
 ---
 
 ## Project layout
@@ -158,6 +259,12 @@ crates/
     migrations/
       0001_initial.sql  All eleven tables
     tests/        Integration tests (see Testing section)
+      backend_traits.rs
+      db_roundtrip.rs
+      keystore_safety.rs
+      obscura_spike.rs      Obscura sidecar spike (Week 1 Phase 2)
+      prompts_seed.rs
+      common/mod.rs         Shared test harness
     prompts/      System prompt .md files copied from the original repo
 
   app/            Binary + library. The library target exists so
@@ -167,13 +274,18 @@ crates/
       screens.rs  GPUI view placeholders
       lib.rs      Library entry point (pub mod state, pub mod screens)
       main.rs     Binary entry point
+    tests/
+      state_flow.rs
 
   test-support/   Shared test infrastructure
     src/lib.rs    Persistent in-memory keychain backend
 
+vendor/
+  obscura         Test-only headless browser binary (see Testing)
+
 docs/
   phase-1-retrospective.md    What happened during Phase 1
-  phase-2-acquisition.md      Phase 2 plan (when written)
+  phase-2-acquisition.md      Phase 2 plan
   decisions-addendum.md       Decisions made after the main plan was
                               written, superseding specific sections
 ```
@@ -263,6 +375,37 @@ keychain, locate the key file, export the encrypted database, and last
 resort reset. Try them in that order. The last-resort reset destroys the
 existing data; only use it after exporting the database and key file.
 
+### "`obscura_spike` fails with `No such file or directory`"
+
+The test could not find the Obscura binary. Either:
+
+- Place the binary at `vendor/obscura` (resolved relative to the
+  workspace root, independent of shell cwd), or
+- Set `OBSCURA_BIN` to an absolute path:
+
+```bash
+OBSCURA_BIN=/absolute/path/to/obscura cargo test -p career-ops-core --test obscura_spike
+```
+
+A relative path like `./vendor/obscura` will **not** work. Cargo runs
+test binaries with the working directory set to the crate's manifest
+directory (`crates/core/`), not the shell's cwd.
+
+### "`obscura_spike` panics with `Created target not present`"
+
+The Obscura binary is older than v0.2.5. This is the
+`canAccessOpener` CDP bug fixed in
+[PR #165](https://github.com/h4ckf0r0day/obscura/pull/165). Upgrade the
+binary; do not modify the Rust code.
+
+### "`obscura_spike` passes but `printToPDF` reports UNSUPPORTED"
+
+The Obscura binary was built without the `render` feature. Rebuild with:
+
+```bash
+cargo build --release -p obscura-cli --bins --features render
+```
+
 ---
 
 ## Contributing
@@ -297,6 +440,9 @@ change makes any of them fail, the change is wrong.
   `SELECT count(*) FROM sqlite_master` immediately after `PRAGMA key`; a
   wrong key fails this check and the pool is closed before any
   application-level query runs.
+- **No `unwrap()` in keystore code paths.** Enforced by the clippy
+  attribute in `keystore/mod.rs`. If a new keystore function needs to
+  unwrap, use `?` with a typed error instead.
 
 ### Where to make changes
 
@@ -309,6 +455,9 @@ change makes any of them fail, the change is wrong.
   edit to `0001_initial.sql`.
 - **UI** → `crates/app/src/screens.rs`. The state machine in `state.rs`
   is the load-bearing part; the views are replaceable.
+- **Browser backend** → the `ObscuraBrowserBackend` implementation in
+  `crates/core/src/backend/` (Phase 2). Changes here should be validated
+  by running `cargo test -p career-ops-core --test obscura_spike`.
 
 ---
 

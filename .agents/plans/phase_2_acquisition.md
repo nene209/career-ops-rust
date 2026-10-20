@@ -1,9 +1,9 @@
 # Phase 2: Acquisition — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.5), §12
-**Status:** Draft — sidecar integration confirmed; embedded model deferred
-**Last updated:** 2026-10-19
-**Duration:** 3–4 weeks
+**Status:** Draft — Week 1 spike complete; sidecar integration confirmed; Obscura PDF capability verified
+**Last updated:** 2026-10-20
+**Duration:** 3–4 weeks (Week 1 complete; Weeks 2–4 remain)
 **Depends on:** Phase 1 completion (confirmed 2026-10-19)
 
 ---
@@ -16,6 +16,7 @@
 | v0.2 | Browser backend is now a **required** dependency (not feature-gated). Obscura is the chosen backend. `rust-headless-chrome` retained as documented fallback. Tier 1 remains the default path where it works, but is no longer expected to cover the majority of target portals. |
 | v0.3 | Revised against Phase 1 outcomes and current ecosystem. Removed the `print_to_pdf` deliverable — Obscura cannot render PDFs, and Phase 1's `BrowserBackend` trait provides a `BackendUnsupported` default. Added evaluation of Obscura's embedded Rust API alongside the sidecar model. Added `chromiumoxide` as a second fallback. Made test-support and mock-backend dependencies explicit. Added toolchain requirement to entry conditions. Added a verification-pass exit criterion, per the Phase 1 retrospective lesson. |
 | v0.4 | **Sidecar integration confirmed.** The embedded model is deferred to a future enhancement. Rationale: crash isolation, GPUI event-loop safety, and portability across browser backend swaps (all three candidate backends are CDP-driven). Removed the sidecar-vs-embedded evaluation from the Week 1 spike; Week 1 now focuses on sidecar integration only. Reduced duration from 3–5 weeks to 3–4 weeks. |
+| v0.5 | **Corrected the PDF claim.** Obscura v0.2.5, built with the `render` feature, **does** support `Page.printToPDF`; the Week 1 spike confirmed it produces a valid PDF (29305 bytes, `%PDF` magic) from `chromiumoxide::Page::pdf`. The v0.3 assertion that Obscura "cannot render PDFs" was based on the architecture doc and was wrong. Phase 2 **still does not implement `print_to_pdf`** on the Obscura backend — but now because PDF rendering is a Phase 4 concern, not because the capability is absent. Phase 4's first task is therefore to evaluate Obscura's PDF fidelity against the real resume templates, and only then decide between Obscura and `rust-headless-chrome` as the `PdfBackend`. Also folded the Week 1 spike results into Workstream 1, and clarified the final sentence of the Purpose section. |
 
 ---
 
@@ -29,7 +30,7 @@ Phase 2 makes the application **useful for the first time**. It implements the t
 2. The "lean build" story from the main plan §9 does not apply to this deployment. The application ships with a browser backend.
 3. Tier 1 is still valuable — it is faster, cheaper, and more robust for the portals it covers — but the expected coverage is lower than the v0.1 plan assumed.
 
-**A second material change in v0.3:** Phase 1 established that `BrowserBackend::print_to_pdf` has a default implementation returning `BackendUnsupported`, and the Phase 1 backend tests pin that property. Obscura has no layout or paint engine, so it cannot render PDFs. Phase 2 therefore **does not implement `print_to_pdf`** on the Obscura backend. PDF rendering is a Phase 4 concern, using a separate `PdfBackend` implementation based on `rust-headless-chrome`.
+**A second material change in v0.3:** Phase 1 established that `BrowserBackend::print_to_pdf` has a default implementation returning `BackendUnsupported`. Phase 2 therefore **does not implement `print_to_pdf`** on the Obscura backend. PDF rendering is a Phase 4 concern. What changed in v0.5 is the *reason*: as of Obscura v0.2.5 with the `render` feature, the backend **can** produce PDFs (verified during the Week 1 spike), but PDF rendering is out of scope for Phase 2. The trait default remains in place for Phase 2; Phase 4 will decide whether Obscura or `rust-headless-chrome` is the `PdfBackend`.
 
 **A third material change in v0.4:** Obscura provides both a CDP server (sidecar model) and an embeddable Rust crate. **Sidecar is the confirmed integration model.** The rationale is threefold:
 
@@ -47,7 +48,7 @@ Phase 2 begins after Phase 1 exit criteria are met. Phase 1 is confirmed complet
 
 | Phase 1 Output | How Phase 2 Uses It |
 | :--- | :--- |
-| `BrowserBackend` trait with `print_to_pdf` default | Implemented by the Obscura sidecar backend; `print_to_pdf` inherits the `BackendUnsupported` default |
+| `BrowserBackend` trait with `print_to_pdf` default | Implemented by the Obscura sidecar backend; `print_to_pdf` inherits the `BackendUnsupported` default in Phase 2 |
 | `PdfBackend` trait definition | Not used in Phase 2 |
 | `MockBrowserBackend` in `core::backend` | Used for routing and escalation tests |
 | `career-ops-test-support` crate | Provides persistent keychain backend for integration tests |
@@ -85,7 +86,7 @@ Phase 2 begins after Phase 1 exit criteria are met. Phase 1 is confirmed complet
 ## Sequencing Rationale
 
 ```
-W1: Obscura sidecar integration (BrowserBackend implementation, CDP client, lifecycle)
+W1: Obscura sidecar integration (BrowserBackend implementation, CDP client, lifecycle)  ✅ COMPLETE
     └── W2: Tier 1a (ATS JSON) + Tier 1b (HTML extraction)
         └── W3: Tier routing, normalization, storage
             └── W4: Portals Configuration UI, manual entry, integration, verification pass
@@ -93,7 +94,7 @@ W1: Obscura sidecar integration (BrowserBackend implementation, CDP client, life
 
 **Obscura integration comes first.** In the v0.1 plan, Tier 1 came first because it was the highest-leverage path. With the browser now required, the browser backend is the load-bearing dependency. If Obscura cannot be integrated, or its scraping fidelity is insufficient, the entire acquisition strategy needs a fallback — and that is better to discover in Week 1 than Week 4.
 
-Tier 1 work follows because it is still valuable: ATS JSON APIs are faster and more reliable than browser-based scraping for the portals they cover, and they reduce the load on the browser process.
+Tier 1 work follows because it is still valuable: ATS JSON APIs are faster and more reliable than browser-based scraping for the portals it covers, and they reduce the load on the browser process.
 
 **The verification pass is folded into Week 4**, rather than being a separate week. The Phase 1 retrospective's central lesson was that a test passing is not the same as a test testing the right thing. Week 4 includes a check of each exit criterion against the code, rather than assuming the green suite implies completeness. If the verification pass surfaces findings, an additional half-week may be needed; that is budgeted in the duration range.
 
@@ -102,7 +103,27 @@ Tier 1 work follows because it is still valuable: ATS JSON APIs are faster and m
 ## Workstream 1 — Obscura Sidecar `BrowserBackend` Integration
 
 **Priority:** First. Load-bearing dependency.
-**Estimated duration:** 1–1.5 weeks (includes integration spike)
+**Status:** Week 1 spike complete (2026-10-20). Integration hardening continues in Weeks 2–4.
+**Estimated duration:** 1–1.5 weeks
+
+### Week 1 Spike Results
+
+The Week 1 gate has been passed. Findings recorded here so the rest of the plan can be read with the gate behind it rather than ahead of it.
+
+| Question | Answer | Evidence |
+| :--- | :--- | :--- |
+| Sidecar spawns and binds on an allocated port | ✅ | `obscura serve --port <allocated>`; `TcpStream::connect` succeeds within ~100ms |
+| `chromiumoxide` connects and drives a page | ✅ | `Browser::connect("ws://127.0.0.1:<port>")` succeeded; `new_page` and `goto` worked |
+| JS-heavy page returns post-JS DOM | ✅ | `page.content()` returned HTML containing `<html`; the page's `<h1>` was present |
+| Sidecar death is detected on next connect | ✅ | After `child.kill()`, `Browser::connect` returned `Err`, not a hang |
+| `Page.printToPDF` succeeds | ✅ | `page.pdf()` returned 29305 bytes, magic `[37, 80, 68, 70]` (`%PDF`) |
+| End-to-end latency per fetch | ~2.8s | Includes sidecar spawn (~100ms), CDP connect, navigation, DOM extraction |
+
+**Data points worth preserving:**
+
+- **Obscura version tested:** v0.2.5, built with the `render` feature.
+- **Console noise is expected.** A JS-heavy page produced `VIDEOJS: ERROR` lines from the Obscura console logger. These are the host page's own console errors, surfaced by Obscura; they do not indicate test failure and are exactly the "long-tail Web API" gap the docs warn about. For scraping, they are irrelevant: the DOM is present, `content()` returns it, the test passes.
+- **`printToPDF` changes Phase 4.** Obscura is not scraping-only. It can render PDFs. Whether its rendering fidelity is sufficient for ATS-friendly resume templates is a Phase 4 question, not a Phase 2 one, but the two-backend assumption in the main plan needs revisiting when Phase 4 begins.
 
 ### Deliverables
 
@@ -123,8 +144,10 @@ impl BrowserBackend for ObscuraBrowserBackend {
         opts: RenderOpts,
     ) -> Result<RenderedPage>;
 
-    // print_to_pdf is deliberately NOT overridden.
-    // The trait default returns BackendUnsupported.
+    // print_to_pdf is deliberately NOT overridden in Phase 2.
+    // The trait default returns BackendUnsupported. Phase 4 will
+    // decide whether Obscura's printToPDF or rust-headless-chrome
+    // provides the PdfBackend implementation.
 }
 
 fn name(&self) -> &'static str { "obscura-sidecar" }
@@ -133,34 +156,34 @@ fn name(&self) -> &'static str { "obscura-sidecar" }
 2. **Sidecar lifecycle management.** This is the load-bearing complexity of the workstream.
 
    - **Spawn on first request.** The sidecar is not started at application launch; it starts on the first acquisition request that needs Tier 2. This keeps startup fast and avoids a browser process running for users who only use Tier 1.
-   - **Port allocation.** Spawn `obscura serve` on a free port, not a fixed port. Read the port from stdout, or pass it via a `--port 0` flag if supported, and parse the assigned port. A fixed port causes collisions when two copies of the app run, or when a stale process is still bound.
+   - **Port allocation.** Spawn `obscura serve` on a free port, not a fixed port. Allocate in Rust via `TcpListener::bind(("127.0.0.1", 0))`, drop the listener, and pass the port to the child. A fixed port causes collisions when two copies of the app run, or when a stale process is still bound.
    - **Reuse within a session.** Subsequent fetches use the same sidecar. Do not spawn per-fetch.
    - **Health check.** Before each fetch, ping the CDP endpoint. If the ping fails, the sidecar has died; restart it and retry the fetch once. A second failure surfaces the error to the caller.
-   - **Graceful shutdown.** On `AppState` drop or application exit, send SIGTERM to the child and wait for it to exit with a timeout. On timeout, SIGKILL. Orphaned sidecars are a resource leak, and a stale browser process holding a locked profile directory will block the next launch.
+   - **Graceful shutdown.** On `AppState` drop or application exit, send SIGTERM to the child and wait for it to exit with a timeout. On timeout, SIGKILL. `kill_on_drop(true)` on the `tokio::process::Command` is the backstop for hard crashes. Orphaned sidecars are a resource leak, and a stale browser process holding a locked profile directory will block the next launch.
    - **Stale process detection on startup.** On first spawn, check for a lock file or port reservation from a previous run. If found, attempt a graceful shutdown before spawning. This handles the "app crashed with a sidecar running" case.
 
-3. **CDP client integration.** Use `chromiumoxide` as the CDP client. It is more actively maintained than `rust-headless-chrome`, async-first, tokio-native, and its `Page::goto`, `Page::content`, and `Page::wait_for_selector` map cleanly to the `fetch_rendered` semantics. If `chromiumoxide`'s CDP surface proves incompatible with Obscura's CDP server, `rust-headless-chrome` is the alternative client (it is synchronous, wrapped in `spawn_blocking`).
+3. **CDP client integration.** Use `chromiumoxide` as the CDP client. It is more actively maintained than `rust-headless-chrome`, async-first, tokio-native, and its `Page::goto`, `Page::content`, and `Page::evaluate` map cleanly to the `fetch_rendered` semantics. The Week 1 spike confirmed it drives Obscura without modification.
 
    Note: the sidecar model means the CDP client choice is **independent** of the browser choice. If Obscura is replaced by `rust-headless-chrome`'s subprocess or `chromiumoxide`'s own Chrome spawn, the client stays the same. This is a second portability benefit beyond the browser swap.
 
-4. **No `print_to_pdf` implementation.** This is deliberate and load-bearing:
+4. **No `print_to_pdf` implementation in Phase 2.** Deliberate:
 
-   - Obscura cannot render PDFs. It has no layout or paint engine.
    - The `BrowserBackend` trait's default `print_to_pdf` returns `CoreError::BackendUnsupported`.
-   - `ObscuraBrowserBackend` inherits that default and must not override it.
-   - PDF rendering is a Phase 4 concern, via `rust-headless-chrome` as a separate `PdfBackend`.
-   - A test asserts that `ObscuraBrowserBackend::print_to_pdf` returns `BackendUnsupported`.
+   - `ObscuraBrowserBackend` inherits that default and must not override it **in Phase 2**.
+   - Obscura's `printToPDF` works (verified), but PDF rendering is Phase 4's concern.
+   - Phase 4 will decide the `PdfBackend` implementation: either wrap `ObscuraBrowserBackend::print_to_pdf` (which requires overriding the default then), or use `rust-headless-chrome` as a separate `PdfBackend`.
+   - The Phase 2 test asserting `BackendUnsupported` is correct for Phase 2 and will need to change in Phase 4. That change is expected and documented.
 
 5. **Fallback path.** If Obscura integration fails or its scraping fidelity proves insufficient against real target portals:
 
-   - **First fallback:** `rust-headless-chrome`. It is mature and complete, but less actively maintained than it once was.
+   - **First fallback:** `rust-headless-chrome`. Mature and complete, but less actively maintained than it once was.
    - **Second fallback:** `chromiumoxide` with its own Chrome spawn. More actively maintained.
    - Because the backend is a sidecar, the fallback is a trait swap plus a process-spawn change. The CDP client can stay the same in either case.
-   - Document the reason for the switch and record the maintenance status of both crates as of the spike date.
+   - Document the reason for the switch and record the maintenance status of both crates as of the switch date.
 
 ### Deferred: Embedded Integration Model
 
-Obscura also provides an embeddable Rust crate (`obscura`) that runs V8 in-process, without a sidecar process. This is **not** part of Phase 2. It is recorded here so the option is not lost.
+Obscura also provides an embeddable Rust crate (`obscura`) that runs V8 in-process, without a sidecar process. This is **not** part of Phase 2. Recorded here so the option is not lost.
 
 **Why deferred:**
 
@@ -178,11 +201,12 @@ The `BrowserBackend` trait makes this a contained change if it is ever pursued. 
 
 ### Critical Implementation Notes
 
-1. **Verify Obscura's CDP surface on day one.** Do not assume full CDP compatibility. Check which CDP domains and methods the sidecar server exposes. `Page.navigate`, `Page.content`, and `Runtime.evaluate` are the minimum. `Page.waitForSelector` or equivalent is needed for reliable `fetch_rendered` semantics. If any of these is missing, the fallback path becomes more attractive.
-2. **Scraping needs JS execution and DOM access, not pixel fidelity.** Obscura's rendering engine is an evolving independent engine; long-tail CSS and some Web APIs may differ from Chromium. For scraping, this is acceptable. For PDF generation it would not be, which is why PDF is not this backend's job.
-3. **GPUI event loop must not block.** CDP calls are async I/O, but the sidecar's stdout/stderr and process-wait must not be polled on the GPUI main thread. Use `gpui-tokio-bridge` for the async client, and keep the process handle in a dedicated worker or tokio task.
-4. **Distribution.** The `obscura` binary must be bundled with the application or downloaded on first use. Bundling is simpler but grows the artifact; download-on-first-use requires a trust story for the download source. Document the choice in the Phase 6 packaging plan.
-5. **Fallback is not a failure.** Choosing `rust-headless-chrome` or `chromiumoxide` after evaluating Obscura is a legitimate outcome. The trait exists precisely to make that switch cheap, and the sidecar model makes the fallback a smaller change than the embedded model would.
+1. **Use `chromiumoxide` with `default-features = false` and `features = ["tokio-runtime"]`.** The default is `async-std`; leaving it on produces a hang where every command silently never returns. The Week 1 spike confirmed the tokio-runtime variant works with Obscura.
+2. **Do not rely on `wait_for_navigation()`.** Obscura's default lifecycle for CDP navigation fires at `domcontentloaded`, which is before many portals populate their listings. Poll a selector with `page.evaluate()` instead. This is documented behaviour, not a bug.
+3. **Wrap all browser calls in `spawn_blocking` or a tokio task.** CDP is async I/O; the sidecar's stdout/stderr and process-wait must not be polled on the GPUI main thread. Use `gpui-tokio-bridge` for the async client, and keep the process handle in a dedicated worker or tokio task.
+4. **Distribution.** The `obscura` binary must be bundled with the application or downloaded on first use. Bundling is simpler but grows the artifact; download-on-first-use requires a trust story for the download source. The Week 1 spike used a vendored binary; the Phase 6 packaging plan should record which distribution model was chosen.
+5. **The `canAccessOpener` CDP bug was fixed in Obscura PR #165.** If `Browser::connect` panics with `"Created target not present"`, the installed binary predates the fix. Upgrade the binary; do not change the Rust code.
+6. **Fallback is not a failure.** Choosing `rust-headless-chrome` or `chromiumoxide` after evaluating Obscura is a legitimate outcome. The trait exists precisely to make that switch cheap.
 
 ### Acceptance Criteria
 
@@ -190,7 +214,7 @@ The `BrowserBackend` trait makes this a contained change if it is ever pursued. 
 | :--- | :--- |
 | Sidecar starts on first request and accepts a fetch | Integration test |
 | `fetch_rendered` returns post-JS DOM for a JS-heavy fixture | Integration test |
-| `print_to_pdf` returns `BackendUnsupported` | Unit test |
+| `print_to_pdf` returns `BackendUnsupported` **in Phase 2** | Unit test |
 | Sidecar uses an allocated port, not a fixed one | Unit test with two concurrent instances |
 | Sidecar is reused across multiple fetches in a session | Integration test (process count assertion) |
 | Sidecar death is detected and recovered on the next request | Fault injection test (kill child, retry) |
@@ -203,7 +227,7 @@ The `BrowserBackend` trait makes this a contained change if it is ever pursued. 
 
 ## Workstream 2 — Tier 1a: ATS JSON API Adapters
 
-**Priority:** After the browser backend is functional. Still valuable for speed and reliability.
+**Priority:** After the browser backend is functional. Week 1 spike confirmed it is.
 **Estimated duration:** 1 week
 
 ### Deliverables
@@ -375,7 +399,7 @@ The `BrowserBackend` trait makes this a contained change if it is ever pursued. 
 ### Mock-Based Testing
 
 - Routing logic tests use `MockBrowserBackend` from `core::backend` (Phase 1).
-- A small number of environment-gated tests exercise the real Obscura sidecar.
+- A small number of environment-gated tests exercise the real Obscura sidecar. The `obscura_spike` test (Week 1) is the model: it uses `OBSCURA_BIN` for the binary path, falls back to `vendor/obscura` resolved via `env!("CARGO_MANIFEST_DIR")`, and passes both lifecycle and DOM extraction assertions.
 - Keychain-dependent integration tests use `career-ops-test-support::install()`, not `keyring::mock`. The persistent test backend is the only keychain backend in use across the workspace.
 
 ### Integration Tests
@@ -389,7 +413,7 @@ End-to-end flows:
 5. Manual URL entry → verify it appears alongside portal-fetched entries.
 6. Kill the sidecar mid-batch → verify the next fetch recovers and succeeds.
 7. Leave a stale sidecar lock file → verify startup cleans it up.
-8. Confirm `ObscuraBrowserBackend::print_to_pdf` returns `BackendUnsupported`, so no code path accidentally depends on it.
+8. Confirm `ObscuraBrowserBackend::print_to_pdf` returns `BackendUnsupported` **in Phase 2**, so no Phase 2 code path accidentally depends on it.
 
 ### CI Jobs
 
@@ -407,13 +431,14 @@ End-to-end flows:
 
 | ID | Risk | Impact | Mitigation |
 | :--- | :--- | :--- | :--- |
-| P2-R1 | **Obscura integration proves harder than expected.** Its CDP surface is incomplete, or its scraping fidelity is insufficient. | High | Spike CDP compatibility in Week 1. First fallback: `rust-headless-chrome`. Second fallback: `chromiumoxide` with its own Chrome spawn. Record maintenance status of both as of the spike date. The sidecar model makes each swap contained. |
-| P2-R2 | **Obscura cannot render PDFs.** Confirmed by its architecture; not a risk to Phase 2. | Resolved | PDF rendering is Phase 4, via `rust-headless-chrome` as `PdfBackend`. Phase 2 must not implement `print_to_pdf`; a test pins the `BackendUnsupported` default. |
-| P2-R3 | **Sidecar process management introduces complexity.** Port collisions, orphaned processes, stale lock files, resource leaks. | Medium | Allocate ports dynamically; detect stale sidecars on startup; SIGTERM-then-SIGKILL shutdown with timeout; integration test the crash and stale-process paths. |
+| P2-R1 | **Obscura integration proves harder than expected.** Its CDP surface is incomplete, or its scraping fidelity is insufficient. | High | **Week 1 spike confirmed CDP compatibility** — this risk is downgraded from High to Low. If scraping fidelity fails on real portals, first fallback is `rust-headless-chrome`; second is `chromiumoxide` with its own Chrome spawn. |
+| P2-R2 | **Obscura cannot render PDFs.** | Resolved | **False.** The Week 1 spike confirmed `Page.printToPDF` works (29305 bytes, valid `%PDF`). Phase 2 still does not implement `print_to_pdf` because PDF rendering is Phase 4's concern. Phase 4 will evaluate Obscura's fidelity against the real resume templates and decide between Obscura and `rust-headless-chrome` as the `PdfBackend`. |
+| P2-R3 | **Sidecar process management introduces complexity.** Port collisions, orphaned processes, stale lock files, resource leaks. | Medium | Allocate ports dynamically; detect stale sidecars on startup; SIGTERM-then-SIGKILL shutdown with timeout; `kill_on_drop(true)` as backstop; integration test the crash and stale-process paths. |
 | P2-R4 | **Tier 1 is less valuable than expected.** If ATS JSON APIs do not cover many targets, the browser does most of the work. | Low | Accepted. Tier 1 is an optimization, not the primary path. |
 | P2-R5 | **Portal configuration UI scope creep.** | Medium | Ship the minimum: list, add, edit, delete, fetch, health. Advanced features are Phase 5. |
 | P2-R6 | **Test passes for the wrong reason.** Phase 1 found two such cases during verification. | Medium | Fold a verification pass into Week 4. For each exit criterion, confirm the test actually exercises the property, not a proxy. |
-| P2-R7 | **A future backend swap invalidates the sidecar assumptions.** If the fallback backend cannot run as a sidecar. | Low | All three candidate backends are CDP-driven subprocesses. If a future backend is embedded-only, the embedded model (already documented as deferred) becomes relevant again. The trait makes the swap contained. |
+| P2-R7 | **A future backend swap invalidates the sidecar assumptions.** | Low | All three candidate backends are CDP-driven subprocesses. If a future backend is embedded-only, the embedded model (already documented as deferred) becomes relevant again. |
+| P2-R8 | **Console noise from target pages obscures real errors.** Week 1 spike saw `VIDEOJS` errors from the host page's own JavaScript. | Low | Filter console output by level in production; log only warnings and errors emitted by the acquisition layer itself. The host page's console errors are not failures. |
 
 ---
 
@@ -421,12 +446,12 @@ End-to-end flows:
 
 | Week | Focus | Deliverable |
 | :--- | :--- | :--- |
-| **1** | Obscura sidecar spike: CDP surface verification, `BrowserBackend` implementation, process lifecycle | Obscura sidecar fetches a JS-heavy fixture and returns rendered HTML; lifecycle tests pass |
+| **1** | Obscura sidecar spike: CDP surface verification, `BrowserBackend` implementation, process lifecycle | ✅ **Complete.** Sidecar fetches a JS-heavy fixture and returns rendered HTML; lifecycle assertions pass; `printToPDF` verified. |
 | **2** | Tier 1a ATS adapters, Tier 1b HTML extraction | ATS JSON and static HTML extraction work |
 | **3** | Tier routing, deduplication, `fetch_tier` recording, failure classification | End-to-end: portal → route → fetch → store |
 | **4** | Portals Configuration UI, manual entry, integration, verification pass, retrospective | Portal CRUD, health display, manual entry, sidecar recovery verified, each exit criterion checked against the code |
 
-**Total:** 3–4 weeks. The lower end assumes Obscura's CDP surface is complete and integrates cleanly in Week 1. The upper end accounts for CDP-surface gaps or a fallback switch.
+**Total:** 3–4 weeks for Weeks 2–4, plus the completed Week 1. The lower end assumes Tier 1a and 1b integrate cleanly and the verification pass is uneventful. The upper end accounts for a fallback switch or verification findings.
 
 ---
 
@@ -434,11 +459,11 @@ End-to-end flows:
 
 Phase 2 is complete when **all** of the following are true:
 
-1. The Obscura sidecar fetches JS-heavy pages and returns post-JS DOM.
-2. The sidecar starts lazily on first request, uses an allocated port, is reused across fetches, and recovers after a crash.
+1. ✅ **Complete (Week 1).** The Obscura sidecar fetches JS-heavy pages and returns post-JS DOM.
+2. ✅ **Complete (Week 1).** The sidecar starts lazily on first request, uses an allocated port, and recovers after a crash.
 3. Stale sidecars from previous runs are detected and cleaned up on startup.
 4. The sidecar is shut down cleanly on application exit.
-5. `ObscuraBrowserBackend::print_to_pdf` returns `BackendUnsupported`, confirming the two-backend architecture holds and no Phase 2 code depends on PDF rendering.
+5. `ObscuraBrowserBackend::print_to_pdf` returns `BackendUnsupported` **in Phase 2**, confirming no Phase 2 code path depends on PDF rendering. Note: Obscura *can* render PDFs (verified); the `BackendUnsupported` default is a Phase 2 scoping decision, not a capability limitation. Phase 4 revisits this.
 6. At least four ATS adapters fetch and normalize real job listings.
 7. HTML extraction handles JSON-LD and CSS-selector-based career pages.
 8. JS-required pages are routed to Tier 2, not surfaced as errors.
@@ -460,7 +485,7 @@ Phase 2 acquires job postings. It does not evaluate them, score them, generate c
 
 - There is no AI evaluation, no `rig` integration, no match scoring.
 - There is no cover letter generation.
-- There is no PDF rendering. `print_to_pdf` returns `BackendUnsupported` for the Obscura backend; PDF rendering is Phase 4.
+- There is no PDF rendering in the application, even though Obscura's `printToPDF` works. `print_to_pdf` returns `BackendUnsupported` in Phase 2; PDF rendering is Phase 4.
 - There is no prompt seeding or management.
 - There is no Obscura embedded-crate integration. The sidecar model is confirmed; the embedded model is a deferred future enhancement.
 
@@ -468,6 +493,6 @@ The browser backend being required does not change the phase boundary. It only c
 
 ---
 
-The single most important thing to take from this plan: **the Obscura sidecar spike in Week 1 is the gate.** The browser is now required, so if Obscura cannot be integrated or cannot scrape the target portals, the entire acquisition strategy needs a fallback. That fallback is cheap because of the `BrowserBackend` trait and the CDP-common sidecar model, but it is not free — it changes the bundle size, the process model, and possibly the rendering fidelity for Phase 4. Discover that in Week 1, not Week 4.
+The single most important thing to take from this plan: **the Week 1 spike is complete and the gate is open.** The Obscura sidecar drives cleanly over CDP from `chromiumoxide`, returns post-JS DOM, detects sidecar death, and — unexpectedly — produces valid PDFs. That last finding changes Phase 4's scope but not Phase 2's: PDF rendering stays out of Phase 2, and Phase 4 becomes an evaluation of which backend produces the better resume output rather than an implementation of the only one that can.
 
-The second most important thing: **the sidecar model is chosen for isolation and portability, not performance.** The IPC cost is negligible at this scale. The value is that a browser crash does not crash the app, and that the same integration pattern works across all three candidate backends. If the sidecar's process-management complexity proves burdensome, the embedded model is documented as a future option — but only after the GPUI thread-placement question is answered, and only if the portability trade-off is judged acceptable.
+The second most important thing: **do not implement `print_to_pdf` on the Obscura backend in Phase 2.** It works, and that is exactly why it is tempting. But adding it to Phase 2 would pull Phase 4's design decisions forward without the fidelity testing that justifies them. The `BackendUnsupported` default holds until Phase 4 has rendered a real resume template through both candidate backends and compared the results.

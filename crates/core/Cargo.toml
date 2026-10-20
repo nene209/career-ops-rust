@@ -48,6 +48,8 @@ keyring = { version = "3", optional = true, features = [
 
 [dev-dependencies]
 career-ops-test-support = { workspace = true }
+chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
+futures-util = "0.3.34"
 keyring = "3"
 tempfile = "3"
 tokio = { workspace = true, features = ["full"] }
