@@ -39,9 +39,7 @@ fn keychain() -> std::sync::MutexGuard<'static, Option<HashMap<(String, String),
 fn platform_failure() -> Error {
     // The concrete error type does not matter — only that it is a
     // PlatformFailure, which the keystore maps to KeychainUnavailable.
-    Error::PlatformFailure(
-        std::io::Error::other("injected test failure").into(),
-    )
+    Error::PlatformFailure(std::io::Error::other("injected test failure").into())
 }
 
 struct PersistentTestCredential {

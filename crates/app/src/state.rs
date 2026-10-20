@@ -195,7 +195,8 @@ mod tests {
         std::fs::write(
             dir.path().join(career_ops_core::keystore::WRAPPED_FILE),
             b"{}",
-        ).unwrap();
+        )
+        .unwrap();
         let state = AppState::bootstrap(dir.path().to_path_buf()).unwrap();
         assert!(matches!(state.current(), Screen::Recovery { .. }));
     }

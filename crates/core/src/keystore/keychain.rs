@@ -53,7 +53,7 @@ mod inner {
             .ok_or_else(|| CoreError::CorruptWrap("no keychain wrap present".into()))?;
 
         let entry = Entry::new(SERVICE, ACCOUNT_KEK).map_err(map_keyring_error)?;
-    
+
         let kek_b64 = match entry.get_password() {
             Ok(v) => v,
             Err(keyring::Error::NoEntry) => return Err(CoreError::KeychainNoEntry),
@@ -115,7 +115,7 @@ mod inner {
     fn unwrap_ciphertext(s: &str) -> Result<Vec<u8>> {
         unb64(s).map_err(|e| CoreError::Crypto(e.to_string()))
     }
-    
+
     /// Map a `keyring::Error` to a `CoreError`, prefixing platform
     /// failures with a stable marker.
     ///
