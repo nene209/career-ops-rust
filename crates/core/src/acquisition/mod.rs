@@ -17,3 +17,4 @@
 
 pub mod ats;
 pub mod html;
+pub mod http;
