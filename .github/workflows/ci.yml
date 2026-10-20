@@ -24,6 +24,63 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
 
+      # Obscura is only needed by the obscura_spike test. It is cached
+      # per (os, arch) because the binary is platform-specific.
+      - name: Cache Obscura binary
+        id: cache-obscura
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: obscura-${{ runner.os }}-${{ runner.arch }}-v0.2.5
+
+      - name: Download Obscura
+        if: steps.cache-obscura.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p vendor
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)     PATTERN="obscura-x86_64-linux*" ;;
+            Linux-ARM64)   PATTERN="obscura-aarch64-linux*" ;;
+            macOS-X64)     PATTERN="obscura-x86_64-macos*" ;;
+            macOS-ARM64)   PATTERN="obscura-aarch64-macos*" ;;
+            Windows-X64)   PATTERN="obscura-x86_64-windows*" ;;
+            *) echo "Unsupported runner: ${{ runner.os }}/${{ runner.arch }}" >&2; exit 1 ;;
+          esac
+          gh release download \
+            --repo h4ckf0r0day/obscura \
+            --pattern "$PATTERN" \
+            --dir /tmp/obscura-archive
+          ARCHIVE=$(find /tmp/obscura-archive -type f | head -n1)
+          case "$ARCHIVE" in
+            *.tar.gz|*.tgz) tar -xzf "$ARCHIVE" -C vendor ;;
+            *.zip)          unzip -o "$ARCHIVE" -d vendor ;;
+            *) echo "Unknown archive: $ARCHIVE" >&2; exit 1 ;;
+          esac
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Configure Obscura binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f vendor/obscura.exe ]; then
+            BIN="$(pwd)/vendor/obscura.exe"
+          elif [ -f vendor/obscura ]; then
+            chmod +x vendor/obscura
+            BIN="$(pwd)/vendor/obscura"
+          else
+            echo "::error::Obscura binary not found in vendor/"
+            ls -la vendor/ || true
+            exit 1
+          fi
+          if [ ! -s "$BIN" ]; then
+            echo "::error::Obscura binary is empty at $BIN"
+            exit 1
+          fi
+          echo "OBSCURA_BIN=$BIN" >> "$GITHUB_ENV"
+          echo "Obscura binary ready at $BIN"
+
       - name: Install Linux deps (libsecret, openssl)
         if: runner.os == 'Linux'
         run: |
@@ -37,6 +94,9 @@ jobs:
   # optional `keyring` dependency is not linked in. This is a compile-time
   # property, not a runtime one: it confirms the crate's code does not
   # accidentally depend on the keychain feature being present.
+  #
+  # Also needs Obscura, because `obscura_spike` is part of the
+  # career-ops-core test suite and does not depend on any feature flag.
   test-no-keychain-feature:
     name: test (no keychain feature, Linux)
     runs-on: ubuntu-latest
@@ -46,6 +106,58 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
+      - name: Cache Obscura binary
+        id: cache-obscura
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: obscura-${{ runner.os }}-${{ runner.arch }}-v0.2.5
+
+      - name: Download Obscura
+        if: steps.cache-obscura.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p vendor
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)     PATTERN="obscura-x86_64-linux*" ;;
+            Linux-ARM64)   PATTERN="obscura-aarch64-linux*" ;;
+            *) echo "Unsupported runner: ${{ runner.os }}/${{ runner.arch }}" >&2; exit 1 ;;
+          esac
+          gh release download \
+            --repo h4ckf0r0day/obscura \
+            --pattern "$PATTERN" \
+            --dir /tmp/obscura-archive
+          ARCHIVE=$(find /tmp/obscura-archive -type f | head -n1)
+          case "$ARCHIVE" in
+            *.tar.gz|*.tgz) tar -xzf "$ARCHIVE" -C vendor ;;
+            *.zip)          unzip -o "$ARCHIVE" -d vendor ;;
+            *) echo "Unknown archive: $ARCHIVE" >&2; exit 1 ;;
+          esac
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Configure Obscura binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f vendor/obscura.exe ]; then
+            BIN="$(pwd)/vendor/obscura.exe"
+          elif [ -f vendor/obscura ]; then
+            chmod +x vendor/obscura
+            BIN="$(pwd)/vendor/obscura"
+          else
+            echo "::error::Obscura binary not found in vendor/"
+            ls -la vendor/ || true
+            exit 1
+          fi
+          if [ ! -s "$BIN" ]; then
+            echo "::error::Obscura binary is empty at $BIN"
+            exit 1
+          fi
+          echo "OBSCURA_BIN=$BIN" >> "$GITHUB_ENV"
+          echo "Obscura binary ready at $BIN"
 
       - name: cargo test without keychain feature
         run: cargo test -p career-ops-core --no-default-features
