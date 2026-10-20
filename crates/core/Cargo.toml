@@ -24,7 +24,10 @@ async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
+html-escape = "0.2"        # Greenhouse content unescaping
 rand = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+scraper = "0.22"           # HTML parsing
 sha2 = "0.10"
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }

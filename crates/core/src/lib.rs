@@ -5,6 +5,7 @@
 //!
 //! It has no GPUI dependency and is testable headlessly.
 
+pub mod acquisition;
 pub mod backend;
 pub mod db;
 pub mod error;
