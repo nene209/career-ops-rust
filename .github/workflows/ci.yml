@@ -8,9 +8,7 @@ on:
   workflow_dispatch:
 
 # Cache saves are restricted to main and dev. Pull requests and any
-# other branches (if the trigger is later widened) restore from cache
-# but do not write new entries. This keeps the cache namespace small
-# and avoids cache churn from transient branches.
+# other branches restore from cache but do not write new entries.
 jobs:
   test:
     name: test (${{ matrix.os }})
@@ -35,7 +33,11 @@ jobs:
       - name: cargo test (keychain feature enabled)
         run: cargo test --workspace --features career-ops-app/keychain
 
-  test-no-secret-service:
+  # Verifies that career-ops-core compiles and its tests pass when the
+  # optional `keyring` dependency is not linked in. This is a compile-time
+  # property, not a runtime one: it confirms the crate's code does not
+  # accidentally depend on the keychain feature being present.
+  test-no-keychain-feature:
     name: test (no keychain feature, Linux)
     runs-on: ubuntu-latest
     steps:
@@ -45,14 +47,42 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
 
-      # Note: this job verifies that career-ops-core compiles and its
-      # tests pass when the `keychain` feature is not enabled. It does
-      # not simulate an unavailable OS keychain — the tests use
-      # career-ops-test-support::install(), which is a process-local
-      # in-memory backend and does not require a real keychain.
       - name: cargo test without keychain feature
         run: cargo test -p career-ops-core --no-default-features
 
+  # Verifies the application's runtime behavior when the OS keychain is
+  # present but broken. Uses career-ops-test-support's failure injection
+  # to make the test keychain return PlatformFailure on read, which is
+  # the same error a locked keychain or a missing Secret Service daemon
+  # produces. The tests then verify that:
+  #   - The state machine transitions to KeychainUnavailable, not Ready.
+  #   - The passphrase fallback still reaches Ready.
+  #   - A transient failure recovers on retry.
+  #
+  # This is distinct from `test-no-keychain-feature`, which tests the
+  # compile-time absence of the feature. This job tests runtime failure.
+  keychain-failure-injection:
+    name: keychain failure injection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev pkg-config libssl-dev
+
+      - name: Run failure-injection tests
+        run: cargo test -p career-ops-app --test state_flow keychain
+
+  # Verifies that the real platform keychain round-trips a value. This
+  # is the only job that exercises the actual OS keychain, and it would
+  # fail if the `keyring` crate were built without the platform backends
+  # enabled (which causes every read to silently return NoEntry).
   keychain-sentinel:
     name: keychain sentinel round-trip (${{ matrix.os }})
     strategy:

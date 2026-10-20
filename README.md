@@ -71,8 +71,7 @@ cargo test -p career-ops-core --no-default-features
 
 This exercises the `keychain` stubs. It confirms that the codebase
 compiles and the tests that do not touch the keychain still pass in a
-build without a keychain backend. This is what runs in the Linux
-headless CI job.
+build without a keychain backend. This is what runs in the `test-no-keychain-feature` CI job.
 
 ### Individual test binaries
 
@@ -98,6 +97,11 @@ cargo test -p career-ops-core --test prompts_seed
 # App state flow — full first-launch → unlock → ready lifecycle, plus
 # the recovery path for wrong passphrases
 cargo test -p career-ops-app --test state_flow
+
+# Keychain failure injection — only the tests that exercise a broken
+# platform keychain. This is the filter used by the
+# `keychain-failure-injection` CI job.
+cargo test -p career-ops-app --test state_flow keychain
 ```
 
 ### Test notes
