@@ -2,14 +2,15 @@ name: ci
 
 on:
   push:
-    branches: 
-      - main
-      - dev
+    branches: [main, dev]
   pull_request:
-    branches:
-      - main
-      - dev
+    branches: [main, dev]
+  workflow_dispatch:
 
+# Cache saves are restricted to main and dev. Pull requests and any
+# other branches (if the trigger is later widened) restore from cache
+# but do not write new entries. This keeps the cache namespace small
+# and avoids cache churn from transient branches.
 jobs:
   test:
     name: test (${{ matrix.os }})
@@ -21,6 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
 
       - name: Install Linux deps (libsecret, openssl)
         if: runner.os == 'Linux'
@@ -32,16 +36,25 @@ jobs:
         run: cargo test --workspace --features career-ops-app/keychain
 
   test-no-secret-service:
-    name: test (no secret service, Linux)
+    name: test (no keychain feature, Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
+      # Note: this job verifies that career-ops-core compiles and its
+      # tests pass when the `keychain` feature is not enabled. It does
+      # not simulate an unavailable OS keychain — the tests use
+      # career-ops-test-support::install(), which is a process-local
+      # in-memory backend and does not require a real keychain.
       - name: cargo test without keychain feature
-        run: cargo test -p career-ops-core --no-default-features --test prompts_seed
+        run: cargo test -p career-ops-core --no-default-features
 
   keychain-sentinel:
-    name: keychain sentinel round-trip
+    name: keychain sentinel round-trip (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -50,6 +63,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
 
       - name: Install Linux deps
         if: runner.os == 'Linux'
@@ -66,7 +82,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p career-ops-core --features keychain initialize_refuses_when_wrapped_file_exists
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
+      - name: Run never-reinitialize test
+        run: cargo test -p career-ops-core --features keychain initialize_refuses_when_wrapped_file_exists
 
   fmt-clippy:
     name: fmt + clippy
@@ -76,5 +97,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
