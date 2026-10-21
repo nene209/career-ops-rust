@@ -1,9 +1,10 @@
+// crates/core/src/acquisition/ats/greenhouse.rs
+
 //! Greenhouse ATS adapter.
 //!
 //! Endpoint: `https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true`
 //!
-//! Greenhouse is the simplest of the four adapters: one request, no
-//! pagination. Two things matter:
+//! Two things matter:
 //!
 //! 1. `?content=true` returns descriptions in the same call. Without it,
 //!    each job would require a separate request.
@@ -16,7 +17,8 @@ use serde::Deserialize;
 use url::Url;
 
 use super::{parse_iso8601, AtsAdapter, NormalizedJob};
-use crate::error::{CoreError, Result};
+use crate::acquisition::error::{AtsError, AtsResult};
+use crate::acquisition::http;
 
 pub struct GreenhouseAdapter;
 
@@ -47,21 +49,15 @@ struct Department {
 }
 
 /// Parse a Greenhouse response body into normalized jobs.
-///
-/// Pure function: takes the raw JSON text and returns parsed jobs.
-/// Kept separate from `fetch_jobs` so the parsing logic — where all the
-/// format-specific quirks live — can be tested without HTTP.
-pub fn parse(body: &str, company_name: &str) -> Result<Vec<NormalizedJob>> {
-    let response: Response = serde_json::from_str(body)
-        .map_err(|_| CoreError::Internal("greenhouse json decode failed"))?;
+pub fn parse(body: &str, company_name: &str) -> AtsResult<Vec<NormalizedJob>> {
+    let response: Response =
+        serde_json::from_str(body).map_err(|e| AtsError::Parse(format!("greenhouse json: {e}")))?;
 
     response
         .jobs
         .into_iter()
-        .map(|j| -> Result<NormalizedJob> {
-            // Unescape the double-encoded content. `content` is Some when
-            // `?content=true` was in the request; we always request it, so
-            // this is Some in practice.
+        .map(|j| -> Result<NormalizedJob, AtsError> {
+            // Unescape the double-encoded content.
             let raw_text = j
                 .content
                 .map(|c| html_escape::decode_html_entities(&c).into_owned())
@@ -79,7 +75,7 @@ pub fn parse(body: &str, company_name: &str) -> Result<Vec<NormalizedJob>> {
                 employment_type: None,
                 workplace_type: None,
                 source_url: Url::parse(&j.absolute_url)
-                    .map_err(|_| CoreError::Internal("greenhouse bad url"))?,
+                    .map_err(|e| AtsError::Parse(format!("greenhouse url: {e}")))?,
                 raw_text,
                 posted_at: parse_iso8601(&j.updated_at),
             })
@@ -105,19 +101,21 @@ impl AtsAdapter for GreenhouseAdapter {
         client: &reqwest::Client,
         slug: &str,
         company_name: &str,
-    ) -> Result<Vec<NormalizedJob>> {
+    ) -> AtsResult<Vec<NormalizedJob>> {
         let url = format!("https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true");
-        let resp = client
-            .get(&url)
-            .send()
+        let resp = http::get_with_retry(client, &url)
             .await
-            .map_err(|_| CoreError::Internal("greenhouse request failed"))?
-            .error_for_status()
-            .map_err(|_| CoreError::Internal("greenhouse non-2xx"))?;
+            .map_err(|e| AtsError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(AtsError::from_status(resp.status()));
+        }
+
         let body = resp
             .text()
             .await
-            .map_err(|_| CoreError::Internal("greenhouse body read"))?;
+            .map_err(|e| AtsError::Transport(e.to_string()))?;
+
         parse(&body, company_name)
     }
 }

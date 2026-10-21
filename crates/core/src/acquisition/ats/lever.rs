@@ -1,3 +1,5 @@
+// crates/core/src/acquisition/ats/lever.rs
+
 //! Lever ATS adapter.
 //!
 //! Endpoint: `https://api.lever.co/v0/postings/{slug}?mode=json`
@@ -17,7 +19,8 @@ use serde::Deserialize;
 use url::Url;
 
 use super::{AtsAdapter, NormalizedJob};
-use crate::error::{CoreError, Result};
+use crate::acquisition::error::{AtsError, AtsResult};
+use crate::acquisition::http;
 
 pub struct LeverAdapter;
 
@@ -42,16 +45,14 @@ struct Categories {
 
 /// Parse a Lever response body into normalized jobs.
 ///
-/// Lever returns a bare JSON array, not a wrapper object. This is why
-/// `serde_json::from_str::<Vec<Posting>>` is used directly, rather than
-/// a `Response { postings: [...] }` struct.
-pub fn parse(body: &str, company_name: &str) -> Result<Vec<NormalizedJob>> {
+/// Lever returns a bare JSON array, not a wrapper object.
+pub fn parse(body: &str, company_name: &str) -> AtsResult<Vec<NormalizedJob>> {
     let postings: Vec<Posting> =
-        serde_json::from_str(body).map_err(|_| CoreError::Internal("lever json decode failed"))?;
+        serde_json::from_str(body).map_err(|e| AtsError::Parse(format!("lever json: {e}")))?;
 
     postings
         .into_iter()
-        .map(|p| -> Result<NormalizedJob> {
+        .map(|p| -> Result<NormalizedJob, AtsError> {
             Ok(NormalizedJob {
                 external_id: p.id,
                 title: p.text,
@@ -61,7 +62,7 @@ pub fn parse(body: &str, company_name: &str) -> Result<Vec<NormalizedJob>> {
                 employment_type: p.categories.as_ref().and_then(|c| c.commitment.clone()),
                 workplace_type: p.workplace_type,
                 source_url: Url::parse(&p.hosted_url)
-                    .map_err(|_| CoreError::Internal("lever bad url"))?,
+                    .map_err(|e| AtsError::Parse(format!("lever url: {e}")))?,
                 raw_text: p.description_plain.unwrap_or_default(),
                 // epoch milliseconds, not seconds.
                 posted_at: chrono::DateTime::from_timestamp_millis(p.created_at),
@@ -88,36 +89,28 @@ impl AtsAdapter for LeverAdapter {
         client: &reqwest::Client,
         slug: &str,
         company_name: &str,
-    ) -> Result<Vec<NormalizedJob>> {
+    ) -> AtsResult<Vec<NormalizedJob>> {
         let us = format!("https://api.lever.co/v0/postings/{slug}?mode=json");
-        let mut resp = client
-            .get(&us)
-            .send()
+        let mut resp = http::get_with_retry(client, &us)
             .await
-            .map_err(|_| CoreError::Internal("lever request failed"))?;
+            .map_err(|e| AtsError::Transport(e.to_string()))?;
 
         // EU-hosted boards 404 on the US host. Retry once against EU.
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             let eu = format!("https://api.eu.lever.co/v0/postings/{slug}?mode=json");
-            resp = client
-                .get(&eu)
-                .send()
+            resp = http::get_with_retry(client, &eu)
                 .await
-                .map_err(|_| CoreError::Internal("lever eu request failed"))?;
+                .map_err(|e| AtsError::Transport(e.to_string()))?;
         }
 
-        let resp = resp
-            .error_for_status()
-            .map_err(|_| CoreError::Internal("lever non-2xx"))?;
+        if !resp.status().is_success() {
+            return Err(AtsError::from_status(resp.status()));
+        }
+
         let body = resp
             .text()
             .await
-            .map_err(|_| CoreError::Internal("lever body read"))?;
+            .map_err(|e| AtsError::Transport(e.to_string()))?;
         parse(&body, company_name)
     }
 }
-
-// `parse_iso8601` from the parent module is not used in this file — Lever
-// timestamps are epoch millis, handled by `from_timestamp_millis`. The
-// import above is kept for symmetry; if clippy warns about an unused
-// import, remove `parse_iso8601` from the `use super::` line.

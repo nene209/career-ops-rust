@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use url::Url;
 
-use crate::error::Result;
+use super::error::AtsResult;
 
 #[derive(Debug, Clone)]
 pub struct NormalizedJob {
@@ -21,11 +21,11 @@ pub struct NormalizedJob {
 
 #[async_trait]
 pub trait AtsAdapter: Send + Sync {
-    /// Human-readable name for fetch_tier recording: "greenhouse", "lever", etc.
+    /// Human-readable name for fetch_tier recording: "greenhouse", etc.
     fn name(&self) -> &'static str;
 
     /// Given a careers-page URL, return the board slug if this adapter
-    /// recognises the host. Returns None otherwise.
+    /// recognises the host.
     fn detect(&self, url: &Url) -> Option<String>;
 
     /// Fetch all jobs for a board slug.
@@ -34,7 +34,7 @@ pub trait AtsAdapter: Send + Sync {
         client: &reqwest::Client,
         slug: &str,
         company_name: &str,
-    ) -> Result<Vec<NormalizedJob>>;
+    ) -> AtsResult<Vec<NormalizedJob>>;
 }
 
 /// The registry of known adapters. Order matters: the first match wins.

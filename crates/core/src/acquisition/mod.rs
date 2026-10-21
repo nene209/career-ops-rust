@@ -16,5 +16,7 @@
 //! Week 2 deliverable. It lands in Week 3.
 
 pub mod ats;
+pub mod error;
 pub mod html;
 pub mod http;
+pub mod router;

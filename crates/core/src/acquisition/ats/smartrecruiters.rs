@@ -1,3 +1,5 @@
+// crates/core/src/acquisition/ats/smartrecruiters.rs
+
 //! SmartRecruiters ATS adapter.
 //!
 //! Endpoint: `https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=N&offset=M`
@@ -8,20 +10,21 @@
 //! dedup, a 210-posting board published in two languages lands as 420
 //! rows, all duplicating the same job.
 //!
+//! ## Empty boards vs. wrong slugs
+//!
+//! An unrecognised company slug returns **200 with an empty `content`
+//! array**, not a 404. The adapter cannot distinguish "this company has
+//! no open postings" from "this company slug does not exist" from the
+//! response alone. The Portals UI health drill-down should present
+//! "0 jobs — check the slug" rather than "fetch succeeded" when a
+//! SmartRecruiters board returns empty.
+//!
 //! The parsing logic is split into three pure functions so each piece
 //! can be tested in isolation:
 //!
 //! - `parse_page` — one JSON page → `Page` struct
 //! - `dedupe_by_ref` — group by `refNumber`, prefer the English copy
 //! - `normalize` — one `Posting` → `NormalizedJob`
-//! ## Empty boards vs. wrong slugs
-//!
-//! An unrecognised company slug returns **200 with an empty `content`
-//! array**, not a 404. The adapter cannot distinguish "this company has
-//! no open postings" from "this company slug does not exist" from the
-//! response alone. The Week 4 Portals UI health drill-down should
-//! present "0 jobs — check the slug" rather than "fetch succeeded" when
-//! a SmartRecruiters board returns empty.
 
 use std::collections::HashMap;
 
@@ -30,7 +33,8 @@ use serde::Deserialize;
 use url::Url;
 
 use super::{parse_iso8601, AtsAdapter, NormalizedJob};
-use crate::error::{CoreError, Result};
+use crate::acquisition::error::{AtsError, AtsResult};
+use crate::acquisition::http;
 
 pub struct SmartRecruitersAdapter;
 
@@ -68,9 +72,8 @@ pub struct Location {
 }
 
 /// Parse one page of SmartRecruiters JSON.
-pub fn parse_page(body: &str) -> Result<Page> {
-    serde_json::from_str(body)
-        .map_err(|_| CoreError::Internal("smartrecruiters json decode failed"))
+pub fn parse_page(body: &str) -> AtsResult<Page> {
+    serde_json::from_str(body).map_err(|e| AtsError::Parse(format!("smartrecruiters json: {e}")))
 }
 
 /// Group postings by `refNumber` and prefer the English copy.
@@ -117,7 +120,7 @@ pub fn dedupe_by_ref(postings: Vec<Posting>) -> Vec<Posting> {
 /// adapters. `raw_text` is left empty: SmartRecruiters list responses
 /// omit descriptions, and fetching them would require one request per
 /// job. The router decides whether to fetch descriptions lazily.
-pub fn normalize(p: Posting, company_name: &str, slug: &str) -> Result<NormalizedJob> {
+pub fn normalize(p: Posting, company_name: &str, slug: &str) -> AtsResult<NormalizedJob> {
     let location = p.location.and_then(|l| match (l.city, l.country) {
         (Some(c), Some(k)) => Some(format!("{c}, {k}")),
         (Some(c), None) => Some(c),
@@ -136,7 +139,7 @@ pub fn normalize(p: Posting, company_name: &str, slug: &str) -> Result<Normalize
         employment_type: None,
         workplace_type: None,
         source_url: Url::parse(&format!("https://jobs.smartrecruiters.com/{slug}"))
-            .map_err(|_| CoreError::Internal("smartrecruiters bad url"))?,
+            .map_err(|e| AtsError::Parse(format!("smartrecruiters url: {e}")))?,
         raw_text: String::new(),
         posted_at: p.released_date.as_deref().and_then(parse_iso8601),
     })
@@ -161,7 +164,7 @@ impl AtsAdapter for SmartRecruitersAdapter {
         client: &reqwest::Client,
         slug: &str,
         company_name: &str,
-    ) -> Result<Vec<NormalizedJob>> {
+    ) -> AtsResult<Vec<NormalizedJob>> {
         let mut all: Vec<Posting> = Vec::new();
         let mut offset = 0usize;
         let mut total = usize::MAX;
@@ -170,16 +173,18 @@ impl AtsAdapter for SmartRecruitersAdapter {
             let url = format!(
                 "https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit={PAGE_SIZE}&offset={offset}"
             );
-            let page: Page = client
-                .get(&url)
-                .send()
+            let resp = http::get_with_retry(client, &url)
                 .await
-                .map_err(|_| CoreError::Internal("smartrecruiters request failed"))?
-                .error_for_status()
-                .map_err(|_| CoreError::Internal("smartrecruiters non-2xx"))?
+                .map_err(|e| AtsError::Transport(e.to_string()))?;
+
+            if !resp.status().is_success() {
+                return Err(AtsError::from_status(resp.status()));
+            }
+
+            let page: Page = resp
                 .json()
                 .await
-                .map_err(|_| CoreError::Internal("smartrecruiters json decode failed"))?;
+                .map_err(|e| AtsError::Parse(format!("smartrecruiters json: {e}")))?;
 
             total = page.total_found;
 

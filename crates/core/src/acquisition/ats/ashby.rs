@@ -1,3 +1,5 @@
+// crates/core/src/acquisition/ats/ashby.rs
+
 //! Ashby ATS adapter.
 //!
 //! Endpoint: `https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true`
@@ -11,7 +13,8 @@ use serde::Deserialize;
 use url::Url;
 
 use super::{parse_iso8601, AtsAdapter, NormalizedJob};
-use crate::error::{CoreError, Result};
+use crate::acquisition::error::{AtsError, AtsResult};
+use crate::acquisition::http;
 
 pub struct AshbyAdapter;
 
@@ -45,16 +48,15 @@ struct Job {
 /// Parse an Ashby response body into normalized jobs.
 ///
 /// Ashby list responses do not carry a stable job ID field, so the
-/// external ID is derived from the URL's final path segment. URLs are
-/// stable per posting, so this is a reliable identifier.
-pub fn parse(body: &str, company_name: &str) -> Result<Vec<NormalizedJob>> {
+/// external ID is derived from the URL's final path segment.
+pub fn parse(body: &str, company_name: &str) -> AtsResult<Vec<NormalizedJob>> {
     let response: Response =
-        serde_json::from_str(body).map_err(|_| CoreError::Internal("ashby json decode failed"))?;
+        serde_json::from_str(body).map_err(|e| AtsError::Parse(format!("ashby json: {e}")))?;
 
     response
         .jobs
         .into_iter()
-        .map(|j| -> Result<NormalizedJob> {
+        .map(|j| -> Result<NormalizedJob, AtsError> {
             let external_id = j.job_url.rsplit('/').next().unwrap_or(&j.title).to_string();
 
             Ok(NormalizedJob {
@@ -69,7 +71,7 @@ pub fn parse(body: &str, company_name: &str) -> Result<Vec<NormalizedJob>> {
                 // Trust workplaceType over isRemote.
                 workplace_type: j.workplace_type,
                 source_url: Url::parse(&j.job_url)
-                    .map_err(|_| CoreError::Internal("ashby bad url"))?,
+                    .map_err(|e| AtsError::Parse(format!("ashby url: {e}")))?,
                 raw_text: j.description_plain.unwrap_or_default(),
                 posted_at: j.published_at.as_deref().and_then(parse_iso8601),
             })
@@ -95,21 +97,22 @@ impl AtsAdapter for AshbyAdapter {
         client: &reqwest::Client,
         slug: &str,
         company_name: &str,
-    ) -> Result<Vec<NormalizedJob>> {
+    ) -> AtsResult<Vec<NormalizedJob>> {
         let url = format!(
             "https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true"
         );
-        let resp = client
-            .get(&url)
-            .send()
+        let resp = http::get_with_retry(client, &url)
             .await
-            .map_err(|_| CoreError::Internal("ashby request failed"))?
-            .error_for_status()
-            .map_err(|_| CoreError::Internal("ashby non-2xx"))?;
+            .map_err(|e| AtsError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(AtsError::from_status(resp.status()));
+        }
+
         let body = resp
             .text()
             .await
-            .map_err(|_| CoreError::Internal("ashby body read"))?;
+            .map_err(|e| AtsError::Transport(e.to_string()))?;
         parse(&body, company_name)
     }
 }

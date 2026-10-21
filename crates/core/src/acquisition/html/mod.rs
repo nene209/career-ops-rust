@@ -1,61 +1,91 @@
 // crates/core/src/acquisition/html/mod.rs
 
+//! Static HTML extraction for career pages that are not on a recognized ATS.
+
 use reqwest::Client;
 use scraper::{Html, Selector};
 use url::Url;
 
 use self::selectors::SelectorConfig;
 use super::ats::NormalizedJob;
-use crate::error::{CoreError, Result};
+use super::error::{AtsError, AtsResult};
+use super::http;
 
+/// Fetch a URL and extract jobs from its static HTML.
+///
+/// The extraction chain is:
+///
+/// 1. Fetch via `http::get_with_retry`. Transport failures become
+///    `AtsError::Transport`.
+/// 2. Reject non-2xx status, classified via `AtsError::from_status`
+///    so a 403 becomes `Blocked` and a 5xx becomes `Blocked`.
+/// 3. Detect JS-required. A page with an SPA shell and no job-like
+///    links becomes `AtsError::Unsupported("js_required")`, which the
+///    router escalates.
+/// 4. Try JSON-LD `JobPosting`, then CSS selectors from the portal
+///    config.
+///
+/// The `scraper_config` argument is already-parsed. The router parses
+/// `portals.scraper_config` once and passes the result through, so this
+/// function does not see raw JSON.
 pub async fn fetch_static_jobs(
     client: &Client,
     url: &Url,
     company_name: &str,
-    scraper_config: Option<&serde_json::Value>,
-) -> Result<Vec<NormalizedJob>> {
-    let resp = client
-        .get(url.clone())
-        .send()
+    scraper_config: Option<&SelectorConfig>,
+) -> AtsResult<Vec<NormalizedJob>> {
+    let resp = http::get_with_retry(client, url.as_str())
         .await
-        .map_err(|_| CoreError::Internal("html request failed"))?;
+        .map_err(|e| AtsError::Transport(e.to_string()))?;
 
-    let status = resp.status();
+    // Reject non-2xx before the JS-required check. A 500 with an SPA
+    // shell is a server problem, not a JS-required page, and escalating
+    // it to Tier 2 would just fail again.
+    if !resp.status().is_success() {
+        return Err(AtsError::from_status(resp.status()));
+    }
+
     let body = resp
         .text()
         .await
-        .map_err(|_| CoreError::Internal("html body read failed"))?;
+        .map_err(|e| AtsError::Transport(e.to_string()))?;
 
-    if !status.is_success() {
-        return Err(CoreError::Internal("html non-2xx"));
-    }
-
-    // Detect JS-required only on a successful response. A 500 with an
-    // SPA shell is a server problem, not a JS-required page, and
-    // escalating it to Tier 2 would just fail again.
     if is_js_required(&body) {
-        return Err(CoreError::BackendUnsupported("js_required"));
+        return Err(AtsError::Unsupported("js_required"));
     }
 
-    // Primary path: JSON-LD JobPosting.
-    if let Some(jobs) = jsonld::extract(&body, url, company_name) {
+    extract_from_html(&body, url, company_name, scraper_config)
+}
+
+/// Run the extraction chain on an HTML string.
+///
+/// This is the same logic the static-fetch path uses, minus the HTTP and
+/// JS-required check. It exists as a separate public function so Tier 2
+/// (which has already rendered the page and therefore cannot be
+/// JS-required) can reuse the extraction without a fetch wrapper.
+pub fn extract_from_html(
+    html: &str,
+    url: &Url,
+    company_name: &str,
+    scraper_config: Option<&SelectorConfig>,
+) -> AtsResult<Vec<NormalizedJob>> {
+    if let Some(jobs) = jsonld::extract(html, url, company_name) {
         if !jobs.is_empty() {
             return Ok(jobs);
         }
     }
 
-    // Fallback: CSS selectors from portal config.
-    if let Some(config_value) = scraper_config {
-        let config: SelectorConfig = serde_json::from_value(config_value.clone())
-            .map_err(|_| CoreError::Internal("scraper_config is not a valid SelectorConfig"))?;
-        if let Some(jobs) = selectors::extract(&body, url, company_name, &config) {
+    if let Some(config) = scraper_config {
+        if let Some(jobs) = selectors::extract(html, url, company_name, config) {
             if !jobs.is_empty() {
                 return Ok(jobs);
             }
         }
     }
 
-    Ok(Vec::new())
+    Err(AtsError::Parse(
+        "no jobs found in HTML (neither JSON-LD nor selectors matched)".into(),
+    ))
 }
 
 /// Heuristic: a page that returns a shell with a known SPA root and no
