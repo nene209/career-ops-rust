@@ -78,6 +78,12 @@ jobs:
             echo "::error::Obscura binary is empty at $BIN"
             exit 1
           fi
+          # Git Bash on Windows returns POSIX paths like /d/a/repo/repo
+          # from $(pwd). Bash can use them; Rust's Command::new cannot.
+          # cygpath -w converts to a native path like D:\a\repo\repo.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN="$(cygpath -w "$BIN")"
+          fi
           echo "OBSCURA_BIN=$BIN" >> "$GITHUB_ENV"
           echo "Obscura binary ready at $BIN"
 
