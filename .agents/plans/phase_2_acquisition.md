@@ -19,6 +19,7 @@
 | v0.5 | **Corrected the PDF claim.** Obscura v0.2.5, built with the `render` feature, supports `Page.printToPDF` (verified: 29305 bytes, `%PDF` magic). Phase 2 still does not implement `print_to_pdf` — PDF rendering is Phase 4. Phase 4's first task is therefore an Obscura-vs-`rust-headless-chrome` fidelity evaluation. |
 | v0.6 | Added `portals.last_fetch_attempt_at` and `portals.last_failure_cause` (migration `0002`). The router persists a classified failure cause on every failed fetch, and both columns are cleared/updated on success. `portals::record_fetch_attempt` supersedes `mark_verified`. Workstream 4's "Failure causes are classified and stored" criterion split into classification (unit-testable) and persistence (integration-testable). |
 | v0.7 | **Week 4 restructured around the GPUI constraint.** Workstreams 5 and 6 now deliver the **service layer** — CRUD orchestration, health summary, suggested actions, manual entry logic — verified by headless tests. The GPUI view layer is documented as deferred to Phase 5, with the service layer as its intended base. Exit criteria 12 and 13 reworded to reflect the verifiable deliverable. New "View Layer (Deferred)" section records what Phase 5 builds on top. No new workstream added. |
+| v0.8 | Workstream 5 complete. Portals service layer delivers `PortalHealth::from_portal` (four health states, cause parsing, suggested actions), `list_with_health`, `fetch_one` with post-fetch refresh, and `fetch_batch` with per-portal results and a plain-closure progress callback. `BatchEntry.result` widened from `Result<usize, FailureCause>` to `Result<usize, FetchError>` so the view layer can render per-portal detail without a second fetch. |
 
 ---
 
@@ -847,7 +848,10 @@ Phase 2 is complete when **all** of the following are true:
 9. ✅ **Complete (Week 3).** Tier routing follows `render_mode` with unconditional escalation.
 10. ✅ **Complete (Week 3).** `fetch_tier` is recorded per listing; `last_verified_at` is updated on success; `last_failure_cause` is recorded on failure.
 11. ✅ **Complete (Phase 1 + Week 3).** Duplicate listings are deduplicated via `job_descriptions::upsert`.
-12. **Week 4.** Portals **service layer** supports listing with health summaries, per-portal fetch with post-fetch refresh, batch fetch with per-portal results, and suggested actions mapped from every `FailureCause`. Verified by headless tests. (The GPUI view is Phase 5.)
+12.  ✅ **Complete.** Portals **service layer** supports listing with health
+   summaries, per-portal fetch with post-fetch refresh, batch fetch with
+   per-portal results, and suggested actions mapped from every `FailureCause`.
+   Verified by headless tests. (The GPUI view is Phase 5.)
 13. **Week 4.** Manual job entry **service layer** supports URL fetch and paste fallback, and deduplicates repeated pastes and URL-fetched duplicates against prior portal fetches.
 14. **Week 4.** A fallback build using `rust-headless-chrome` or `chromiumoxide` passes the same scraping tests, proving the trait abstraction and sidecar-model portability.
 15. **Week 4.** CI is green on all platforms, including the new `portals-service` job.

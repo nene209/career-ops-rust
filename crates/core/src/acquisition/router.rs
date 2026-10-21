@@ -128,7 +128,7 @@ pub struct FetchOutcome {
 
 /// Failure returned when every attempted tier failed. Carries the
 /// coarse cause so the caller can show a specific message.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("acquisition failed: {cause:?} — {detail}")]
 pub struct FetchError {
     pub cause: FailureCause,

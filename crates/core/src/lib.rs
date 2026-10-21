@@ -11,6 +11,7 @@ pub mod db;
 pub mod error;
 pub mod keystore;
 pub mod model;
+pub mod portals;
 pub mod prompts_seed;
 pub mod repo;
 

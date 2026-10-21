@@ -96,3 +96,131 @@ impl TestDb {
         career_ops_core::db::open(self.path(), &self.dek).await
     }
 }
+
+// ----------------------------------------------------------------------
+// Mock FetchSource for router and service-layer tests.
+// ----------------------------------------------------------------------
+
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+use career_ops_core::acquisition::ats::{AtsAdapter, NormalizedJob};
+use career_ops_core::acquisition::error::AtsError;
+use career_ops_core::acquisition::html::selectors::SelectorConfig;
+use career_ops_core::acquisition::router::FetchSource;
+use url::Url;
+
+/// A `FetchSource` that returns scripted results and records calls.
+///
+/// Results are popped from a queue in call order. When the queue is
+/// empty, `fetch_*` returns `Ok(vec![])`. This supports both:
+///
+/// - Single-call tests: `MockFetchSource::with_ats(Ok(vec![job]))`
+/// - Batch tests: `MockFetchSource::sequence_ats([Ok(vec![j1]), Err(...), Ok(vec![j2])])`
+pub struct MockFetchSource {
+    ats_calls: Mutex<Vec<(String, String)>>,
+    html_calls: Mutex<Vec<String>>,
+    ats_queue: Mutex<VecDeque<Result<Vec<NormalizedJob>, AtsError>>>,
+    html_queue: Mutex<VecDeque<Result<Vec<NormalizedJob>, AtsError>>>,
+}
+
+impl Default for MockFetchSource {
+    fn default() -> Self {
+        Self {
+            ats_calls: Mutex::new(Vec::new()),
+            html_calls: Mutex::new(Vec::new()),
+            ats_queue: Mutex::new(VecDeque::new()),
+            html_queue: Mutex::new(VecDeque::new()),
+        }
+    }
+}
+
+impl MockFetchSource {
+    pub fn with_ats(result: Result<Vec<NormalizedJob>, AtsError>) -> Self {
+        let mock = Self::default();
+        mock.ats_queue.lock().unwrap().push_back(result);
+        mock
+    }
+
+    pub fn with_html(result: Result<Vec<NormalizedJob>, AtsError>) -> Self {
+        let mock = Self::default();
+        mock.html_queue.lock().unwrap().push_back(result);
+        mock
+    }
+
+    pub fn sequence_ats(
+        results: impl IntoIterator<Item = Result<Vec<NormalizedJob>, AtsError>>,
+    ) -> Self {
+        let mock = Self::default();
+        mock.ats_queue.lock().unwrap().extend(results);
+        mock
+    }
+
+    pub fn sequence_html(
+        results: impl IntoIterator<Item = Result<Vec<NormalizedJob>, AtsError>>,
+    ) -> Self {
+        let mock = Self::default();
+        mock.html_queue.lock().unwrap().extend(results);
+        mock
+    }
+
+    pub fn ats_calls(&self) -> Vec<(String, String)> {
+        self.ats_calls.lock().unwrap().clone()
+    }
+
+    pub fn html_calls(&self) -> Vec<String> {
+        self.html_calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl FetchSource for MockFetchSource {
+    async fn fetch_ats(
+        &self,
+        adapter: &dyn AtsAdapter,
+        slug: &str,
+        _company_name: &str,
+    ) -> Result<Vec<NormalizedJob>, AtsError> {
+        self.ats_calls
+            .lock()
+            .unwrap()
+            .push((adapter.name().to_string(), slug.to_string()));
+        self.ats_queue
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(vec![]))
+    }
+
+    async fn fetch_html(
+        &self,
+        url: &Url,
+        _company_name: &str,
+        _config: Option<&SelectorConfig>,
+    ) -> Result<Vec<NormalizedJob>, AtsError> {
+        self.html_calls.lock().unwrap().push(url.to_string());
+        self.html_queue
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(vec![]))
+    }
+}
+
+/// A `NormalizedJob` for tests. Deterministic — the same title produces
+/// the same job, so tests can use it to assert on stored values.
+pub fn sample_job(title: &str) -> NormalizedJob {
+    NormalizedJob {
+        external_id: format!("id-{title}"),
+        title: title.into(),
+        company: "Acme".into(),
+        location: Some("Remote".into()),
+        department: Some("Engineering".into()),
+        employment_type: None,
+        workplace_type: None,
+        source_url: Url::parse(&format!("https://boards.greenhouse.io/acme/jobs/{title}")).unwrap(),
+        raw_text: "test".into(),
+        posted_at: None,
+    }
+}

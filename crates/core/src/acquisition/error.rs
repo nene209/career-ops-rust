@@ -137,4 +137,24 @@ impl FailureCause {
             FailureCause::Other => "other",
         }
     }
+
+    /// Parse a string back into a `FailureCause`.
+    ///
+    /// Round-trips with `as_str`. Returns `None` for unrecognized values
+    /// — which is a real case after a downgrade or if the database was
+    /// modified externally. Callers that must always produce a value
+    /// should use `.unwrap_or(FailureCause::Other)`.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "js_required" => FailureCause::JsRequired,
+            "blocked" => FailureCause::Blocked,
+            "timeout" => FailureCause::Timeout,
+            "parse_error" => FailureCause::ParseError,
+            "not_found" => FailureCause::NotFound,
+            "transport" => FailureCause::Transport,
+            "invalid_request" => FailureCause::InvalidRequest,
+            "other" => FailureCause::Other,
+            _ => return None,
+        })
+    }
 }
