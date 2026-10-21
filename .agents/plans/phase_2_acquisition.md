@@ -17,6 +17,7 @@
 | v0.3 | Revised against Phase 1 outcomes and current ecosystem. Removed the `print_to_pdf` deliverable — Obscura cannot render PDFs, and Phase 1's `BrowserBackend` trait provides a `BackendUnsupported` default. Added evaluation of Obscura's embedded Rust API alongside the sidecar model. Added `chromiumoxide` as a second fallback. Made test-support and mock-backend dependencies explicit. Added toolchain requirement to entry conditions. Added a verification-pass exit criterion, per the Phase 1 retrospective lesson. |
 | v0.4 | **Sidecar integration confirmed.** The embedded model is deferred to a future enhancement. Rationale: crash isolation, GPUI event-loop safety, and portability across browser backend swaps (all three candidate backends are CDP-driven). Removed the sidecar-vs-embedded evaluation from the Week 1 spike; Week 1 now focuses on sidecar integration only. Reduced duration from 3–5 weeks to 3–4 weeks. |
 | v0.5 | **Corrected the PDF claim.** Obscura v0.2.5, built with the `render` feature, **does** support `Page.printToPDF`; the Week 1 spike confirmed it produces a valid PDF (29305 bytes, `%PDF` magic) from `chromiumoxide::Page::pdf`. The v0.3 assertion that Obscura "cannot render PDFs" was based on the architecture doc and was wrong. Phase 2 **still does not implement `print_to_pdf`** on the Obscura backend — but now because PDF rendering is a Phase 4 concern, not because the capability is absent. Phase 4's first task is therefore to evaluate Obscura's PDF fidelity against the real resume templates, and only then decide between Obscura and `rust-headless-chrome` as the `PdfBackend`. Also folded the Week 1 spike results into Workstream 1, and clarified the final sentence of the Purpose section. |
+| v0.6 | Added `portals.last_fetch_attempt_at` and `portals.last_failure_cause` (migration `0002`). The router now persists a classified failure cause on every failed fetch, and both columns are cleared/updated on success. `portals::record_fetch_attempt` supersedes `mark_verified` as the single entry point for recording fetch outcomes. Workstream 4's "Failure causes are classified and stored" criterion split into two: classification (unit-testable) and persistence (integration-testable). Workstream 5's health drill-down now has a schema field to display. |
 
 ---
 
@@ -313,10 +314,10 @@ The `BrowserBackend` trait makes this a contained change if it is ever pursued. 
 ```
 
 2. **Deduplication.** `job_descriptions::upsert` already implements the full dedup order: `(source_url, external_id)`, then `(source_url, content_hash)`, then `(source_url, title, company)` for entries without an external ID. Phase 2 does not compute or pass the hash; the repository does. The router only calls `upsert`.
-3. **Failure recording** with classified causes (`js_required`, `blocked`, `timeout`, `parse_error`)
+3. **Failure recording**, classified and persisted. `AtsError` and `FailureCause` provide the classification; `portals.last_fetch_attempt_at` and `portals.last_failure_cause` provide the storage. Every fetch attempt — success or failure — updates both columns. `portals.last_verified_at` continues to record only successful fetches.
 4. **`fetch_tier` recording** per job listing, using the existing `FetchTier` enum values: `tier1a:ats`, `tier1b:html`, `tier2:obscura`, `manual`
 5. **`last_verified_at` update** per portal on success
-6. **`render_mode` suggestion logic** (optional): if Tier 1 consistently fails and Tier 2 succeeds, suggest changing `render_mode` to `browser`
+6. **`render_mode` suggestion logic** (optional): if Tier 1 fails with an escalatable cause and Tier 2 succeeds in the same fetch, suggest changing `render_mode` to `browser`. Persistent-failure suggestions require fetch history, which is not stored; see the change log note on `last_fetch_attempt_at`
 
 ### Critical Change from v0.1
 
@@ -332,7 +333,9 @@ The `BrowserBackend` trait makes this a contained change if it is ever pursued. 
 | Successful fetch records `fetch_tier` correctly | Integration test |
 | Duplicate listings are deduplicated via `upsert` | Integration test |
 | `last_verified_at` updates on success, not on failure | Integration test |
-| Failure causes are classified and stored | Integration test |
+| Failure causes are classified | Unit tests on `AtsError::cause` |
+| Failure causes are persisted to `portals.last_failure_cause` | Integration test (`failed_fetch_records_classified_cause`) |
+| `last_verified_at` is untouched on failure | Integration test (same test) |
 
 ---
 
@@ -347,6 +350,7 @@ The `BrowserBackend` trait makes this a contained change if it is ever pursued. 
 2. **Add/edit form** with `render_mode` selector
 3. **Fetch progress** per portal
 4. **Health drill-down** with classified failure causes and suggested actions
+   The drill-down displays `last_fetch_attempt_at` (relative time), `last_verified_at` (if different), and `last_failure_cause` when present. Suggested actions map to causes: js_required → "switch to browser mode or enable the browser backend"; not_found → "check the board slug"; blocked → "the site may be blocking automated requests"; timeout → "retry, or check network connectivity".
 5. **Sidecar status indicator** showing whether the Obscura sidecar is running, its PID, and its port
 
 ### Critical Change from v0.1

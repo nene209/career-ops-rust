@@ -121,12 +121,54 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> Result<()> {
     Ok(())
 }
 
-pub async fn mark_verified(pool: &SqlitePool, id: i64) -> Result<()> {
+/// Record the outcome of a fetch attempt.
+///
+/// Always updates `last_fetch_attempt_at`. On success (`cause` is
+/// `None`), also updates `last_verified_at` and clears
+/// `last_failure_cause`. On failure, `last_verified_at` is left
+/// untouched — it records the last *successful* fetch, which is
+/// different from the last *attempted* one.
+///
+/// Supersedes the older `mark_verified`, which only handled the success
+/// path. Folding the two into one method means the three columns are
+/// always updated together, and there is no way to record a success
+/// without also recording the attempt.
+pub async fn record_fetch_attempt(
+    pool: &SqlitePool,
+    id: i64,
+    failure_cause: Option<&str>,
+) -> Result<()> {
     let now: DateTime<Utc> = Utc::now();
-    sqlx::query("UPDATE portals SET last_verified_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(id)
-        .execute(pool)
-        .await?;
+
+    match failure_cause {
+        None => {
+            sqlx::query(
+                "UPDATE portals
+                 SET last_fetch_attempt_at = ?,
+                     last_verified_at = ?,
+                     last_failure_cause = NULL
+                 WHERE id = ?",
+            )
+            .bind(now)
+            .bind(now)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        }
+        Some(cause) => {
+            sqlx::query(
+                "UPDATE portals
+                 SET last_fetch_attempt_at = ?,
+                     last_failure_cause = ?
+                 WHERE id = ?",
+            )
+            .bind(now)
+            .bind(cause)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        }
+    }
+
     Ok(())
 }

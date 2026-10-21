@@ -38,6 +38,36 @@ use crate::repo::{job_descriptions, portals};
 /// `FetchError`, which distinguishes classification from cause.
 type FetchResult<T> = std::result::Result<T, FetchError>;
 
+/// Record the outcome of a fetch attempt against the portal row.
+///
+/// Deliberately does not return a `Result`. If the fetch itself
+/// succeeded, a failure to record it should not turn that success into
+/// an error — the caller has already received the outcome. If the
+/// fetch failed, the same applies: the caller gets the fetch error,
+/// not a recording error. Either way, a recording failure is logged
+/// and swallowed.
+///
+/// If the portal row no longer exists (deleted mid-fetch), the UPDATE
+/// affects zero rows and returns `Ok`. That is fine: there is nothing
+/// to record against.
+async fn record_fetch_outcome(
+    pool: &SqlitePool,
+    portal_id: i64,
+    result: &FetchResult<FetchOutcome>,
+) {
+    let cause = match result {
+        Ok(_) => None,
+        Err(e) => Some(e.cause.as_str()),
+    };
+    if let Err(e) = portals::record_fetch_attempt(pool, portal_id, cause).await {
+        tracing::warn!(
+            portal = portal_id,
+            error = %e,
+            "could not record fetch attempt outcome"
+        );
+    }
+}
+
 /// Abstraction over the two Tier 1 fetch paths. The production
 /// implementation uses `reqwest`; tests inject a mock.
 #[async_trait]
@@ -159,10 +189,26 @@ pub fn decide_initial_route(
 
 /// Fetch a portal end-to-end and store the results.
 ///
+/// Records the outcome on the portal row regardless of success or
+/// failure, so the Portals UI health drill-down can show the last
+/// attempt time and, on failure, the classified cause.
+pub async fn fetch_portal(
+    pool: &SqlitePool,
+    portal_id: i64,
+    source: &dyn FetchSource,
+    browser: Option<&dyn BrowserBackend>,
+) -> FetchResult<FetchOutcome> {
+    let result = fetch_portal_inner(pool, portal_id, source, browser).await;
+    record_fetch_outcome(pool, portal_id, &result).await;
+    result
+}
+
+/// Fetch a portal end-to-end and store the results.
+///
 /// `browser` is `None` when no Tier 2 backend is configured. In that
 /// case a Tier 1 failure that would otherwise be escalatable is
 /// returned as-is; the caller sees the Tier 1 cause.
-pub async fn fetch_portal(
+pub async fn fetch_portal_inner(
     pool: &SqlitePool,
     portal_id: i64,
     source: &dyn FetchSource,
@@ -235,10 +281,6 @@ pub async fn fetch_portal(
     let count = store_jobs(pool, &portal, &jobs, tier)
         .await
         .map_err(|e| FetchError::internal(format!("could not store jobs: {e}")))?;
-
-    portals::mark_verified(pool, portal_id)
-        .await
-        .map_err(|e| FetchError::internal(format!("could not update last_verified_at: {e}")))?;
 
     Ok(FetchOutcome {
         jobs_fetched: count,

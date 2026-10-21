@@ -198,6 +198,16 @@ async fn static_portal_with_ats_url_records_tier1a() {
     let refreshed = portals::get(&db.pool, portal.id).await.unwrap().unwrap();
     assert!(refreshed.last_verified_at.is_some());
 
+    // The new columns are populated too.
+    assert!(
+        refreshed.last_fetch_attempt_at.is_some(),
+        "last_fetch_attempt_at should be set on success"
+    );
+    assert!(
+        refreshed.last_failure_cause.is_none(),
+        "last_failure_cause should be cleared on success"
+    );
+
     db.close().await;
 }
 
@@ -326,6 +336,41 @@ async fn both_tiers_failing_returns_classified_error() {
     assert_eq!(
         err.cause,
         career_ops_core::acquisition::error::FailureCause::ParseError
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn failed_fetch_records_classified_cause() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(&db.pool, static_portal("https://example.com/careers"))
+        .await
+        .expect("create portal");
+
+    // Fail Tier 1b with `js_required`, and provide no browser backend
+    // so escalation cannot succeed. The router returns the Tier 1b
+    // failure as-is, which is `js_required`.
+    let source = Arc::new(MockFetchSource::with_html(Err(AtsError::Unsupported(
+        "js_required",
+    ))));
+
+    let result = fetch_portal(&db.pool, portal.id, source.as_ref(), None).await;
+    assert!(result.is_err(), "expected the fetch to fail");
+
+    let refreshed = portals::get(&db.pool, portal.id).await.unwrap().unwrap();
+    assert!(
+        refreshed.last_fetch_attempt_at.is_some(),
+        "last_fetch_attempt_at should be set on failure too"
+    );
+    assert_eq!(
+        refreshed.last_failure_cause.as_deref(),
+        Some("js_required"),
+        "the classified cause should be persisted"
+    );
+    assert!(
+        refreshed.last_verified_at.is_none(),
+        "last_verified_at must not change on failure"
     );
 
     db.close().await;

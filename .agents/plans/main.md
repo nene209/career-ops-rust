@@ -33,7 +33,7 @@ The most significant architectural change is inverting the original "files are c
 | `cover_letters` | `output/cover_*.md` | `id`, `application_id`, `content` (markdown), `generated_at` | Stores generated cover letters. |
 | `templates` | (new) | `id`, `name`, `kind` (cv/cover_letter), `content` (HTML), `version`, `content_hash`, `is_system`, `supersedes_id`, `created_at`, `updated_at` | HTML templates for PDF rendering (see §6). |
 | `document_renders` | `output/*.pdf` | `id`, `application_id`, `kind` (cv/cover_letter), `backend_used`, `template_id`, `rendered_at` | Records which backend produced a given PDF. Useful for regression tracking across backend changes. |
-| `portals` | `portals.yml` | `id`, `company_name`, `url`, `render_mode`, `scraper_config` (JSON), `last_verified_at` | Configuration for job acquisition. `render_mode` is `static` or `browser` (see §4). |
+| `portals` | `portals.yml` | `id`, `company_name`, `url`, `render_mode`, `scraper_config` (JSON), `last_verified_at`, `last_fetch_attempt_at`, `last_failure_cause` | Configuration for job acquisition. `render_mode` is `static` or `browser` (see §4). |
 | `prompts` | `modes/*.md` | `id`, `name`, `category` (evaluate/cover/scan), `content`, `is_system`, `version`, `created_at`, `updated_at` | Replaces the Markdown prompt files (see §5). |
 | `settings` | N/A | `key`, `value` (JSON) | Application-wide settings. Holds backend *preferences* among other config. API keys live in the OS keychain, not here. |
 
@@ -45,6 +45,7 @@ The most significant architectural change is inverting the original "files are c
 - `portals.render_mode` is the routing key for §4. Per-portal acquisition strategy belongs in the database, not in code, so users can tune it without a rebuild.
 - `settings` holds backend *preferences*, not backend *availability*. Availability is a compile-time property (see §4 and §6).
 - **The wrapped DEK is not stored in this database.** Storing the key material that unlocks the database inside the database is a chicken-and-egg problem. It lives in a sibling file on disk. See §7.
+- `portals.last_fetch_attempt_at` and `portals.last_failure_cause` were added in migration `0002_portal_fetch_status.sql` during Phase 2. They are distinct from `last_verified_at` by design: `last_verified_at` records the last successful fetch, `last_fetch_attempt_at` records the last attempted fetch of either outcome, and `last_failure_cause` is NULL on success and a FailureCause::as_str() value on failure. The Portals UI health drill-down reads all three.
 
 **`fetch_tier` values (recorded per listing):**
 - `tier1a:greenhouse` / `tier1a:lever` / `tier1a:ashby` / `tier1a:smartrecruiters` — ATS JSON API

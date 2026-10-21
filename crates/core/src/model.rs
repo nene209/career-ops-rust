@@ -177,6 +177,8 @@ pub struct Portal {
     pub render_mode: String,            // "static" | "browser"
     pub scraper_config: Option<String>, // JSON
     pub last_verified_at: Option<DateTime<Utc>>,
+    pub last_fetch_attempt_at: Option<DateTime<Utc>>,
+    pub last_failure_cause: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
