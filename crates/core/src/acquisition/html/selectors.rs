@@ -23,8 +23,8 @@
 //! The extracted value is resolved against `source_url`, so relative
 //! paths work as expected.
 
-use serde::Deserialize;
 use scraper::{ElementRef, Html, Selector};
+use serde::Deserialize;
 use url::Url;
 
 use super::super::ats::NormalizedJob;
@@ -198,5 +198,9 @@ fn select_text(el: &ElementRef<'_>, selector: &str) -> Option<String> {
 
 fn select_attr(el: &ElementRef<'_>, selector: &str, attr: &str) -> Option<String> {
     let sel = Selector::parse(selector).ok()?;
-    el.select(&sel).next()?.value().attr(attr).map(str::to_string)
+    el.select(&sel)
+        .next()?
+        .value()
+        .attr(attr)
+        .map(str::to_string)
 }

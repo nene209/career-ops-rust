@@ -14,6 +14,14 @@
 //! - `parse_page` — one JSON page → `Page` struct
 //! - `dedupe_by_ref` — group by `refNumber`, prefer the English copy
 //! - `normalize` — one `Posting` → `NormalizedJob`
+//! ## Empty boards vs. wrong slugs
+//!
+//! An unrecognised company slug returns **200 with an empty `content`
+//! array**, not a 404. The adapter cannot distinguish "this company has
+//! no open postings" from "this company slug does not exist" from the
+//! response alone. The Week 4 Portals UI health drill-down should
+//! present "0 jobs — check the slug" rather than "fetch succeeded" when
+//! a SmartRecruiters board returns empty.
 
 use std::collections::HashMap;
 

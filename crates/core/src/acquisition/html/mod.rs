@@ -14,26 +14,34 @@ pub async fn fetch_static_jobs(
     company_name: &str,
     scraper_config: Option<&serde_json::Value>,
 ) -> Result<Vec<NormalizedJob>> {
-    let resp = client.get(url.clone()).send().await
+    let resp = client
+        .get(url.clone())
+        .send()
+        .await
         .map_err(|_| CoreError::Internal("html request failed"))?;
 
     let status = resp.status();
-    let body = resp.text().await
+    let body = resp
+        .text()
+        .await
         .map_err(|_| CoreError::Internal("html body read failed"))?;
-
-    // Detect JS-required before parsing. A 200 with an SPA shell and no
-    // job content is a routing signal, not an empty board.
-    if is_js_required(&body) {
-        return Err(CoreError::BackendUnsupported("js_required"));
-    }
 
     if !status.is_success() {
         return Err(CoreError::Internal("html non-2xx"));
     }
 
+    // Detect JS-required only on a successful response. A 500 with an
+    // SPA shell is a server problem, not a JS-required page, and
+    // escalating it to Tier 2 would just fail again.
+    if is_js_required(&body) {
+        return Err(CoreError::BackendUnsupported("js_required"));
+    }
+
     // Primary path: JSON-LD JobPosting.
     if let Some(jobs) = jsonld::extract(&body, url, company_name) {
-        if !jobs.is_empty() { return Ok(jobs); }
+        if !jobs.is_empty() {
+            return Ok(jobs);
+        }
     }
 
     // Fallback: CSS selectors from portal config.
@@ -59,7 +67,11 @@ pub fn is_js_required(html: &str) -> bool {
 
     // If JSON-LD JobPosting is present, the page is not JS-required —
     // the data is already in the initial HTML.
-    if document.select(&Selector::parse("script[type='application/ld+json']").unwrap()).next().is_some() {
+    if document
+        .select(&Selector::parse("script[type='application/ld+json']").unwrap())
+        .next()
+        .is_some()
+    {
         return false;
     }
 
@@ -70,7 +82,9 @@ pub fn is_js_required(html: &str) -> bool {
             if document.select(&s).next().is_some() {
                 // An SPA root alone is not proof; require that there are
                 // also no job-like links in the static HTML.
-                let job_links = Selector::parse("a[href*='job'], a[href*='career'], a[href*='position']").unwrap();
+                let job_links =
+                    Selector::parse("a[href*='job'], a[href*='career'], a[href*='position']")
+                        .unwrap();
                 if document.select(&job_links).next().is_none() {
                     return true;
                 }

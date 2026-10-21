@@ -106,8 +106,7 @@ impl AtsAdapter for GreenhouseAdapter {
         slug: &str,
         company_name: &str,
     ) -> Result<Vec<NormalizedJob>> {
-        let url =
-            format!("https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true");
+        let url = format!("https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true");
         let resp = client
             .get(&url)
             .send()

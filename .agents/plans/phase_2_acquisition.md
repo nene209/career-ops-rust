@@ -236,7 +236,16 @@ The `BrowserBackend` trait makes this a contained change if it is ever pursued. 
 2. Concrete adapters for Greenhouse, Lever, Ashby, SmartRecruiters
 3. Auto-detection from portal URL
 4. Normalization into `NormalizedJob`
-5. Rate limiting and retry policy
+5. Retry on transient failure, implemented as a shared helper in
+   `acquisition/http.rs` (`get_with_retry` / `send_with_retry`). Wired
+   into the adapters in Week 3, when the router owns the fetch loop.
+
+   **Rate limiting is dropped.** A desktop application fetches one
+   portal at a time on user action and never runs a background crawl.
+   There is no scenario where a client-side token bucket or configurable
+   inter-request delay does anything useful. The retry helper provides
+   the only property that matters: a transient 429/503/timeout does not
+   fail the whole fetch.
 
 ### Critical Change from v0.1
 

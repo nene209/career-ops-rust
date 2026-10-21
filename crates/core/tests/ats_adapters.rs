@@ -546,3 +546,26 @@ fn selectors_explicit_url_selector_wins_over_title() {
     let jobs = selectors::extract(html, &url, "Acme", &config).expect("extract");
     assert_eq!(jobs[0].source_url.as_str(), "https://example.com/jobs/abc");
 }
+
+#[test]
+fn malformed_html_does_not_panic() {
+    let url = Url::parse("https://example.com/careers").unwrap();
+
+    let cases = [
+        // Truncated mid-tag
+        r#"<html><body><article class="job-card"><h2 class="title"><a href="/jobs/1">Title"#,
+        // Broken JSON-LD
+        r#"<html><head><script type="application/ld+json">{invalid json}</script></head></html>"#,
+        // Unclosed attribute
+        r#"<html><body><article class="job-card"</body></html>"#,
+        // Empty document
+        "",
+    ];
+
+    for case in cases {
+        // None of these should panic.
+        let _ = html::is_js_required(case);
+        let _ = jsonld::extract(case, &url, "Acme");
+        let _ = selectors::extract(case, &url, "Acme", &selector_config());
+    }
+}

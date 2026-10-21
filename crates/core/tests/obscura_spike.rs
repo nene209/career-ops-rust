@@ -119,8 +119,15 @@ async fn obscura_returns_post_js_dom() {
         .await
         .expect("Browser::connect to obscura");
 
-    // The handler drain loop is mandatory. Without it, every command hangs.
-    let handle = tokio::spawn(async move { while let Some(_) = handler.next().await {} });
+    // Drain the handler. Without an active consumer, chromiumoxide's
+    // pending commands hang; the handler must be polled to completion
+    // for responses to be delivered. Errors from individual events are
+    // ignored — we only care that the connection stays alive.
+    let handle = tokio::spawn(async move {
+        while handler.next().await.is_some() {
+            // value discarded; see comment above
+        }
+    });
 
     let page = browser.new_page("about:blank").await.expect("new_page");
 
@@ -178,7 +185,15 @@ async fn obscura_print_to_pdf_if_supported() {
     let cdp_url = format!("ws://127.0.0.1:{port}");
     let (browser, mut handler) = Browser::connect(&cdp_url).await.expect("connect");
 
-    let handle = tokio::spawn(async move { while let Some(_) = handler.next().await {} });
+    // Drain the handler. Without an active consumer, chromiumoxide's
+    // pending commands hang; the handler must be polled to completion
+    // for responses to be delivered. Errors from individual events are
+    // ignored — we only care that the connection stays alive.
+    let handle = tokio::spawn(async move {
+        while handler.next().await.is_some() {
+            // value discarded; see comment above
+        }
+    });
 
     let page = browser.new_page("about:blank").await.expect("new_page");
     page.set_content("<html><body><h1>PDF spike</h1></body></html>")

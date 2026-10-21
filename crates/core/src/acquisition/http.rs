@@ -24,14 +24,14 @@
 //! The adapters are not wired to this yet — that happens in Week 3 when
 //! the router owns the fetch loop. The call shape is:
 //!
-//! ```ignore
+//! ```text
 //! let resp = http::get_with_retry(&client, &url).await?;
 //! let body = resp.text().await?;
 //! ```
 //!
 //! or, for a request that needs more than a URL:
 //!
-//! ```ignore
+//! ```text
 //! let resp = http::send_with_retry(|| client.get(&url).header("X", "y")).await?;
 //! ```
 
@@ -204,7 +204,7 @@ mod tests {
             base_delay: Duration::from_millis(100),
             max_delay: Duration::from_millis(400),
         };
-    
+
         for attempt in 1u32..=5 {
             // Each attempt has its own cap: the exponential term, min'd
             // with max_delay. The test must compute that cap per attempt,
@@ -212,7 +212,7 @@ mod tests {
             let shift = attempt.saturating_sub(1).min(10);
             let exp = (policy.base_delay.as_millis() as u64) * (1u64 << shift);
             let attempt_cap = exp.min(policy.max_delay.as_millis() as u64);
-    
+
             for _ in 0..20 {
                 let d = backoff_delay(&policy, attempt);
                 let d_ms = d.as_millis() as u64;

@@ -46,8 +46,8 @@ struct Categories {
 /// `serde_json::from_str::<Vec<Posting>>` is used directly, rather than
 /// a `Response { postings: [...] }` struct.
 pub fn parse(body: &str, company_name: &str) -> Result<Vec<NormalizedJob>> {
-    let postings: Vec<Posting> = serde_json::from_str(body)
-        .map_err(|_| CoreError::Internal("lever json decode failed"))?;
+    let postings: Vec<Posting> =
+        serde_json::from_str(body).map_err(|_| CoreError::Internal("lever json decode failed"))?;
 
     postings
         .into_iter()

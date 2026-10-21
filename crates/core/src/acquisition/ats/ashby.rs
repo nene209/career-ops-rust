@@ -48,19 +48,14 @@ struct Job {
 /// external ID is derived from the URL's final path segment. URLs are
 /// stable per posting, so this is a reliable identifier.
 pub fn parse(body: &str, company_name: &str) -> Result<Vec<NormalizedJob>> {
-    let response: Response = serde_json::from_str(body)
-        .map_err(|_| CoreError::Internal("ashby json decode failed"))?;
+    let response: Response =
+        serde_json::from_str(body).map_err(|_| CoreError::Internal("ashby json decode failed"))?;
 
     response
         .jobs
         .into_iter()
         .map(|j| -> Result<NormalizedJob> {
-            let external_id = j
-                .job_url
-                .rsplit('/')
-                .next()
-                .unwrap_or(&j.title)
-                .to_string();
+            let external_id = j.job_url.rsplit('/').next().unwrap_or(&j.title).to_string();
 
             Ok(NormalizedJob {
                 external_id,
