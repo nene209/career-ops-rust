@@ -7,8 +7,8 @@ license.workspace = true
 
 [features]
 default = []
-# keychain backend for production; mock for tests uses the "mock" feature
 keychain = ["dep:keyring"]
+chromium-fallback = []
 
 [dependencies]
 anyhow.workspace = true
@@ -22,7 +22,9 @@ zeroize.workspace = true
 
 async-trait = "0.1"
 base64 = "0.22"
+chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3.34"
 hex = "0.4"
 html-escape = "0.2"        # Greenhouse content unescaping
 rand = "0.8"
@@ -49,10 +51,11 @@ keyring = { version = "3", optional = true, features = [
     "linux-native",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
+
 [dev-dependencies]
 career-ops-test-support = { workspace = true }
-chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
-futures-util = "0.3.34"
 keyring = "3"
 tempfile = "3"
 tokio = { workspace = true, features = ["full"] }

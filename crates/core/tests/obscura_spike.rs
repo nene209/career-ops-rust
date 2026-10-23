@@ -17,6 +17,7 @@ use chromiumoxide::browser::Browser;
 use futures_util::stream::StreamExt;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
+use url::Url;
 
 fn allocate_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
@@ -137,19 +138,35 @@ async fn obscura_returns_post_js_dom() {
         .await
         .expect("goto");
 
-    // Do NOT wait_for_navigation(): Obscura's default lifecycle fires at
-    // domcontentloaded, before many portals populate listings. Poll a
-    // selector instead.
-    let html = timeout(Duration::from_secs(15), page.content())
+    // Prove navigation worked against the intended page.
+    let html_before = timeout(Duration::from_secs(15), page.content())
         .await
-        .expect("content() timed out")
-        .expect("content() failed");
-
-    assert!(!html.is_empty(), "content() returned empty HTML");
+        .expect("content before timed out")
+        .expect("content before failed");
     assert!(
-        html.contains("<html"),
-        "content() did not look like HTML: first 200 bytes: {:?}",
-        &html[..html.len().min(200)]
+        html_before.contains("career-ops-rust") || html_before.contains("nene209"),
+        "page content does not reference the target repo; navigation may have failed"
+    );
+
+    // Prove JS execution and DOM reflection.
+    let marker = format!("obscura-spike-{}", std::process::id());
+    timeout(
+        Duration::from_secs(15),
+        page.evaluate(format!(
+            "document.body.setAttribute('data-obscura-marker', '{marker}')"
+        )),
+    )
+    .await
+    .expect("evaluate timed out")
+    .expect("evaluate failed");
+
+    let html_after = timeout(Duration::from_secs(15), page.content())
+        .await
+        .expect("content after timed out")
+        .expect("content after failed");
+    assert!(
+        html_after.contains(&marker),
+        "post-JS DOM does not contain the marker; content() may be returning pre-JS HTML"
     );
 
     // --- Sidecar death detection ---
@@ -221,4 +238,108 @@ async fn obscura_print_to_pdf_if_supported() {
 
     child.kill().await.ok();
     handle.abort();
+}
+
+/// F3: `ObscuraBrowserBackend::print_to_pdf` returns `BackendUnsupported`.
+///
+/// This pins the Phase 2 scoping decision: the backend *can* render
+/// PDFs (verified by `obscura_print_to_pdf_if_supported`), but the
+/// production backend does not expose that capability until Phase 4.
+#[tokio::test]
+async fn obscura_backend_print_to_pdf_is_unsupported() {
+    if !obscura_available() {
+        eprintln!("skipping: obscura binary not found");
+        return;
+    }
+
+    use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend, PdfOptions};
+
+    // Construction does not spawn the sidecar.
+    let backend = ObscuraBrowserBackend::with_defaults();
+    assert_eq!(backend.name(), "obscura-sidecar");
+
+    let result = backend
+        .print_to_pdf("<html></html>", PdfOptions::default())
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(career_ops_core::error::CoreError::BackendUnsupported(_))
+        ),
+        "expected BackendUnsupported, got {result:?}"
+    );
+}
+
+/// F3: stale lock from a previous run is cleaned up before spawning.
+#[tokio::test]
+async fn obscura_backend_cleans_stale_lock() {
+    if !obscura_available() {
+        eprintln!("skipping: obscura binary not found");
+        return;
+    }
+
+    use career_ops_core::backend::{
+        BrowserBackend, ObscuraBrowserBackend, ObscuraConfig, RenderOpts,
+    };
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Fake a lock file with a PID that is definitely not alive.
+    std::fs::write(tmp.path().join(".obscura.lock"), "999999").unwrap();
+
+    let config = ObscuraConfig {
+        binary: resolve_obscura_bin(),
+        storage_dir: tmp.path().to_path_buf(),
+        spawn_timeout: Duration::from_secs(10),
+        shutdown_timeout: Duration::from_secs(2),
+        default_settle_delay: Duration::from_millis(200),
+    };
+    let backend = ObscuraBrowserBackend::new(config);
+
+    let url = Url::parse("https://github.com/nene209/career-ops-rust").unwrap();
+    let page = backend
+        .fetch_rendered(&url, RenderOpts::default())
+        .await
+        .expect("fetch after stale lock");
+
+    assert!(!page.html.is_empty());
+
+    // The stale lock is gone; a new lock names the new child.
+    let new_lock = std::fs::read_to_string(tmp.path().join(".obscura.lock")).unwrap();
+    assert_ne!(new_lock.trim(), "999999");
+
+    backend.shutdown().await.expect("shutdown");
+}
+
+/// F3: shutdown sends SIGTERM and the child exits.
+#[tokio::test]
+async fn obscura_backend_graceful_shutdown() {
+    if !obscura_available() {
+        eprintln!("skipping: obscura binary not found");
+        return;
+    }
+
+    use career_ops_core::backend::{
+        BrowserBackend, ObscuraBrowserBackend, ObscuraConfig, RenderOpts,
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let config = ObscuraConfig {
+        binary: resolve_obscura_bin(),
+        storage_dir: tmp.path().to_path_buf(),
+        spawn_timeout: Duration::from_secs(10),
+        shutdown_timeout: Duration::from_secs(3),
+        default_settle_delay: Duration::from_millis(200),
+    };
+    let backend = ObscuraBrowserBackend::new(config);
+
+    let url = Url::parse("https://github.com/nene209/career-ops-rust").unwrap();
+    backend
+        .fetch_rendered(&url, RenderOpts::default())
+        .await
+        .expect("fetch");
+
+    backend.shutdown().await.expect("shutdown");
+
+    // Lock file is removed on shutdown.
+    assert!(!tmp.path().join(".obscura.lock").exists());
 }

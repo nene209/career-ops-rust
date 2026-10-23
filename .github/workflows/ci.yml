@@ -251,3 +251,42 @@ jobs:
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  browser-fallback:
+    name: browser fallback (chromiumoxide)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+      - name: Install Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
+      - name: Compile-check the fallback backend
+        run: cargo check -p career-ops-core --features chromium-fallback
+      - name: Run fallback tests (live, requires Chrome)
+        env:
+          RUN_CHROMIUM_FALLBACK_TESTS: "1"
+        run: cargo test -p career-ops-core --features chromium-fallback --test backend_fallback -- --nocapture
+
+  portals-service:
+    name: portals service layer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
+      # These tests use MockFetchSource and MockBrowserBackend, so no
+      # Obscura binary and no libsecret are needed. The job exists to
+      # give the service layer a named green check independent of the
+      # full workspace test run.
+      - name: Run portals service tests
+        run: |
+          cargo test -p career-ops-core --test portals_service
+          cargo test -p career-ops-core --test manual_entry

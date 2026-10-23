@@ -258,3 +258,45 @@ async fn failed_fetch_records_classified_cause() {
 
     db.close().await;
 }
+
+#[tokio::test]
+async fn fetching_same_portal_twice_dedups() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        static_portal("https://boards.greenhouse.io/acme/jobs/1"),
+    )
+    .await
+    .expect("create portal");
+
+    // Two identical fetch results.
+    let source = Arc::new(MockFetchSource::sequence_ats(vec![
+        Ok(vec![sample_job("engineer")]),
+        Ok(vec![sample_job("engineer")]),
+    ]));
+
+    let first = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("first fetch");
+    let second = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("second fetch");
+
+    assert_eq!(first.jobs_fetched, 1);
+    assert_eq!(second.jobs_fetched, 1);
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM job_descriptions")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "second fetch should update, not duplicate");
+
+    // The row was updated in place, not replaced: same id.
+    let ids: Vec<(i64,)> = sqlx::query_as("SELECT id FROM job_descriptions")
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+
+    db.close().await;
+}

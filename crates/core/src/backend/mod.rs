@@ -13,6 +13,12 @@ use url::Url;
 
 use crate::error::{CoreError, Result};
 
+pub mod obscura;
+
+#[cfg(feature = "chromium-fallback")]
+pub mod chromium;
+
+pub use obscura::{ObscuraBrowserBackend, ObscuraConfig};
 #[derive(Debug, Clone, Default)]
 pub struct RenderOpts {
     pub wait_for_selector: Option<String>,
@@ -51,8 +57,6 @@ impl Default for PdfOptions {
 pub trait BrowserBackend: Send + Sync {
     async fn fetch_rendered(&self, url: &Url, opts: RenderOpts) -> Result<RenderedPage>;
 
-    /// Default implementation returns `BackendUnsupported`. Implementations
-    /// that cannot render PDFs (Obscura) can rely on this default.
     async fn print_to_pdf(&self, _html: &str, _opts: PdfOptions) -> Result<Vec<u8>> {
         Err(CoreError::BackendUnsupported(
             "print_to_pdf not implemented",
@@ -60,6 +64,15 @@ pub trait BrowserBackend: Send + Sync {
     }
 
     fn name(&self) -> &'static str;
+
+    /// Gracefully shut down the backend. Default is a no-op.
+    ///
+    /// Implementations that own a subprocess should send SIGTERM, wait
+    /// for exit, and escalate to SIGKILL after a timeout. Called by
+    /// `AppState` on application exit.
+    async fn shutdown(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
