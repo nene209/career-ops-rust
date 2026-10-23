@@ -159,9 +159,8 @@ impl ObscuraBrowserBackend {
         wait_for_port(port, self.config.spawn_timeout).await?;
 
         let cdp_url = format!("ws://127.0.0.1:{port}");
-        let (browser, mut handler) = Browser::connect(&cdp_url).await.map_err(|e| {
-            CoreError::Message(format!("Browser::connect to {cdp_url} failed: {e}"))
-        })?;
+        let (browser, mut handler) =
+            connect_with_retry(&cdp_url, self.config.spawn_timeout).await?;
 
         // The handler must be drained continuously; without an active
         // consumer, every CDP command hangs.
@@ -293,6 +292,43 @@ async fn wait_for_port(port: u16, timeout: Duration) -> Result<()> {
             )));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Retry `Browser::connect` until it succeeds or `timeout` elapses.
+///
+/// `wait_for_port` proves only that the sidecar's listener socket is
+/// bound. Obscura's HTTP/WebSocket handler may not be accepting yet when
+/// the listener appears — the gap is milliseconds on a quiet machine and
+/// hundreds of milliseconds under CI load, and manifests as a
+/// `Connection refused` on the first connect attempt. Retrying the
+/// WebSocket handshake is the correct readiness signal; the TCP accept
+/// is necessary but not sufficient.
+async fn connect_with_retry(
+    url: &str,
+    timeout: Duration,
+) -> Result<(Browser, chromiumoxide::Handler)> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut attempt: u32 = 0;
+
+    loop {
+        attempt += 1;
+        match Browser::connect(url).await {
+            Ok(conn) => {
+                if attempt > 1 {
+                    tracing::debug!(attempt, "Browser::connect succeeded after retry");
+                }
+                return Ok(conn);
+            }
+            Err(e) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(CoreError::Message(format!(
+                        "Browser::connect to {url} failed after {timeout:?} and {attempt} attempts: {e}"
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
     }
 }
 

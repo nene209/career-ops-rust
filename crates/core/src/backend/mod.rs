@@ -19,6 +19,10 @@ pub mod obscura;
 pub mod chromium;
 
 pub use obscura::{ObscuraBrowserBackend, ObscuraConfig};
+
+#[cfg(feature = "chromium-fallback")]
+pub use chromium::ChromiumoxideBrowserBackend;
+
 #[derive(Debug, Clone, Default)]
 pub struct RenderOpts {
     pub wait_for_selector: Option<String>,
