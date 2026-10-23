@@ -21,6 +21,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chromiumoxide::browser::Browser;
 use futures_util::StreamExt;
+use std::path::PathBuf;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use url::Url;
@@ -35,6 +36,12 @@ pub struct ChromiumConfig {
     pub launch: bool,
     pub connect_url: Option<String>,
     pub settle_delay: Duration,
+    /// Chrome profile directory. When `None`, chromiumoxide reuses a
+    /// single shared temp directory — fine for one instance, but two
+    /// concurrent backends collide on `SingletonLock` and the second
+    /// launch aborts with `RESULT_CODE_PROFILE_IN_USE`. Set this to a
+    /// unique directory whenever more than one backend may run at once.
+    pub user_data_dir: Option<PathBuf>,
 }
 
 impl Default for ChromiumConfig {
@@ -43,6 +50,7 @@ impl Default for ChromiumConfig {
             launch: true,
             connect_url: None,
             settle_delay: Duration::from_millis(500),
+            user_data_dir: None,
         }
     }
 }
@@ -76,13 +84,17 @@ impl ChromiumoxideBrowserBackend {
         }
 
         let (browser, mut handler) = if self.config.launch {
-            Browser::launch(
-                chromiumoxide::browser::BrowserConfig::builder()
-                    .build()
-                    .map_err(|e| CoreError::Message(format!("chromium launch config: {e}")))?,
-            )
-            .await
-            .map_err(|e| CoreError::Message(format!("chromium launch failed: {e}")))?
+            let mut builder = chromiumoxide::browser::BrowserConfig::builder();
+            if let Some(dir) = &self.config.user_data_dir {
+                builder = builder.user_data_dir(dir);
+            }
+            let browser_config = builder
+                .build()
+                .map_err(|e| CoreError::Message(format!("chromium launch config: {e}")))?;
+
+            Browser::launch(browser_config)
+                .await
+                .map_err(|e| CoreError::Message(format!("chromium launch failed: {e}")))?
         } else {
             let url = self.config.connect_url.as_deref().ok_or_else(|| {
                 CoreError::Message("connect_url required when launch=false".into())

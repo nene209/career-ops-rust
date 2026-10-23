@@ -21,7 +21,7 @@ pub mod chromium;
 pub use obscura::{ObscuraBrowserBackend, ObscuraConfig};
 
 #[cfg(feature = "chromium-fallback")]
-pub use chromium::ChromiumoxideBrowserBackend;
+pub use chromium::{ChromiumConfig, ChromiumoxideBrowserBackend};
 
 #[derive(Debug, Clone, Default)]
 pub struct RenderOpts {
