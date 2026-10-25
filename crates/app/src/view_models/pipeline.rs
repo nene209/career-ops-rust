@@ -335,6 +335,35 @@ mod tests {
     }
 
     #[test]
+    fn row_finds_a_row_by_id() {
+        let view_model = PipelineViewModel {
+            rows: vec![row(1, None), row(2, None)],
+            filter: JobFilter::All,
+        };
+
+        assert_eq!(view_model.row(2).map(|row| row.id), Some(2));
+        assert!(view_model.row(99).is_none());
+    }
+
+    #[test]
+    fn tier_labels_are_unique_and_non_empty() {
+        let labels: Vec<&str> = [
+            TierLabel::Ats,
+            TierLabel::Html,
+            TierLabel::Tier2,
+            TierLabel::Manual,
+            TierLabel::Other,
+        ]
+        .iter()
+        .map(|tier| tier.label())
+        .collect();
+        let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
+
+        assert_eq!(labels.len(), unique.len(), "duplicate labels: {labels:?}");
+        assert!(labels.iter().all(|label| !label.is_empty()));
+    }
+
+    #[test]
     fn filter_labels_are_unique() {
         let labels: Vec<&str> = JobFilter::all()
             .iter()

@@ -328,6 +328,68 @@ mod tests {
     }
 
     #[test]
+    fn replace_entries_preserves_the_sidecar_and_batch_progress() {
+        let mut view_model = PortalsViewModel::from_entries(vec![entry(&portal(
+            1, "One", "static", None, None, None,
+        ))]);
+        view_model.sidecar = SidecarStatus::Running;
+        view_model.batch = Some(BatchProgress {
+            total: 2,
+            in_flight: Some(1),
+            ..Default::default()
+        });
+
+        view_model.replace_entries(vec![
+            entry(&portal(1, "One renamed", "static", None, None, None)),
+            entry(&portal(2, "Two", "browser", None, None, None)),
+        ]);
+
+        assert_eq!(view_model.rows.len(), 2);
+        assert_eq!(view_model.rows[0].name, "One renamed");
+        assert_eq!(
+            view_model.sidecar,
+            SidecarStatus::Running,
+            "a reload must not reset the sidecar indicator"
+        );
+        assert_eq!(
+            view_model.batch.as_ref().map(|batch| batch.total),
+            Some(2),
+            "a reload must not drop batch progress"
+        );
+    }
+
+    #[test]
+    fn row_finds_a_row_by_id() {
+        let view_model = PortalsViewModel::from_entries(vec![
+            entry(&portal(1, "One", "static", None, None, None)),
+            entry(&portal(2, "Two", "static", None, None, None)),
+        ]);
+
+        assert_eq!(view_model.row(2).map(|row| row.name.as_str()), Some("Two"));
+        assert!(view_model.row(99).is_none());
+    }
+
+    #[test]
+    fn health_badge_cause_is_only_present_for_failures() {
+        assert!(HealthBadge::NeverFetched.cause().is_none());
+        assert!(HealthBadge::Healthy.cause().is_none());
+        assert_eq!(
+            HealthBadge::Degraded {
+                cause: "blocked".into()
+            }
+            .cause(),
+            Some("blocked")
+        );
+        assert_eq!(
+            HealthBadge::Broken {
+                cause: "timeout".into()
+            }
+            .cause(),
+            Some("timeout")
+        );
+    }
+
+    #[test]
     fn relative_time_is_coarse_and_never_negative() {
         let now = Utc::now();
 

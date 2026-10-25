@@ -1333,6 +1333,64 @@ mod tests {
         assert_eq!(app.state().expect("state").current(), &Screen::Ready);
     }
 
+    /// The recovery path resolves back to the main layout: a database without
+    /// its wrapped key reaches Recovery, `LocateKeyFile` reinstalls the key and
+    /// returns to `Unlocking`, and the passphrase then reaches `Ready`.
+    #[test]
+    fn recovery_restores_a_key_file_and_reaches_ready() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        // Move the wrapped key aside so bootstrap sees a database without a
+        // key — the recovery case a misplaced backup produces.
+        let backup = tempfile::tempdir().expect("backup tempdir");
+        let wrapped = career_ops_core::keystore::WRAPPED_FILE;
+        std::fs::rename(dir.path().join(wrapped), backup.path().join(wrapped))
+            .expect("move the wrapped key aside");
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("recovery bootstrap");
+        assert!(
+            matches!(state.current(), Screen::Recovery { .. }),
+            "a database without a wrapped key must reach Recovery"
+        );
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut app = CareerOpsApp::new(state, runtime);
+
+        app.handle_lock_action(LockAction::LocateKeyFile(backup.path().join(wrapped)));
+        assert_eq!(
+            app.state().expect("state").current(),
+            &Screen::Unlocking,
+            "installing the key file must return to the unlock screen"
+        );
+
+        let ctx = egui::Context::default();
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+        assert!(app.state().expect("state").pool().is_some());
+    }
+
     #[test]
     fn open_edit_populates_the_form_from_the_row() {
         let (mut app, _dir) = test_app();

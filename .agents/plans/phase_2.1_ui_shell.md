@@ -1,7 +1,7 @@
 # Phase 2.1: UI Shell — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.5), §12
-**Status:** In progress — Workstreams 1–4 implemented (2026-10-25)
+**Status:** Complete — all five workstreams implemented (2026-10-25); two exit criteria need a human with network access (see `phase_2.1_retrospective.md`)
 **Last updated:** 2026-10-25
 **Duration:** 1.5–2 weeks
 **Depends on:** Phase 2 completion (2026-10-23) and Phase 2.01 (2026-10-24)
@@ -19,6 +19,7 @@
 | v0.5 | Workstream 2 implemented: unlock, first-launch wizard, and recovery screens; filesystem recovery actions (locate key file, export encrypted bundle, explicit reset); async state hand-off. Recorded that `AppState` is moved into the task rather than borrowed across an await, that secrets are cleared when the task takes ownership, and that a partially completed first launch is re-bootstrapped to surface Recovery. Added `screens/lock.rs`, `recovery.rs`, and `tests/lock_screens.rs`. |
 | v0.6 | Workstream 3 implemented: Portals list with health badges, CRUD forms, delete confirmation, fetch-one, cancellable batch with `mpsc` progress, sidecar indicator, and the manual-entry modal. Added `portals::service::fetch_batch_cancellable` because the callback cannot stop `fetch_batch`'s loop. The Portals view model carries `render_mode` and `scraper_config` so the edit form round-trips them without a second read. Added `view_models/portals.rs`, `screens/portals.rs`, and `tests/portals_screen.rs`; app-level tests cover CRUD and manual paste against a real database. |
 | v0.7 | Workstream 4 implemented: Pipeline list with tier labels and application-status badges, four client-side filters, read-only detail view with disabled Phase 3 placeholders, and a bounded 500-row load. The manual modal is now app-level chrome (`portals::show_modal`), rendered after the active screen so "Add job" works from Pipeline without a second implementation; `show` no longer takes `PortalsView`. `PipelineViewModel::from_jobs` takes the application statuses as a second argument so the join happens in the load task, and `replace_jobs` preserves the user's filter across refreshes. Added `tests/pipeline_screen.rs` and an app-level test that loads a real database, joins a status, and checks that a manual add invalidates the pipeline page. |
+| v0.8 | Workstream 5: verification pass and retrospective. `docs/manual-test-script.md` created (criterion 14's document half; execution of the network rows is pending). The pass found four gaps. Two were closed with tests: five small functions had no unit test (`PortalsViewModel::replace_entries`, both `row` lookups, `HealthBadge::cause`, `TierLabel::label`), and nothing drove Recovery → `LocateKeyFile` → `Unlocking` → `Ready` end to end. The third was the missing manual script. The fourth was documentation drift: criterion 4 is reworded because `MainScreen` has five screens and no Dashboard, whose content is Pipeline's. Added `.agents/plans/phase_2.1_retrospective.md`, which also records P2-R9's resolution. |
 
 ---
 
@@ -491,6 +492,15 @@ Same discipline as Phase 1 and Phase 2:
    - Whether the async bridge pattern (`request_repaint_after` polling) was ergonomic
    - Estimate accuracy, with a section on how the framework swap affected the total
 
+**Implementation note (2026-10-25).** The pass is recorded in
+`.agents/plans/phase_2.1_retrospective.md`. It produced four findings: five
+small functions (including both `row` lookups and the tier-label mapping) had no
+unit test, no test drove the recovery path end to end, the manual script did not
+exist, and criterion 4 named a Dashboard the navigation model does not have. The
+first three are closed with five tests and `docs/manual-test-script.md`; the
+fourth is a rewording, not a feature. Two criteria remain open for a human:
+executing the network-dependent manual steps, and observing CI.
+
 ---
 
 ## Test Strategy
@@ -567,7 +577,7 @@ Phase 2.1 is complete when **all** of the following are true:
 1. The application opens to the unlock screen when `dek.wrapped.json` exists, the first-launch wizard when it does not, and the recovery screen when unlock fails.
 2. `cargo run -p career-ops-app` works on a clean checkout with no environment variables set.
 3. Successful unlock, first-launch completion, and recovery-path resolution all reach the main layout.
-4. Sidebar navigation works between Dashboard (placeholder), Pipeline, Portals, CV/Profile (placeholder), Prompts (placeholder), and Settings (placeholder).
+4. Sidebar navigation works between Pipeline, Portals, CV/Profile (placeholder), Prompts (placeholder), and Settings (placeholder). *(Reworded in v0.8: the earlier list included a "Dashboard (placeholder)" that `MainScreen` does not have; its content is Pipeline's.)*
 5. Portals lists all portals with health badges, last attempt timestamps, and suggested actions.
 6. Portals supports add, edit, delete, fetch one, and batch fetch with per-portal progress.
 7. Batch fetch can be cancelled.
@@ -578,6 +588,8 @@ Phase 2.1 is complete when **all** of the following are true:
 12. Every view-model function has a corresponding unit test.
 13. `crates/app/docs/patterns.md` documents the list, form, and async patterns, including the `request_repaint_after` requirement.
 14. `docs/manual-test-script.md` documents the flows and has been executed end-to-end on a clean machine.
+
+    *(Verification 2026-10-25: the document exists; the offline sections were walked, the 🌐 rows are listed as pending in the sign-off table and in the retrospective. The criterion stays open until they are recorded.)*
 15. `labelled_input` produces an accessible label, or the limitation is recorded as a Phase 5 audit item with a comment naming the fix location.
 16. CI is green on all platforms.
 17. The verification pass is complete: every criterion above has been checked against the code, with a note on how it was verified and whether the check exercises the property.
