@@ -675,6 +675,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "keyring",
+ "serde_json",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",

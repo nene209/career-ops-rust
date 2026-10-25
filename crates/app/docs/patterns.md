@@ -145,3 +145,24 @@ When no task is pending, do not call `request_repaint` or
 `request_repaint_after`. egui then only repaints on input, and idle CPU stays
 near zero. This is an acceptance criterion for Workstream 1 and a habit later
 screens should keep.
+
+## State-mutating async work
+
+`AppState` methods such as `try_passphrase`, `try_keychain`, and
+`complete_first_launch` take `&mut self` and are async. `AsyncTask` needs a
+`'static` future, so `CareerOpsApp` moves the state out for the duration of the
+operation:
+
+- `CareerOpsApp` stores `state: Option<AppState>`.
+- Starting an operation moves the state into the future and stores the task.
+- `poll_pending` restores the state together with the result.
+- While the state is `None`, the UI renders `lock::busy`.
+
+Do not wrap the state in a mutex and hold it across an await. If an operation
+is interrupted, the app re-bootstraps from the data directory; if that also
+fails it shows the fatal screen rather than spinning forever.
+
+Lock screens do not perform side effects. They return a `LockAction`, which
+`CareerOpsApp` executes. This keeps the views testable with `egui_kittest` and
+gives the app one place to clear secrets, spawn work, and apply filesystem
+recovery actions.

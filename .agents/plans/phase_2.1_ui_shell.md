@@ -1,7 +1,7 @@
 # Phase 2.1: UI Shell — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.5), §12
-**Status:** In progress — Workstream 1 implemented (2026-10-24)
+**Status:** In progress — Workstreams 1–2 implemented (2026-10-24)
 **Last updated:** 2026-10-24
 **Duration:** 1.5–2 weeks
 **Depends on:** Phase 2 completion (2026-10-23) and Phase 2.01 (2026-10-24)
@@ -16,6 +16,7 @@
 | v0.2 | Rewritten against egui/eframe after Phase 2.01 found GPUI's test harness and API stability unsuitable for a five-phase dependency. View-model, navigation, and async bridge survive unchanged. View layer, test patterns, and toolchain requirements are replaced. The accessibility gap found during the egui prototype (text inputs have no accessible label) is addressed as an implementation note and a Phase 5 audit item. |
 | v0.3 | Entry conditions updated to record the actual repo state at entry: `main.rs` is a state-bootstrap placeholder, the framework-independent modules from the aborted GPUI start survive, and `screens` is a directory module. Added WS1 deliverable 3a: `data_dir()` cleanup, replacing the `CAREER_OPS_DATA_DIR` env-var requirement with a `directories`-crate lookup. Toolchain requirement reworded to defer to the workspace `rust-version` field rather than pinning 1.80. Added a clean-machine acceptance criterion for WS1. |
 | v0.4 | Workstream 1 implemented and the plan corrected against the actual egui/eframe 0.37 API: `eframe::App` exposes `ui(&mut self, &mut egui::Ui, ...)`, not `update`; `SidePanel`/`TopBottomPanel` are replaced by `Panel::left` and friends; `Response::labelled_by(Id)` exists at 0.37, so the accessible-input workaround is a real association rather than a documented limitation. Added `CareerOpsApp::spawn` because `AsyncTask::spawn` calls `tokio::spawn` and panics outside a runtime context. Recorded the WS1 implementation files and tests. |
+| v0.5 | Workstream 2 implemented: unlock, first-launch wizard, and recovery screens; filesystem recovery actions (locate key file, export encrypted bundle, explicit reset); async state hand-off. Recorded that `AppState` is moved into the task rather than borrowed across an await, that secrets are cleared when the task takes ownership, and that a partially completed first launch is re-bootstrapped to surface Recovery. Added `screens/lock.rs`, `recovery.rs`, and `tests/lock_screens.rs`. |
 
 ---
 
@@ -258,6 +259,10 @@ W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
 
 4. **Recovery is not a modal.** It is a full-screen flow, because a user seeing it is already worried and a modal over a locked shell is more alarming than a calm full-screen explanation.
 
+5. **The state moves into the async task, not into a mutex.** `AppState` methods are async `&mut self`, while `AsyncTask` requires a `'static` future. `CareerOpsApp` holds `Option<AppState>`, moves it into the task, and restores it with the result. While the task runs, the UI shows a spinner. Do not wrap the state in a mutex and hold it across an await. If the task is interrupted, re-bootstrap from the data directory; if that fails, show the fatal screen rather than spinning forever.
+
+6. **Secrets are cleared when the task starts.** The view-model copies of the passphrase, confirmation, and acknowledgement are cleared immediately after the action is captured. The task's owned copy is cleared after it is used. Nothing logs a passphrase.
+
 ### Acceptance Criteria
 
 | Criterion | Verification |
@@ -265,11 +270,13 @@ W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
 | Window opens to unlock when `dek.wrapped.json` exists | Manual test |
 | Window opens to first-launch when no files exist | Manual test |
 | Window opens to recovery when unlock fails | Manual test |
-| Successful unlock reaches the main layout | `egui_kittest` test plus manual test |
-| First-launch completion reaches the main layout | `egui_kittest` test |
-| Recovery screen offers all five options | Manual test |
+| Successful unlock reaches the main layout | `CareerOpsApp` async test reaches `Ready`; `ui_shell` test renders the layout |
+| First-launch completion reaches the main layout | `CareerOpsApp` async test reaches `Ready`; wizard test covers the gate |
+| Recovery screen offers all five options | `egui_kittest` test plus manual test |
 | Typed acknowledgement is required | `egui_kittest` test asserting the button is disabled until the phrase matches |
 | No passphrase appears in logs | Code review + grep |
+
+**Implementation note (2026-10-24).** Workstream 2 landed as `crates/app/src/screens/lock.rs` (unlock, wizard, recovery, `LockAction`), `crates/app/src/recovery.rs` (opening the data directory, locating a key file, exporting the bundle, and the confirmed reset), and `crates/app/tests/lock_screens.rs`. `CareerOpsApp` now stores `Option<AppState>` and moves it into each async lock operation; `app.rs` tests cover first-launch and returning-user unlock through that path. The recovery screen wires passphrase unlock and keychain retry to the state machine, and the locate/export/reset actions to the filesystem helpers. The locate action validates that the selected file is a wrapped-key bundle before copying it, and the first-launch passphrase is retained until success so a failed attempt can be retried without an empty-passphrase path.
 
 ---
 

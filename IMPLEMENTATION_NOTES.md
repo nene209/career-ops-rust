@@ -36,19 +36,15 @@ views are placeholders.
 
 ## What is stubbed
 
-- **Shell screens** — Phase 2.1 Workstream 1 renders the sidebar and empty
-  states; the unlock/first-launch/recovery screens (Workstream 2) and the
-  Portals/Pipeline screens (Workstreams 3–4) are still placeholders.
+- **Portals and Pipeline screens** — Phase 2.1 Workstreams 1–2 render the
+  shell, unlock, first-launch, and recovery flows. The Portals and Pipeline
+  screens (Workstreams 3–4) are still empty states.
 - **Template seeding** — the `templates` table and repository are in place,
   but no template `.html` files exist yet. Seeding a template system is a
   **Phase 4** deliverable, and Phase 4 should model it on `prompts_seed.rs`
   (update-aware seeding) rather than the current
   `templates::seed_if_empty` pattern, which does not handle content
   changes across releases.
-- **Recovery screen actions** — the state exists; the five actions
-  (unlock, retry, locate, export, reset) are not wired to UI events.
-- **First-launch wizard content** — the passphrase and acknowledgement
-  steps are described, not rendered.
 - **Argon2id tuning** — parameters are the RustCrypto Book minimums
   (19 MiB, 2 iterations, 1 parallelism). They are safe but may not hit the
   250–500 ms target on all hardware. Benchmark on your target hardware
@@ -62,6 +58,10 @@ views are placeholders.
 - **eframe shell** — `CareerOpsApp` runs the egui event loop, owns the tokio
   runtime, renders the sidebar, and switches the central panel through
   `NavigationState`.
+- **Lock screens** — Phase 2.1 Workstream 2 renders unlock, first-launch, and
+  recovery. Lock views return a `LockAction`; `CareerOpsApp` moves `AppState`
+  into the async task, restores it with the result, and applies the
+  filesystem recovery actions.
 
 - **Prompt seeding** — `crates/core/src/prompts_seed.rs` embeds the
   original `modes/*.md` files at compile time and seeds them into the

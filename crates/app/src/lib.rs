@@ -7,6 +7,7 @@
 pub mod app;
 pub mod async_bridge;
 pub mod navigation;
+pub mod recovery;
 pub mod screens;
 pub mod state;
 pub mod view_models;
