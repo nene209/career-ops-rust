@@ -300,12 +300,14 @@ docs/
 
 ### Data directory
 
-The application stores its data in a directory determined at runtime.
-For Phase 1, `career_ops_core::data_dir()` reads `CAREER_OPS_DATA_DIR`
-from the environment. In production this will be replaced with the
-OS-specific app data directory.
+The application stores its data in the OS-specific app data directory
+(`~/Library/Application Support/career-ops` on macOS,
+`$XDG_DATA_HOME/career-ops` or `~/.local/share/career-ops` on Linux, and
+`%APPDATA%\career-ops\data` on Windows). Phase 2.1 replaced the Phase 1
+placeholder that required an environment variable.
 
-Set it explicitly to control where the database and key file live:
+`CAREER_OPS_DATA_DIR` overrides that location, which is useful for
+development and isolated test runs:
 
 ```bash
 export CAREER_OPS_DATA_DIR="$HOME/.local/share/career-ops"

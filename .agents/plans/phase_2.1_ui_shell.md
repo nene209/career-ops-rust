@@ -1,7 +1,7 @@
 # Phase 2.1: UI Shell — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.5), §12
-**Status:** Draft — rewritten against egui after Phase 2.01 evaluation
+**Status:** In progress — Workstream 1 implemented (2026-10-24)
 **Last updated:** 2026-10-24
 **Duration:** 1.5–2 weeks
 **Depends on:** Phase 2 completion (2026-10-23) and Phase 2.01 (2026-10-24)
@@ -15,6 +15,7 @@
 | v0.1 | Initial Phase 2.1 plan written against GPUI. |
 | v0.2 | Rewritten against egui/eframe after Phase 2.01 found GPUI's test harness and API stability unsuitable for a five-phase dependency. View-model, navigation, and async bridge survive unchanged. View layer, test patterns, and toolchain requirements are replaced. The accessibility gap found during the egui prototype (text inputs have no accessible label) is addressed as an implementation note and a Phase 5 audit item. |
 | v0.3 | Entry conditions updated to record the actual repo state at entry: `main.rs` is a state-bootstrap placeholder, the framework-independent modules from the aborted GPUI start survive, and `screens` is a directory module. Added WS1 deliverable 3a: `data_dir()` cleanup, replacing the `CAREER_OPS_DATA_DIR` env-var requirement with a `directories`-crate lookup. Toolchain requirement reworded to defer to the workspace `rust-version` field rather than pinning 1.80. Added a clean-machine acceptance criterion for WS1. |
+| v0.4 | Workstream 1 implemented and the plan corrected against the actual egui/eframe 0.37 API: `eframe::App` exposes `ui(&mut self, &mut egui::Ui, ...)`, not `update`; `SidePanel`/`TopBottomPanel` are replaced by `Panel::left` and friends; `Response::labelled_by(Id)` exists at 0.37, so the accessible-input workaround is a real association rather than a documented limitation. Added `CareerOpsApp::spawn` because `AsyncTask::spawn` calls `tokio::spawn` and panics outside a runtime context. Recorded the WS1 implementation files and tests. |
 
 ---
 
@@ -109,12 +110,18 @@ W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
 
 ### Deliverables
 
-1. **`eframe::App` implementation.** The binary's `main.rs` replaces the Phase 1 state-bootstrap placeholder with `eframe::run_native`. A `CareerOpsApp` implements `eframe::App::update` and holds the Phase 1 `AppState`, the `NavigationState` from `navigation.rs`, and a `tokio::runtime::Runtime`. The runtime is constructed in `main` before `run_native` and moved into the app, so its lifetime is tied to the process; async work in later workstreams is spawned via `self.runtime.spawn(...)`.
+1. **`eframe::App` implementation.** The binary's `main.rs` replaces the Phase 1 state-bootstrap placeholder with `eframe::run_native`. `CareerOpsApp` lives in `crates/app/src/app.rs` so tests can construct it without spawning the binary. It holds the Phase 1 `AppState`, the `NavigationState` from `navigation.rs`, and a `tokio::runtime::Runtime`, and implements `eframe::App::ui`:
+
+   ```rust
+   fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame)
+   ```
+
+   The runtime is constructed in `main` before `run_native` and moved into the app, so its lifetime is tied to the process. Later workstreams must spawn through `CareerOpsApp::spawn`, which enters the runtime before calling `AsyncTask::spawn`; calling `AsyncTask::spawn` directly from `ui()` panics because the eframe UI thread is not a tokio worker thread.
 
    `main.rs` at the end of this deliverable:
 
    ```rust
-   fn main() -> eframe::Result<()> {
+   fn main() -> anyhow::Result<()> {
        tracing_subscriber::fmt()
            .with_env_filter(EnvFilter::from_default_env())
            .init();
@@ -122,8 +129,7 @@ W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
        let state = AppState::bootstrap(career_ops_core::data_dir())?;
        let runtime = tokio::runtime::Builder::new_multi_thread()
            .enable_all()
-           .build()
-           .expect("tokio runtime");
+           .build()?;
 
        let options = eframe::NativeOptions {
            viewport: egui::ViewportBuilder::default()
@@ -136,33 +142,39 @@ W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
            "Career-Ops",
            options,
            Box::new(move |_cc| Ok(Box::new(CareerOpsApp::new(state, runtime)))),
-       )
+       )?;
+
+       Ok(())
    }
    ```
 
-2. **Panel layout.** `egui::SidePanel::left` renders the navigation sidebar with one `selectable_label` per `MainScreen` variant. `egui::CentralPanel` renders the currently-selected screen. The two panels are the frame for every screen that follows.
+   `main` returns `anyhow::Result`, not `eframe::Result`: `AppState::bootstrap` returns `CoreError`, which `eframe::Error` does not absorb. The `?` on `run_native` still works because `anyhow` accepts `eframe::Error`.
+
+2. **Panel layout.** egui 0.37 renamed `SidePanel`/`TopBottomPanel` to `Panel`; `SidePanel` no longer exists. Use `egui::Panel::left` for the navigation sidebar, with one `selectable_label` per `MainScreen` variant, and `egui::CentralPanel` for the currently-selected screen. Both `show` methods take the root `&mut egui::Ui` that `eframe::App::ui` receives, not a `Context`. The two panels are the frame for every screen that follows.
 
 3. **Async bridge for the eframe update loop.** The `AsyncTask` type from `async_bridge.rs` survives unchanged. The pattern that connects it to eframe is:
 
    ```rust
-   // In CareerOpsApp::update
+   // In CareerOpsApp::ui (eframe 0.37 gives a &mut egui::Ui, not a Context)
    if let Some(task) = &mut self.pending_fetch {
        match task.try_recv() {
            TaskPoll::Ready(report) => {
                self.apply_fetch_result(report);
                self.pending_fetch = None;
-               ctx.request_repaint();
+               ui.ctx().request_repaint();
            }
            TaskPoll::Pending => {
-               // Ask egui to re-run update soon so we poll again.
-               ctx.request_repaint_after(Duration::from_millis(50));
+               // Ask egui to re-run ui() soon so we poll again.
+               ui.ctx().request_repaint_after(Duration::from_millis(50));
            }
            TaskPoll::Cancelled => { self.pending_fetch = None; }
        }
    }
    ```
 
-   The key difference from GPUI: egui does not call `update()` continuously by default. `ctx.request_repaint_after` schedules the next poll; without it, the update loop sleeps and the task result is never observed. That is the one non-obvious thing about integrating async with eframe, and it is worth a note in `patterns.md`.
+   The key difference from GPUI: egui does not call `ui()` continuously by default. `request_repaint_after` schedules the next poll; without it, the event loop sleeps and the task result is never observed. That is the one non-obvious thing about integrating async with eframe, and it is documented in `patterns.md`.
+
+   Spawning has a second trap: `AsyncTask::spawn` calls `tokio::spawn`, which requires the current thread to be inside a runtime context. The eframe UI thread is not. Use `CareerOpsApp::spawn(future)`, which enters `self.runtime` before delegating, or enter the runtime explicitly with `let _guard = self.runtime.enter();`.
 
 3a. **`data_dir()` cleanup.** The Phase 1 placeholder reads `CAREER_OPS_DATA_DIR` from the environment and panics if it is unset. Replace it with a `directories`-crate lookup for the OS-appropriate app data directory, with the env var retained as an override for development:
 
@@ -181,7 +193,7 @@ W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
 
 4. **Three shared components:**
    - `EmptyState` — an icon, a message, an optional action button. Used by Portals ("no portals configured"), Pipeline ("no jobs yet"), and any future screen with a list.
-   - `StatusBadge` — a colored label with an icon and text. Variants for the four `HealthState` values plus the sidecar `Running`/`Stopped`.
+   - `StatusBadge` — a colored label with an icon and text. Variants for the four `HealthState` values plus the sidecar `NotStarted`/`Running`/`Stopped`.
    - `LoadingSpinner` — `egui::Spinner` wrapped in a helper that matches the project's spacing.
 
 5. **Accessible-input helper.** egui's `TextEdit` does not expose `hint_text` as an accessible label — a gap found during the Phase 2.01 prototype and confirmed in the accessibility tree. A helper function:
@@ -195,7 +207,7 @@ W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
    ) -> egui::Response
    ```
 
-   renders `ui.label(label)` and then a `TextEdit`, and associates them so a screen reader reads the label with the field. The exact mechanism depends on egui 0.37's `labelled_by` API — check the version's `Response` methods and use whichever association the version provides. **If no association exists at 0.37, the helper renders the label as visible text and records the limitation in a comment for the Phase 5 audit.** Either way, the helper is the single place the pattern lives, so a later fix updates one function.
+   renders `ui.label(label)` and then a `TextEdit`, and associates them so a screen reader reads the label with the field. egui 0.37 provides `Response::labelled_by(Id)`, verified against the crate source; the helper returns `ui.add(edit).labelled_by(label_response.id)`. No fallback or Phase 5 workaround is needed. The helper remains the single place the pattern lives, so a later API change updates one function.
 
 6. **`crates/app/docs/patterns.md`** documenting the list, form, and async-with-progress patterns against egui. These are the contract Phase 3, 4, and 5 add screens against. The async pattern must call out `request_repaint_after` explicitly, because omitting it produces a UI that silently never updates.
 
@@ -207,10 +219,12 @@ W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
 | `cargo run -p career-ops-app` opens without requiring any env var to be set | Manual test on a clean checkout |
 | Sidebar navigation changes the rendered screen | Manual test |
 | `EmptyState`, `StatusBadge`, `LoadingSpinner` render in isolation | Manual test on a scratch screen |
-| Async task completes and the UI reflects the result | Unit test on `AsyncTask` plus manual test |
+| Async task completes and the UI reflects the result | Unit tests on `AsyncTask` and `CareerOpsApp::spawn` plus manual test |
 | Idle CPU is near zero with no async task running | Manual test — `top` or `htop`, 30-second sample |
 | `labelled_input` produces an accessible label | `egui_kittest` test asserting the input is queryable by label |
 | `patterns.md` documents all three patterns, including the repaint requirement | Documentation review |
+
+**Implementation note (2026-10-24).** Workstream 1 landed as `crates/app/src/app.rs` (`CareerOpsApp`), `crates/app/src/screens/components.rs` (shared components), `crates/app/src/screens/shell.rs` (sidebar + content), `crates/app/src/screens/lock.rs` (pre-`Ready` placeholders), and `crates/app/tests/ui_shell.rs`. The snippets above are the code that compiled. The changes from earlier plan text are API corrections, not design changes: `App::ui` instead of `App::update`, `Panel::left` instead of `SidePanel`, and `CareerOpsApp::spawn` to enter the runtime before `AsyncTask::spawn`.
 
 ---
 
@@ -236,7 +250,7 @@ W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
 
 ### Critical implementation notes
 
-1. **The state machine is the source of truth.** Screens render `AppState::current()`; they do not maintain navigation state of their own. When `AppState` transitions, `update()` renders the new state on the next frame.
+1. **The state machine is the source of truth.** Screens render `AppState::current()`; they do not maintain navigation state of their own. When `AppState` transitions, `ui()` renders the new state on the next frame.
 
 2. **The passphrase is never logged.** Grep `tracing::debug!` calls in the shell before merging. Also confirm the passphrase `String` is cleared from the view-model after unlock — egui's `TextEdit` keeps its binding alive, so an explicit `passphrase.clear()` after success is worth doing.
 
@@ -281,7 +295,7 @@ W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
 
 4. **"Fetch now" per row.** A small icon button or a `ui.menu_button("⋯", ...)` context menu. Calls `portals::service::fetch_one`. During the fetch, the row shows `LoadingSpinner` in place of the health badge. On completion, the row updates from `FetchReport.portal`.
 
-5. **"Fetch all" batch.** A button in the screen header. Calls `portals::service::fetch_batch`. Because `fetch_batch` takes an `FnMut(&BatchEntry)` callback, the callback sends entries through an `mpsc` channel that `update()` drains each frame. That is the eframe equivalent of the callback: the router's plain-closure design pays off here.
+5. **"Fetch all" batch.** A button in the screen header. Calls `portals::service::fetch_batch`. Because `fetch_batch` takes an `FnMut(&BatchEntry)` callback, the callback sends entries through an `mpsc` channel that `ui()` drains each frame. That is the eframe equivalent of the callback: the router's plain-closure design pays off here.
 
    During the batch:
    - Each row shows the batch state (spinner or result)
@@ -347,7 +361,7 @@ These are framework-independent. They compile today. Every function has a unit t
 
 1. **The health drill-down uses `suggested_action` directly.** No reimplementation of message-mapping in the view.
 
-2. **Batch progress flows through an `mpsc` channel.** `fetch_batch`'s `FnMut(&BatchEntry)` callback sends on `std::sync::mpsc::Sender`; `update()` drains with `try_iter()` each frame. `ctx.request_repaint_after` keeps the frame loop live while the batch runs.
+2. **Batch progress flows through an `mpsc` channel.** `fetch_batch`'s `FnMut(&BatchEntry)` callback sends on `std::sync::mpsc::Sender`; `ui()` drains with `try_iter()` each frame. `ui.ctx().request_repaint_after` keeps the frame loop live while the batch runs.
 
 3. **Cancellation uses a shared `AtomicBool`.** The callback checks it before applying each entry; if cancelled, the router's remaining fetches are skipped. A fetch in progress finishes first — that is coarse but correct.
 
@@ -497,13 +511,13 @@ Each step lists the expected outcome. This is the "does the application work" ch
 | ID | Risk | Impact | Mitigation |
 | :--- | :--- | :--- | :--- |
 | P2.1-R1 | **egui is the wrong framework after all.** The data-dense screens cost more CPU than expected, or immediate-mode ergonomics do not scale. | Medium | Two weeks to find out. If the framework has to change, the view-model and navigation layers survive unchanged — the rewrite is the view layer only. Record the finding in the retrospective as evidence for the next evaluation. |
-| P2.1-R2 | **The accessibility gap is harder to fix than expected.** `labelled_input` cannot associate the label with the field at 0.37. | Medium | Accept as a Phase 5 audit item. The helper localizes the workaround so the fix is one function. Do not let it block Phase 2.1. |
+| P2.1-R2 | **Accessibility compliance is broader than the input-label fix.** `labelled_input` can associate the label with the field at 0.37, but focus order, keyboard navigation, and contrast are not addressed. | Medium | The helper localizes the input-label work. Treat the rest as Phase 5 audit items; do not let them block Phase 2.1. |
 | P2.1-R3 | **The service layer's shapes are awkward to render.** | Medium | This is what the phase is for. If a shape is wrong, fix it in the service layer (test-first) rather than in the view. |
 | P2.1-R4 | **Scope creep into polish.** | High | Explicitly out of scope. Polish is Phase 5. |
 | P2.1-R5 | **Scope creep into Phase 3.** | High | Buttons are disabled placeholders. |
 | P2.1-R6 | **`request_repaint_after` polling causes a busy loop or a frozen UI.** | Low | `request_repaint_after(Duration::from_millis(50))` during an active task, no repaint request when idle. Verify manually that idle CPU is near zero. |
 | P2.1-R7 | **Manual test script gets skipped.** | Medium | The script is an exit criterion, not a suggestion. |
-| P2.1-R8 | **`data_dir()` migration breaks an existing local database.** Moving from the env-var path to the OS-appropriate path changes where the app looks for `career-ops.db`. | Low | Document the new path in the README. The env var override remains, so a developer with an existing database can set it to the old path. There is no shipped data to migrate. |
+| P2.1-R8 | **`data_dir()` migration breaks an existing local database.** Moving from the env-var path to the OS-appropriate path changes where the app looks for `career-ops.db`. | Low | The new path is documented in the README. The env var override remains, so a developer with an existing database can set it to the old path. There is no shipped data to migrate. |
 
 ---
 

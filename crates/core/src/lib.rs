@@ -20,12 +20,16 @@ pub use error::{CoreError, Result};
 /// Application-wide data directory resolver.
 ///
 /// Phase 1 uses a single directory for the encrypted database and the
-/// `dek.wrapped.json` file. In production this would resolve to the OS-specific
-/// app data directory; tests pass an explicit temporary directory.
+/// `dek.wrapped.json` file. The OS-specific app data directory is the
+/// default; `CAREER_OPS_DATA_DIR` remains as an override for development
+/// and tests. Tests that need an isolated directory pass one explicitly to
+/// `AppState::bootstrap` rather than relying on this function.
 pub fn data_dir() -> std::path::PathBuf {
-    // Real implementation: use the `directories` crate or similar.
-    // Left as a placeholder so Phase 1 does not add another dependency.
-    std::env::var_os("CAREER_OPS_DATA_DIR")
-        .map(std::path::PathBuf::from)
-        .expect("CAREER_OPS_DATA_DIR must be set (Phase 1 placeholder)")
+    if let Some(dir) = std::env::var_os("CAREER_OPS_DATA_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+
+    directories::ProjectDirs::from("", "", "career-ops")
+        .map(|dirs| dirs.data_dir().to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
 }

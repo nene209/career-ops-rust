@@ -4,6 +4,7 @@
 //! library exists so integration tests can exercise the state machine
 //! and view-models without spawning the full GUI.
 
+pub mod app;
 pub mod async_bridge;
 pub mod navigation;
 pub mod screens;

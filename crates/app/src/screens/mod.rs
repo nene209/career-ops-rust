@@ -1,9 +1,16 @@
-//! GPUI view layer. Everything in this module depends on `gpui`.
+//! egui view layer.
 //!
-//! Views are described and manually verified; their logic lives in
-//! `crate::view_models` and `crate::navigation`, both of which are
-//! testable without GPUI. See `crates/app/docs/patterns.md` for the
-//! pattern contract that Phase 3, 4, and 5 add screens against.
+//! Screens are thin: they render state produced by `crate::state` and
+//! `crate::view_models`, and they emit events back to `CareerOpsApp`. Correct
+//! behaviour belongs in the state machine or a view-model so it can be tested
+//! without egui.
+//!
+//! This module starts with the Workstream 1 shell and its shared components.
+//! Workstreams 2–4 add `lock` content and the Portals/Pipeline screens behind
+//! the same shell.
 
-// pub mod root;          // Step 2
-// pub mod sidebar;       // Step 2
+pub mod components;
+pub mod lock;
+pub mod shell;
+
+pub use components::{labelled_input, EmptyState, LoadingSpinner, StatusBadge};

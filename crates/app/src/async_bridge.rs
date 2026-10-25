@@ -130,7 +130,10 @@ mod tests {
         // Second poll: ready.
         match task.try_recv() {
             TaskPoll::Ready(v) => assert_eq!(v, 42),
-            other => panic!("expected Ready(42), got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected Ready(42), got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
 
         // Third poll: cancelled (already consumed).

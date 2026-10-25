@@ -36,10 +36,9 @@ views are placeholders.
 
 ## What is stubbed
 
-- **GPUI views** — `crates/app/src/screens.rs` is placeholder text. The
-  state machine is real; the rendering is not.
-- **`data_dir()`** — reads `CAREER_OPS_DATA_DIR` from the environment. In
-  production, use the `directories` crate.
+- **Shell screens** — Phase 2.1 Workstream 1 renders the sidebar and empty
+  states; the unlock/first-launch/recovery screens (Workstream 2) and the
+  Portals/Pipeline screens (Workstreams 3–4) are still placeholders.
 - **Template seeding** — the `templates` table and repository are in place,
   but no template `.html` files exist yet. Seeding a template system is a
   **Phase 4** deliverable, and Phase 4 should model it on `prompts_seed.rs`
@@ -56,6 +55,13 @@ views are placeholders.
   before tuning (Q-3).
 
 ## What is now implemented (moved out of "stubbed" since the first draft)
+
+- **`data_dir()`** — Phase 2.1 Workstream 1 resolves the OS-specific app data
+  directory via the `directories` crate. `CAREER_OPS_DATA_DIR` remains as a
+  development override.
+- **eframe shell** — `CareerOpsApp` runs the egui event loop, owns the tokio
+  runtime, renders the sidebar, and switches the central panel through
+  `NavigationState`.
 
 - **Prompt seeding** — `crates/core/src/prompts_seed.rs` embeds the
   original `modes/*.md` files at compile time and seeds them into the
