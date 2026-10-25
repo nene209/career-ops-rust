@@ -5,11 +5,11 @@
 //! - `AppState`, the Phase 1 state machine and the source of truth for which
 //!   screen is visible.
 //! - `NavigationState`, the sidebar selection once the user reaches `Ready`.
-//! - A `tokio::runtime::Runtime`, used by the lock screens and by Workstreams
-//!   3–4 to run service-layer calls off the UI thread.
-//! - UI-only lock state and the one pending async operation.
+//! - A `tokio::runtime::Runtime`, used by the lock and Portals screens to run
+//!   service-layer calls off the UI thread.
+//! - UI-only lock state, Portals view state, and the in-flight async work.
 //!
-//! ## Why the state is an `Option`
+//! ## Why the lock state is an `Option`
 //!
 //! Lock operations (`try_passphrase`, `try_keychain`, `complete_first_launch`)
 //! are async `&mut self` methods on `AppState`. `AsyncTask` requires `'static`,
@@ -18,40 +18,104 @@
 //! `state` is `None` and the UI shows a spinner. This keeps `state.rs`
 //! untouched and avoids holding a mutex across an await.
 //!
-//! The async hand-off pattern is documented in `docs/patterns.md`.
+//! Portals work does not move the state: it clones the `SqlitePool` and shares
+//! the HTTP source and browser backend through `Arc`. The state machine stays
+//! available while a fetch or mutation runs.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 
+use career_ops_core::acquisition::http;
+use career_ops_core::acquisition::manual;
+use career_ops_core::acquisition::router::HttpFetchSource;
+use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
+use career_ops_core::model::FetchTier;
+use career_ops_core::portals::service::{self, BatchEntry, BatchReport, PortalWithHealth};
+use career_ops_core::repo::portals::{self as portal_repo, NewPortal, RenderMode};
 use career_ops_core::{CoreError, Result as CoreResult};
 use tokio::runtime::Runtime;
 
 use crate::async_bridge::{AsyncTask, TaskPoll};
-use crate::navigation::NavigationState;
+use crate::navigation::{MainScreen, NavigationState};
 use crate::recovery;
 use crate::screens;
 use crate::screens::lock::{LockAction, LockView, RESET_PHRASE};
+use crate::screens::portals::{
+    ManualEntryView, ManualSuccess, PortalForm, PortalFormData, PortalModal, PortalsAction,
+    PortalsRenderState, PortalsView,
+};
 use crate::state::{AppState, Screen};
+use crate::view_models::portals::{BatchProgress, PortalsViewModel};
 
 type StateTask = AsyncTask<(AppState, CoreResult<()>)>;
 
+enum PortalsTask {
+    List {
+        task: AsyncTask<CoreResult<Vec<PortalWithHealth>>>,
+        close_modal: bool,
+    },
+    Fetch(AsyncTask<CoreResult<service::FetchReport>>),
+    Batch(AsyncTask<CoreResult<BatchReport>>),
+    Manual(AsyncTask<CoreResult<ManualOutcome>>),
+}
+
+enum PortalsPoll {
+    List(CoreResult<Vec<PortalWithHealth>>, bool),
+    Fetch(CoreResult<service::FetchReport>),
+    Batch(CoreResult<BatchReport>),
+    Manual(CoreResult<ManualOutcome>),
+    Cancelled,
+}
+
+enum ManualOutcome {
+    Url {
+        title: String,
+        company: String,
+        tier: FetchTier,
+        warnings: Vec<String>,
+    },
+    Text {
+        title: String,
+        company: String,
+    },
+}
+
 /// The root application object passed to `eframe::run_native`.
 pub struct CareerOpsApp {
-    /// `None` only while an async state transition owns the state.
+    /// `None` only while an async lock transition owns the state.
     state: Option<AppState>,
     data_dir: PathBuf,
     navigation: NavigationState,
     runtime: Runtime,
     lock_view: LockView,
     pending: Option<StateTask>,
-    /// Set only if an interrupted task lost the state and it could not be
+    /// Set only if an interrupted lock task lost the state and it could not be
     /// reopened. The app then renders a fatal screen instead of a spinner.
     fatal_error: Option<String>,
+
+    http_source: Arc<HttpFetchSource>,
+    browser: Arc<ObscuraBrowserBackend>,
+
+    portals: PortalsViewModel,
+    portals_view: PortalsView,
+    portals_loaded: bool,
+    portals_error: Option<String>,
+    portals_message: Option<String>,
+    portals_task: Option<PortalsTask>,
+    batch_progress_rx: Option<Receiver<BatchEntry>>,
+    batch_cancel: Arc<AtomicBool>,
+    batch_ids: Vec<i64>,
+    fetching_portal: Option<i64>,
 }
 
 impl CareerOpsApp {
     pub fn new(state: AppState, runtime: Runtime) -> Self {
         let data_dir = state.data_dir().clone();
+        let client = http::default_client().expect("build the HTTP client");
+
         Self {
             state: Some(state),
             data_dir,
@@ -60,10 +124,22 @@ impl CareerOpsApp {
             lock_view: LockView::default(),
             pending: None,
             fatal_error: None,
+            http_source: Arc::new(HttpFetchSource::new(client)),
+            browser: Arc::new(ObscuraBrowserBackend::with_defaults()),
+            portals: PortalsViewModel::default(),
+            portals_view: PortalsView::default(),
+            portals_loaded: false,
+            portals_error: None,
+            portals_message: None,
+            portals_task: None,
+            batch_progress_rx: None,
+            batch_cancel: Arc::new(AtomicBool::new(false)),
+            batch_ids: Vec::new(),
+            fetching_portal: None,
         }
     }
 
-    /// The state machine, if no async transition currently owns it.
+    /// The state machine, if no async lock transition currently owns it.
     pub fn state(&self) -> Option<&AppState> {
         self.state.as_ref()
     }
@@ -134,6 +210,70 @@ impl CareerOpsApp {
         }
     }
 
+    /// Execute an intent emitted by the Portals screen.
+    ///
+    /// Public so tests can drive the same path the UI uses without rendering.
+    pub fn handle_portals_action(&mut self, action: PortalsAction) {
+        match action {
+            PortalsAction::Reload => {
+                self.portals_message = None;
+                self.start_portals_load(false);
+            }
+            PortalsAction::OpenAdd => {
+                self.portals_view.modal = Some(PortalModal::Add(PortalForm::default()));
+            }
+            PortalsAction::OpenEdit(id) => {
+                if let Some(row) = self.portals.row(id) {
+                    self.portals_view.modal = Some(PortalModal::Edit {
+                        id,
+                        form: PortalForm::from_row(row),
+                    });
+                }
+            }
+            PortalsAction::OpenDelete(id) => {
+                if let Some(row) = self.portals.row(id) {
+                    self.portals_view.modal = Some(PortalModal::Delete {
+                        id,
+                        name: row.name.clone(),
+                    });
+                }
+            }
+            PortalsAction::OpenManual => {
+                self.portals_view.modal = Some(PortalModal::Manual(ManualEntryView::default()));
+            }
+            PortalsAction::CloseModal => self.portals_view.modal = None,
+            PortalsAction::CreatePortal(data) => self.start_portal_mutation(None, data),
+            PortalsAction::UpdatePortal { id, data } => {
+                self.start_portal_mutation(Some(id), data);
+            }
+            PortalsAction::DeletePortal(id) => self.start_portal_delete(id),
+            PortalsAction::FetchOne(id) => self.start_portal_fetch(id),
+            PortalsAction::FetchAll => self.start_portal_batch(),
+            PortalsAction::CancelBatch => {
+                self.batch_cancel.store(true, Ordering::Relaxed);
+                if let Some(batch) = &mut self.portals.batch {
+                    batch.cancelled = true;
+                    batch.in_flight = None;
+                }
+            }
+            PortalsAction::DismissBatch => {
+                self.portals.batch = None;
+                self.batch_progress_rx = None;
+                self.batch_ids.clear();
+            }
+            PortalsAction::ManualFromUrl(url) => self.start_manual_url(url),
+            PortalsAction::ManualFromText {
+                title,
+                company,
+                body,
+            } => self.start_manual_text(title, company, body),
+            PortalsAction::ShowInPipeline => {
+                self.portals_view.modal = None;
+                self.navigation.navigate_to(MainScreen::Pipeline);
+            }
+        }
+    }
+
     /// Poll the in-flight lock operation. Called once per frame from `ui()`.
     pub fn poll_pending(&mut self, ctx: &egui::Context) {
         let poll = match self.pending.as_mut() {
@@ -154,6 +294,9 @@ impl CareerOpsApp {
                             // Drop the transient passphrase strings once the
                             // vault is open. The shell no longer needs them.
                             self.lock_view = LockView::default();
+                            // Any Portals data belongs to the previous vault or
+                            // session; load it fresh after this unlock.
+                            self.reset_portals_state();
                         }
                     }
                     Err(error) => {
@@ -303,6 +446,506 @@ impl CareerOpsApp {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // Portals
+    // ------------------------------------------------------------------
+
+    fn reset_portals_state(&mut self) {
+        self.portals = PortalsViewModel::default();
+        self.portals_view = PortalsView::default();
+        self.portals_loaded = false;
+        self.portals_error = None;
+        self.portals_message = None;
+        self.portals_task = None;
+        self.batch_progress_rx = None;
+        self.batch_cancel = Arc::new(AtomicBool::new(false));
+        self.batch_ids.clear();
+        self.fetching_portal = None;
+    }
+
+    fn pool(&self) -> Option<sqlx::SqlitePool> {
+        self.state.as_ref().and_then(|state| state.pool().cloned())
+    }
+
+    fn begin_portals_task(&mut self) -> bool {
+        if self.portals_task.is_some() {
+            return false;
+        }
+
+        self.portals_error = None;
+        self.portals_message = None;
+        self.fetching_portal = None;
+        true
+    }
+
+    fn start_portals_load(&mut self, close_modal: bool) {
+        if !self.begin_portals_task() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.portals_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let task = self.spawn(async move { service::list_with_health(&pool).await });
+        self.portals_task = Some(PortalsTask::List { task, close_modal });
+    }
+
+    fn start_portal_mutation(&mut self, id: Option<i64>, data: PortalFormData) {
+        let input = match new_portal_input(&data) {
+            Ok(input) => input,
+            Err(error) => {
+                self.portals_view.set_form_error(error);
+                return;
+            }
+        };
+
+        if !self.begin_portals_task() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.portals_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let task = self.spawn(async move {
+            match id {
+                Some(id) => {
+                    portal_repo::update(&pool, id, input).await?;
+                }
+                None => {
+                    portal_repo::create(&pool, input).await?;
+                }
+            }
+            service::list_with_health(&pool).await
+        });
+
+        self.portals_task = Some(PortalsTask::List {
+            task,
+            close_modal: true,
+        });
+    }
+
+    fn start_portal_delete(&mut self, id: i64) {
+        if !self.begin_portals_task() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.portals_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let task = self.spawn(async move {
+            portal_repo::delete(&pool, id).await?;
+            service::list_with_health(&pool).await
+        });
+
+        self.portals_task = Some(PortalsTask::List {
+            task,
+            close_modal: true,
+        });
+    }
+
+    fn start_portal_fetch(&mut self, id: i64) {
+        if !self.begin_portals_task() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.portals_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let source = Arc::clone(&self.http_source);
+        let browser = Arc::clone(&self.browser);
+        let task = self.spawn(async move {
+            service::fetch_one(&pool, id, source.as_ref(), Some(browser.as_ref())).await
+        });
+
+        self.fetching_portal = Some(id);
+        self.portals_task = Some(PortalsTask::Fetch(task));
+    }
+
+    fn start_portal_batch(&mut self) {
+        let ids: Vec<i64> = self.portals.rows.iter().map(|row| row.id).collect();
+        if ids.is_empty() || !self.begin_portals_task() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.portals_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let source = Arc::clone(&self.http_source);
+        let browser = Arc::clone(&self.browser);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_task = Arc::clone(&cancel);
+        let (sender, receiver) = mpsc::channel();
+
+        self.batch_progress_rx = Some(receiver);
+        self.batch_cancel = cancel;
+        self.batch_ids = ids.clone();
+        self.portals.batch = Some(BatchProgress {
+            total: ids.len(),
+            completed: Vec::new(),
+            in_flight: ids.first().copied(),
+            cancelled: false,
+        });
+
+        let task = self.spawn(async move {
+            let progress = move |entry: &BatchEntry| {
+                let _ = sender.send(entry.clone());
+            };
+            service::fetch_batch_cancellable(
+                &pool,
+                &ids,
+                source.as_ref(),
+                Some(browser.as_ref()),
+                cancel_for_task.as_ref(),
+                progress,
+            )
+            .await
+        });
+
+        self.portals_task = Some(PortalsTask::Batch(task));
+    }
+
+    fn start_manual_url(&mut self, url: String) {
+        if !self.begin_portals_task() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.portals_error = Some("The database is not open.".into());
+            return;
+        };
+
+        if let Some(manual) = self.portals_view.manual_mut() {
+            manual.error = None;
+            manual.result = None;
+        }
+
+        let source = Arc::clone(&self.http_source);
+        let browser = Arc::clone(&self.browser);
+        let task = self.spawn(async move {
+            manual::add_job_from_url(&pool, &url, source.as_ref(), Some(browser.as_ref()))
+                .await
+                .map(|result| ManualOutcome::Url {
+                    title: result.stored.title,
+                    company: result.stored.company,
+                    tier: result.tier,
+                    warnings: result.warnings,
+                })
+        });
+
+        self.portals_task = Some(PortalsTask::Manual(task));
+    }
+
+    fn start_manual_text(&mut self, title: String, company: String, body: String) {
+        if !self.begin_portals_task() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.portals_error = Some("The database is not open.".into());
+            return;
+        };
+
+        if let Some(manual) = self.portals_view.manual_mut() {
+            manual.error = None;
+            manual.result = None;
+        }
+
+        let task = self.spawn(async move {
+            manual::add_job_from_text(&pool, &title, &company, &body)
+                .await
+                .map(|stored| ManualOutcome::Text {
+                    title: stored.title,
+                    company: stored.company,
+                })
+        });
+
+        self.portals_task = Some(PortalsTask::Manual(task));
+    }
+
+    fn poll_portals_task(&mut self, ctx: &egui::Context) {
+        let Some(task) = &mut self.portals_task else {
+            return;
+        };
+
+        let mut finished = false;
+        let poll = match task {
+            PortalsTask::List { task, close_modal } => match task.try_recv() {
+                TaskPoll::Ready(result) => {
+                    finished = true;
+                    Some(PortalsPoll::List(result, *close_modal))
+                }
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    None
+                }
+                TaskPoll::Cancelled => {
+                    finished = true;
+                    Some(PortalsPoll::Cancelled)
+                }
+            },
+            PortalsTask::Fetch(task) => match task.try_recv() {
+                TaskPoll::Ready(result) => {
+                    finished = true;
+                    Some(PortalsPoll::Fetch(result))
+                }
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    None
+                }
+                TaskPoll::Cancelled => {
+                    finished = true;
+                    Some(PortalsPoll::Cancelled)
+                }
+            },
+            PortalsTask::Batch(task) => match task.try_recv() {
+                TaskPoll::Ready(result) => {
+                    finished = true;
+                    Some(PortalsPoll::Batch(result))
+                }
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    None
+                }
+                TaskPoll::Cancelled => {
+                    finished = true;
+                    Some(PortalsPoll::Cancelled)
+                }
+            },
+            PortalsTask::Manual(task) => match task.try_recv() {
+                TaskPoll::Ready(result) => {
+                    finished = true;
+                    Some(PortalsPoll::Manual(result))
+                }
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    None
+                }
+                TaskPoll::Cancelled => {
+                    finished = true;
+                    Some(PortalsPoll::Cancelled)
+                }
+            },
+        };
+
+        if finished {
+            self.portals_task = None;
+        }
+
+        let Some(poll) = poll else {
+            return;
+        };
+
+        match poll {
+            PortalsPoll::List(result, close_modal) => match result {
+                Ok(entries) => {
+                    self.portals.replace_entries(entries);
+                    self.portals_loaded = true;
+                    self.portals_error = None;
+                    if close_modal {
+                        self.portals_view.modal = None;
+                    }
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    self.portals_error = Some(message.clone());
+                    if close_modal {
+                        self.portals_view.set_form_error(message);
+                    }
+                }
+            },
+            PortalsPoll::Fetch(result) => {
+                self.fetching_portal = None;
+                match result {
+                    Ok(report) => {
+                        let id = report.portal.id;
+                        self.portals.apply_fetch_result(id, &report);
+                    }
+                    Err(error) => {
+                        self.portals_error = Some(error.to_string());
+                    }
+                }
+            }
+            PortalsPoll::Batch(result) => {
+                self.drain_batch_progress();
+                match result {
+                    Ok(report) => {
+                        let cancelled = self.batch_cancel.load(Ordering::Relaxed);
+                        let total = self.batch_ids.len();
+
+                        // If the user dismissed the progress bar while the
+                        // last fetch was finishing, the channel is gone but
+                        // the report still carries the rows' outcomes.
+                        if self.portals.batch.is_none() {
+                            for entry in &report.results {
+                                self.portals.apply_batch_entry(entry);
+                            }
+                        }
+
+                        if let Some(batch) = &mut self.portals.batch {
+                            batch.cancelled |= cancelled;
+                            batch.in_flight = None;
+                        }
+
+                        self.portals_message = Some(if cancelled {
+                            format!(
+                                "Fetch cancelled after {} of {} portals.",
+                                report.results.len(),
+                                total
+                            )
+                        } else {
+                            format!(
+                                "Fetched {} portals: {} succeeded, {} failed.",
+                                report.results.len(),
+                                report.succeeded(),
+                                report.failed()
+                            )
+                        });
+                    }
+                    Err(error) => {
+                        if let Some(batch) = &mut self.portals.batch {
+                            batch.in_flight = None;
+                        }
+                        self.portals_error = Some(format!("Batch fetch failed: {error}"));
+                    }
+                }
+            }
+            PortalsPoll::Manual(result) => match result {
+                Ok(outcome) => {
+                    let success = match outcome {
+                        ManualOutcome::Url {
+                            title,
+                            company,
+                            tier,
+                            warnings,
+                        } => ManualSuccess {
+                            title,
+                            company,
+                            detail: format!("Added via {}.", tier.as_str()),
+                            warnings,
+                        },
+                        ManualOutcome::Text { title, company } => ManualSuccess {
+                            title,
+                            company,
+                            detail: "Added manually.".into(),
+                            warnings: Vec::new(),
+                        },
+                    };
+
+                    if let Some(manual) = self.portals_view.manual_mut() {
+                        manual.error = None;
+                        manual.result = Some(success);
+                    }
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    if let Some(manual) = self.portals_view.manual_mut() {
+                        manual.error = Some(message);
+                    } else {
+                        self.portals_error = Some(message);
+                    }
+                }
+            },
+            PortalsPoll::Cancelled => {
+                self.fetching_portal = None;
+                if let Some(batch) = &mut self.portals.batch {
+                    batch.in_flight = None;
+                    batch.cancelled = true;
+                }
+                self.portals_error = Some("The operation was interrupted.".into());
+            }
+        }
+
+        ctx.request_repaint();
+    }
+
+    fn drain_batch_progress(&mut self) {
+        let entries: Vec<BatchEntry> = match &self.batch_progress_rx {
+            Some(receiver) => receiver.try_iter().collect(),
+            None => return,
+        };
+
+        for entry in entries {
+            self.portals.apply_batch_entry(&entry);
+            self.update_batch_in_flight();
+        }
+    }
+
+    fn update_batch_in_flight(&mut self) {
+        let ids = self.batch_ids.clone();
+        let Some(batch) = &mut self.portals.batch else {
+            return;
+        };
+
+        if batch.cancelled || batch.completed.len() >= batch.total {
+            batch.in_flight = None;
+            return;
+        }
+
+        let completed: Vec<i64> = batch
+            .completed
+            .iter()
+            .map(|entry| entry.portal_id)
+            .collect();
+        batch.in_flight = ids.iter().copied().find(|id| !completed.contains(id));
+    }
+
+    // ------------------------------------------------------------------
+    // End Portals
+    // ------------------------------------------------------------------
+}
+
+impl Drop for CareerOpsApp {
+    fn drop(&mut self) {
+        // Abort any in-flight work before asking the sidecar to exit.
+        self.portals_task = None;
+        self.pending = None;
+
+        if tokio::runtime::Handle::try_current().is_err() {
+            let _ = self.runtime.block_on(self.browser.shutdown());
+        }
+    }
+}
+
+fn new_portal_input(data: &PortalFormData) -> std::result::Result<NewPortal, String> {
+    let company_name = data.company_name.trim();
+    let url = data.url.trim();
+
+    if company_name.is_empty() {
+        return Err("Company name cannot be empty.".into());
+    }
+
+    let parsed = url::Url::parse(url).map_err(|error| format!("Invalid URL: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("The URL must use http or https.".into());
+    }
+
+    let render_mode =
+        RenderMode::parse(&data.render_mode).ok_or_else(|| "Unknown render mode.".to_string())?;
+    let scraper_config = match data.scraper_config.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => Some(
+            serde_json::from_str(raw)
+                .map_err(|error| format!("Scraper config is not valid JSON: {error}"))?,
+        ),
+        _ => None,
+    };
+
+    Ok(NewPortal {
+        company_name: company_name.to_string(),
+        url: url.to_string(),
+        render_mode,
+        scraper_config,
+    })
 }
 
 fn friendly_error(error: &CoreError) -> String {
@@ -334,7 +977,44 @@ impl eframe::App for CareerOpsApp {
         };
 
         match screen {
-            Screen::Ready => screens::shell::show(ui, &mut self.navigation),
+            Screen::Ready => {
+                self.poll_portals_task(ui.ctx());
+                self.drain_batch_progress();
+
+                if self.navigation.current() == MainScreen::Portals
+                    && self.portals_task.is_none()
+                    && !self.portals_loaded
+                    && self.portals_error.is_none()
+                {
+                    self.start_portals_load(false);
+                }
+
+                let render_state = PortalsRenderState {
+                    loading: matches!(&self.portals_task, Some(PortalsTask::List { .. })),
+                    busy: self.portals_task.is_some(),
+                    manual_busy: matches!(&self.portals_task, Some(PortalsTask::Manual(_))),
+                    fetching_portal: self.fetching_portal,
+                    error: self.portals_error.as_deref(),
+                    message: self.portals_message.as_deref(),
+                };
+
+                let navigation = &mut self.navigation;
+                let portals = &self.portals;
+                let portals_view = &mut self.portals_view;
+                let action = screens::shell::show_with(ui, navigation, |ui, screen| match screen {
+                    MainScreen::Portals => {
+                        screens::portals::show(ui, portals, portals_view, render_state)
+                    }
+                    other => {
+                        screens::shell::placeholder(ui, other);
+                        None
+                    }
+                });
+
+                if let Some(action) = action {
+                    self.handle_portals_action(action);
+                }
+            }
             screen => {
                 if let Some(action) =
                     screens::lock::show(ui, &screen, &mut self.lock_view, &self.data_dir)
@@ -352,6 +1032,7 @@ mod tests {
 
     use super::*;
     use crate::async_bridge::TaskPoll;
+    use crate::view_models::portals::{HealthBadge, PortalRow};
 
     /// Serializes the tests that create a vault. The test keychain uses one
     /// fixed service/account pair for the whole process, so two first-launch
@@ -359,6 +1040,17 @@ mod tests {
     static KEYCHAIN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     const TEST_PASSPHRASE: &str = "first-launch-ui-test-passphrase";
+
+    fn test_app() -> (CareerOpsApp, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        (CareerOpsApp::new(state, runtime), dir)
+    }
 
     /// The eframe UI thread is not a tokio runtime thread. `CareerOpsApp::spawn`
     /// must enter the runtime before calling `AsyncTask::spawn`, or spawning a
@@ -478,5 +1170,263 @@ mod tests {
 
         assert!(!app.is_busy(), "unlock should finish");
         assert_eq!(app.state().expect("state").current(), &Screen::Ready);
+    }
+
+    #[test]
+    fn open_edit_populates_the_form_from_the_row() {
+        let (mut app, _dir) = test_app();
+        app.portals.rows.push(PortalRow {
+            id: 7,
+            name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            render_mode: "browser".into(),
+            scraper_config: Some("{\"title\":\"h1\"}".into()),
+            health: HealthBadge::NeverFetched,
+            last_attempt: None,
+            suggested_action: None,
+        });
+
+        app.handle_portals_action(PortalsAction::OpenEdit(7));
+
+        match &app.portals_view.modal {
+            Some(PortalModal::Edit { id, form }) => {
+                assert_eq!(*id, 7);
+                assert_eq!(form.company_name, "Acme");
+                assert_eq!(form.url, "https://example.com/jobs");
+                assert_eq!(form.render_mode.as_str(), "browser");
+                assert_eq!(form.scraper_config.as_deref(), Some("{\"title\":\"h1\"}"));
+            }
+            _ => panic!("expected the edit modal"),
+        }
+    }
+
+    #[test]
+    fn drain_batch_progress_updates_rows_and_advances_in_flight() {
+        let (mut app, _dir) = test_app();
+        app.portals.rows.push(PortalRow {
+            id: 1,
+            name: "One".into(),
+            url: "https://example.com/1".into(),
+            render_mode: "static".into(),
+            scraper_config: None,
+            health: HealthBadge::NeverFetched,
+            last_attempt: None,
+            suggested_action: None,
+        });
+        app.portals.rows.push(PortalRow {
+            id: 2,
+            name: "Two".into(),
+            url: "https://example.com/2".into(),
+            render_mode: "static".into(),
+            scraper_config: None,
+            health: HealthBadge::NeverFetched,
+            last_attempt: None,
+            suggested_action: None,
+        });
+        app.portals.batch = Some(BatchProgress {
+            total: 2,
+            in_flight: Some(1),
+            ..Default::default()
+        });
+        app.batch_ids = vec![1, 2];
+
+        let (sender, receiver) = mpsc::channel();
+        app.batch_progress_rx = Some(receiver);
+        sender
+            .send(BatchEntry {
+                portal_id: 1,
+                portal_name: "One".into(),
+                result: Err(career_ops_core::acquisition::router::FetchError {
+                    cause: career_ops_core::acquisition::error::FailureCause::Timeout,
+                    detail: "timed out".into(),
+                }),
+            })
+            .expect("send progress");
+
+        app.drain_batch_progress();
+
+        let batch = app.portals.batch.as_ref().expect("batch");
+        assert_eq!(batch.completed.len(), 1);
+        assert_eq!(batch.in_flight, Some(2));
+        assert_eq!(
+            app.portals.rows[0].health,
+            HealthBadge::Broken {
+                cause: "timeout".into()
+            }
+        );
+        assert!(app.portals.rows[0].suggested_action.is_some());
+    }
+
+    #[test]
+    fn cancel_batch_sets_the_shared_flag_and_marks_progress() {
+        let (mut app, _dir) = test_app();
+        app.portals.batch = Some(BatchProgress {
+            total: 2,
+            in_flight: Some(1),
+            ..Default::default()
+        });
+
+        app.handle_portals_action(PortalsAction::CancelBatch);
+
+        assert!(app.batch_cancel.load(Ordering::Relaxed));
+        let batch = app.portals.batch.as_ref().expect("batch");
+        assert!(batch.cancelled);
+        assert!(batch.in_flight.is_none());
+    }
+
+    #[test]
+    fn dismiss_batch_clears_progress_state() {
+        let (mut app, _dir) = test_app();
+        app.portals.batch = Some(BatchProgress {
+            total: 2,
+            ..Default::default()
+        });
+        app.batch_ids = vec![1, 2];
+
+        app.handle_portals_action(PortalsAction::DismissBatch);
+
+        assert!(app.portals.batch.is_none());
+        assert!(app.batch_ids.is_empty());
+    }
+
+    fn wait_until(
+        app: &mut CareerOpsApp,
+        ctx: &egui::Context,
+        mut condition: impl FnMut(&CareerOpsApp) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            app.poll_pending(ctx);
+            app.poll_portals_task(ctx);
+            app.drain_batch_progress();
+            if condition(app) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("condition not met within 20s");
+    }
+
+    /// Exercises the Portals task path against a real encrypted database:
+    /// create, update, manual paste, and delete. Fetching is covered by the
+    /// core service tests; it needs the network and is not run here.
+    #[test]
+    fn portals_crud_and_paste_through_the_app() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut app = CareerOpsApp::new(state, runtime);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            render_mode: "static".into(),
+            scraper_config: None,
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals.rows.len() == 1 && app.portals_task.is_none()
+        });
+
+        let id = app.portals.rows[0].id;
+        assert_eq!(app.portals.rows[0].name, "Acme");
+
+        app.handle_portals_action(PortalsAction::UpdatePortal {
+            id,
+            data: PortalFormData {
+                company_name: "Acme Updated".into(),
+                url: "https://example.com/jobs".into(),
+                render_mode: "browser".into(),
+                scraper_config: None,
+            },
+        });
+        wait_until(&mut app, &ctx, |app| {
+            app.portals.rows.len() == 1
+                && app.portals.rows[0].name == "Acme Updated"
+                && app.portals_task.is_none()
+        });
+        assert_eq!(app.portals.rows[0].render_mode, "browser");
+
+        app.handle_portals_action(PortalsAction::OpenManual);
+        app.handle_portals_action(PortalsAction::ManualFromText {
+            title: "Engineer".into(),
+            company: "Acme".into(),
+            body: "Build things.".into(),
+        });
+        wait_until(&mut app, &ctx, |app| {
+            app.portals_view.manual_result().is_some()
+        });
+
+        let manual = app.portals_view.manual_mut().expect("manual modal");
+        let result = manual.result.as_ref().expect("manual result");
+        assert_eq!(result.title, "Engineer");
+        assert_eq!(result.company, "Acme");
+        assert_eq!(result.detail, "Added manually.");
+
+        app.handle_portals_action(PortalsAction::DeletePortal(id));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals.rows.is_empty() && app.portals_task.is_none()
+        });
+        assert!(app.portals_view.modal.is_none());
+    }
+
+    #[test]
+    fn new_portal_input_rejects_invalid_urls_and_render_modes() {
+        let mut data = PortalFormData {
+            company_name: "Acme".into(),
+            url: "not a url".into(),
+            render_mode: "static".into(),
+            scraper_config: None,
+        };
+        assert!(new_portal_input(&data).is_err());
+
+        data.url = "ftp://example.com/jobs".into();
+        assert!(new_portal_input(&data).is_err());
+
+        data.url = "https://example.com/jobs".into();
+        data.render_mode = "unknown".into();
+        assert!(new_portal_input(&data).is_err());
+    }
+
+    #[test]
+    fn new_portal_input_preserves_scraper_config() {
+        let data = PortalFormData {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            render_mode: "static".into(),
+            scraper_config: Some("{\"title\":\"h1\"}".into()),
+        };
+
+        let input = new_portal_input(&data).expect("valid input");
+        assert_eq!(
+            input.scraper_config,
+            Some(serde_json::json!({"title": "h1"}))
+        );
     }
 }

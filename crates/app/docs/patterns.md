@@ -146,6 +146,29 @@ When no task is pending, do not call `request_repaint` or
 near zero. This is an acceptance criterion for Workstream 1 and a habit later
 screens should keep.
 
+## Portals task orchestration (WS3)
+
+The Portals screen returns `PortalsAction`; `CareerOpsApp` owns the side
+effects. There is at most one `PortalsTask` at a time:
+
+- `List` — initial load or post-mutation reload. `close_modal` tells the
+  completion handler whether a successful reload should close the form.
+- `Fetch` — `service::fetch_one`. The row's health badge becomes a spinner
+  while `fetching_portal` matches.
+- `Batch` — `service::fetch_batch_cancellable`. The callback sends entries on
+  `std::sync::mpsc`; `drain_batch_progress` applies them and advances
+  `in_flight`.
+- `Manual` — URL or paste entry; the result is set on the manual modal.
+
+Use `fetch_batch_cancellable` rather than `fetch_batch` when the user can
+cancel. The callback cannot break the service loop, so the cancellation flag is
+checked between portals. A fetch already in progress finishes, then the batch
+returns a partial report.
+
+The screen uses a plain `ScrollArea` for the list; `TableBuilder` is the swap
+point when the Pipeline list grows. Health mapping lives in the view model; the
+screen only maps `HealthBadge` to `StatusBadge`.
+
 ## State-mutating async work
 
 `AppState` methods such as `try_passphrase`, `try_keychain`, and

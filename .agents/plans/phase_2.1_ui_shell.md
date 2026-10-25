@@ -1,7 +1,7 @@
 # Phase 2.1: UI Shell — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.5), §12
-**Status:** In progress — Workstreams 1–2 implemented (2026-10-24)
+**Status:** In progress — Workstreams 1–3 implemented (2026-10-24)
 **Last updated:** 2026-10-24
 **Duration:** 1.5–2 weeks
 **Depends on:** Phase 2 completion (2026-10-23) and Phase 2.01 (2026-10-24)
@@ -17,6 +17,7 @@
 | v0.3 | Entry conditions updated to record the actual repo state at entry: `main.rs` is a state-bootstrap placeholder, the framework-independent modules from the aborted GPUI start survive, and `screens` is a directory module. Added WS1 deliverable 3a: `data_dir()` cleanup, replacing the `CAREER_OPS_DATA_DIR` env-var requirement with a `directories`-crate lookup. Toolchain requirement reworded to defer to the workspace `rust-version` field rather than pinning 1.80. Added a clean-machine acceptance criterion for WS1. |
 | v0.4 | Workstream 1 implemented and the plan corrected against the actual egui/eframe 0.37 API: `eframe::App` exposes `ui(&mut self, &mut egui::Ui, ...)`, not `update`; `SidePanel`/`TopBottomPanel` are replaced by `Panel::left` and friends; `Response::labelled_by(Id)` exists at 0.37, so the accessible-input workaround is a real association rather than a documented limitation. Added `CareerOpsApp::spawn` because `AsyncTask::spawn` calls `tokio::spawn` and panics outside a runtime context. Recorded the WS1 implementation files and tests. |
 | v0.5 | Workstream 2 implemented: unlock, first-launch wizard, and recovery screens; filesystem recovery actions (locate key file, export encrypted bundle, explicit reset); async state hand-off. Recorded that `AppState` is moved into the task rather than borrowed across an await, that secrets are cleared when the task takes ownership, and that a partially completed first launch is re-bootstrapped to surface Recovery. Added `screens/lock.rs`, `recovery.rs`, and `tests/lock_screens.rs`. |
+| v0.6 | Workstream 3 implemented: Portals list with health badges, CRUD forms, delete confirmation, fetch-one, cancellable batch with `mpsc` progress, sidecar indicator, and the manual-entry modal. Added `portals::service::fetch_batch_cancellable` because the callback cannot stop `fetch_batch`'s loop. The Portals view model carries `render_mode` and `scraper_config` so the edit form round-trips them without a second read. Added `view_models/portals.rs`, `screens/portals.rs`, and `tests/portals_screen.rs`; app-level tests cover CRUD and manual paste against a real database. |
 
 ---
 
@@ -300,20 +301,20 @@ W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
 
 3. **Delete confirmation.** `egui::Window` with a two-button confirmation.
 
-4. **"Fetch now" per row.** A small icon button or a `ui.menu_button("⋯", ...)` context menu. Calls `portals::service::fetch_one`. During the fetch, the row shows `LoadingSpinner` in place of the health badge. On completion, the row updates from `FetchReport.portal`.
+4. **"Fetch now" per row.** Small `Fetch`/`Edit`/`Delete` buttons (three actions did not justify a menu button). Calls `portals::service::fetch_one`. During the fetch, the row shows `LoadingSpinner` in place of the health badge. On completion, the row updates from `FetchReport.portal`.
 
-5. **"Fetch all" batch.** A button in the screen header. Calls `portals::service::fetch_batch`. Because `fetch_batch` takes an `FnMut(&BatchEntry)` callback, the callback sends entries through an `mpsc` channel that `ui()` drains each frame. That is the eframe equivalent of the callback: the router's plain-closure design pays off here.
+5. **"Fetch all" batch.** A button in the screen header. Calls `portals::service::fetch_batch_cancellable` (added in Workstream 3 because the callback cannot stop `fetch_batch`'s loop). Because the service takes an `FnMut(&BatchEntry)` callback, the callback sends entries through an `mpsc` channel that `ui()` drains each frame. That is the eframe equivalent of the callback: the router's plain-closure design pays off here.
 
    During the batch:
    - Each row shows the batch state (spinner or result)
    - A progress bar in the header shows `completed / total`
-   - A "Cancel" button sets a shared `AtomicBool` that the callback checks; the batch stops after the current fetch
+   - A "Cancel" button sets a shared `AtomicBool` that `fetch_batch_cancellable` checks between portals; the batch stops after the current fetch
 
 6. **Sidecar status indicator.** A small badge in the screen header showing the last Tier 2 fetch outcome: "Sidecar: not started" before any, "Sidecar: running" after a successful Tier 2 fetch, "Sidecar: stopped" after a failed one. Coarse by design; Phase 5's Settings screen will replace it with real status from the backend.
 
 7. **Manual entry modal.** Reachable from both Portals and Pipeline. Two tabs:
-   - From URL — `labelled_input` for the URL, "Fetch" button, calls `add_job_from_url`. On success, shows the job's title and company plus a "View in Pipeline" link. On failure, shows the classified cause and `suggested_action`.
-   - Paste text — `labelled_input` fields for title, company, and body. Submit calls `add_job_from_text`.
+   - From URL — `labelled_input` for the URL, "Fetch and add" button, calls `add_job_from_url`. On success, shows the job's title and company plus a "View in Pipeline" link. On failure, shows the error message returned by the service. Mapping that to `suggested_action` would require the service to preserve the classified cause; that is a candidate follow-up.
+   - Paste text — `labelled_input` fields for title and company, `labelled_multiline` for the body. Submit calls `add_job_from_text`.
 
 ### View models (survive unchanged from the GPUI version)
 
@@ -330,6 +331,10 @@ pub struct PortalRow {
     pub id: i64,
     pub name: String,
     pub url: String,
+    // Added during implementation: the edit form round-trips these without a
+    // second database read and without dropping the scraper configuration.
+    pub render_mode: String,
+    pub scraper_config: Option<String>,
     pub health: HealthBadge,
     pub last_attempt: Option<String>,
     pub suggested_action: Option<String>,
@@ -368,9 +373,9 @@ These are framework-independent. They compile today. Every function has a unit t
 
 1. **The health drill-down uses `suggested_action` directly.** No reimplementation of message-mapping in the view.
 
-2. **Batch progress flows through an `mpsc` channel.** `fetch_batch`'s `FnMut(&BatchEntry)` callback sends on `std::sync::mpsc::Sender`; `ui()` drains with `try_iter()` each frame. `ui.ctx().request_repaint_after` keeps the frame loop live while the batch runs.
+2. **Batch progress flows through an `mpsc` channel.** `fetch_batch_cancellable`'s `FnMut(&BatchEntry)` callback sends on `std::sync::mpsc::Sender`; `ui()` drains with `try_iter()` each frame. `ui.ctx().request_repaint_after` keeps the frame loop live while the batch runs.
 
-3. **Cancellation uses a shared `AtomicBool`.** The callback checks it before applying each entry; if cancelled, the router's remaining fetches are skipped. A fetch in progress finishes first — that is coarse but correct.
+3. **Cancellation uses a shared `AtomicBool`.** The callback cannot stop `fetch_batch`'s loop, so Workstream 3 adds `fetch_batch_cancellable`, which checks the flag before starting each portal. A fetch in progress finishes first — that is coarse but correct. The callback still records every completed entry, so the progress bar and rows stay current.
 
 4. **`egui_extras::TableBuilder` is available but not used in Phase 2.1.** A dozen portals do not need virtualization. Phase 3's Pipeline screen will, and that is when the primitive changes. `patterns.md` records the swap point.
 
@@ -378,18 +383,20 @@ These are framework-independent. They compile today. Every function has a unit t
 
 | Criterion | Verification |
 | :--- | :--- |
-| Portals screen lists all portals with health badges | Manual test |
-| Add/edit forms create and update portals | `egui_kittest` test plus manual test |
-| Delete confirmation removes a portal | `egui_kittest` test |
-| "Fetch now" updates the row's health without a full refresh | Manual test |
-| "Fetch all" shows per-portal progress and updates all rows | Manual test |
-| Batch can be cancelled | Manual test |
-| Sidecar status reflects the last Tier 2 outcome | Manual test |
-| "Add job from URL" fetches and stores | Manual test |
-| "Add job from paste" stores | Manual test |
+| Portals screen lists all portals with health badges | `egui_kittest` test plus manual test |
+| Add/edit forms create and update portals | App integration test plus `egui_kittest` form gates |
+| Delete confirmation removes a portal | App integration test plus `egui_kittest` dialog |
+| "Fetch now" updates the row's health without a full refresh | View-model test plus manual test (network) |
+| "Fetch all" shows per-portal progress and updates all rows | View-model and progress-plumbing tests plus manual test (network) |
+| Batch can be cancelled | Core service test plus app cancel-state test |
+| Sidecar status reflects the last Tier 2 outcome | View-model test plus manual test |
+| "Add job from URL" fetches and stores | Service test plus manual test (network) |
+| "Add job from paste" stores | App integration test |
 | `PortalsViewModel::from_entries` maps health states correctly | Unit test (4 cases) |
 | `PortalsViewModel::apply_fetch_result` updates the row | Unit test |
 | `PortalsViewModel::apply_batch_entry` accumulates progress | Unit test |
+
+**Implementation note (2026-10-24).** Workstream 3 landed as `crates/app/src/view_models/portals.rs`, `crates/app/src/screens/portals.rs`, and `crates/app/tests/portals_screen.rs`. `CareerOpsApp` owns an `Arc<HttpFetchSource>`, an `Arc<ObscuraBrowserBackend>`, a single `PortalsTask` (list/fetch/batch/manual), an `mpsc` receiver for batch progress, and a shared cancel flag. The core service gained `fetch_batch_cancellable` and a cancellation test. App integration tests cover create, update, manual paste, delete, and batch-progress plumbing against a real encrypted database; fetch actions that need the network remain manual tests. The manual modal lives in `PortalsView`, so the Pipeline header entry point is a WS4 wiring task rather than a second implementation.
 
 ---
 

@@ -12,4 +12,5 @@
 //! first view-model (`portals`) arrives in Workstream 3.
 
 // pub mod portals;       // Workstream 3
+pub mod portals;
 // pub mod pipeline;      // Workstream 4

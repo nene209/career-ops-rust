@@ -36,9 +36,9 @@ views are placeholders.
 
 ## What is stubbed
 
-- **Portals and Pipeline screens** — Phase 2.1 Workstreams 1–2 render the
-  shell, unlock, first-launch, and recovery flows. The Portals and Pipeline
-  screens (Workstreams 3–4) are still empty states.
+- **Pipeline screen** — Phase 2.1 Workstreams 1–3 render the shell, lock
+  flows, and the Portals screen. The Pipeline screen (Workstream 4) is still
+  an empty state.
 - **Template seeding** — the `templates` table and repository are in place,
   but no template `.html` files exist yet. Seeding a template system is a
   **Phase 4** deliverable, and Phase 4 should model it on `prompts_seed.rs`
@@ -62,6 +62,11 @@ views are placeholders.
   recovery. Lock views return a `LockAction`; `CareerOpsApp` moves `AppState`
   into the async task, restores it with the result, and applies the
   filesystem recovery actions.
+- **Portals screen** — Phase 2.1 Workstream 3 renders the portal list with
+  health and sidecar badges, add/edit/delete forms, fetch-one, cancellable
+  batch fetch with progress, and the manual-entry modal. The app owns the
+  fetch source, browser backend, one `PortalsTask`, and the batch progress
+  channel; `fetch_batch_cancellable` stops between portals.
 
 - **Prompt seeding** — `crates/core/src/prompts_seed.rs` embeds the
   original `modes/*.md` files at compile time and seeds them into the

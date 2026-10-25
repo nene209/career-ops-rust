@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use career_ops_core::acquisition::error::{AtsError, FailureCause};
@@ -239,6 +240,80 @@ async fn fetch_batch_continues_past_failures_and_reports_each_entry() {
     // The failed portal's row records the cause.
     let refreshed = portals::get(&db.pool, second.id).await.unwrap().unwrap();
     assert_eq!(refreshed.last_failure_cause.as_deref(), Some("blocked"));
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn fetch_batch_cancellable_stops_between_portals() {
+    let db = common::TestDb::new_raw().await;
+
+    let first = portals::create(
+        &db.pool,
+        static_portal("First", "https://boards.greenhouse.io/first/jobs/1"),
+    )
+    .await
+    .unwrap();
+    let second = portals::create(
+        &db.pool,
+        static_portal("Second", "https://boards.greenhouse.io/second/jobs/1"),
+    )
+    .await
+    .unwrap();
+    let third = portals::create(
+        &db.pool,
+        static_portal("Third", "https://boards.greenhouse.io/third/jobs/1"),
+    )
+    .await
+    .unwrap();
+
+    let source = Arc::new(MockFetchSource::sequence_ats(vec![
+        Ok(vec![sample_job("first-job")]),
+        Ok(vec![sample_job("second-job")]),
+        Ok(vec![sample_job("third-job")]),
+    ]));
+
+    let cancel = AtomicBool::new(false);
+    let report = service::fetch_batch_cancellable(
+        &db.pool,
+        &[first.id, second.id, third.id],
+        source.as_ref(),
+        None,
+        &cancel,
+        |_entry| {
+            // Cancel after the first completed portal. The fetch already
+            // in progress is allowed to finish; the next one must not start.
+            cancel.store(true, Ordering::Relaxed);
+        },
+    )
+    .await
+    .expect("fetch_batch_cancellable");
+
+    assert_eq!(
+        report.results.len(),
+        1,
+        "cancellation should stop the batch between portals"
+    );
+    assert_eq!(report.results[0].portal_id, first.id);
+    assert_eq!(
+        source.ats_calls().len(),
+        1,
+        "no fetch should start after the cancellation flag is set"
+    );
+
+    // A batch cancelled before it starts does no work.
+    let already_cancelled = AtomicBool::new(true);
+    let report_after = service::fetch_batch_cancellable(
+        &db.pool,
+        &[second.id, third.id],
+        source.as_ref(),
+        None,
+        &already_cancelled,
+        |_| {},
+    )
+    .await
+    .expect("cancelled batch");
+    assert!(report_after.results.is_empty());
 
     db.close().await;
 }

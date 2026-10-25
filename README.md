@@ -35,9 +35,11 @@ spike complete, Weeks 2–4 remaining.
 - **SQLCipher** is vendored via `libsqlite3-sys` with
   `bundled-sqlcipher-vendored-openssl`, so no system SQLCipher is
   required.
-- **Obscura** is required only for the acquisition test suite, not for
-  building the application. See [Vendored Obscura binary](#vendored-obscura-binary-test-only)
-  under Testing.
+- **Obscura** is required for the acquisition test suite and for
+  browser-mode (Tier 2) portal fetches in the running application.
+  Static (Tier 1) fetches work without it. Put `obscura` on `PATH` or
+  point `ObscuraConfig::binary` at it. The vendored binary described
+  under Testing is for the test suite only.
 
 ### Build
 

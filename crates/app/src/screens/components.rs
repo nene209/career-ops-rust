@@ -130,6 +130,13 @@ pub fn labelled_input(ui: &mut Ui, label: &str, value: &mut String, password: bo
     ui.add(edit).labelled_by(label_response.id)
 }
 
+/// A labelled multi-line text input, for job descriptions and other bodies.
+pub fn labelled_multiline(ui: &mut Ui, label: &str, value: &mut String, rows: usize) -> Response {
+    let label_response = ui.label(label);
+    ui.add(egui::TextEdit::multiline(value).desired_rows(rows))
+        .labelled_by(label_response.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

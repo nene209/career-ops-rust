@@ -671,6 +671,7 @@ dependencies = [
  "anyhow",
  "career-ops-core",
  "career-ops-test-support",
+ "chrono",
  "eframe",
  "egui",
  "egui_kittest",
@@ -682,6 +683,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "zeroize",
 ]
 

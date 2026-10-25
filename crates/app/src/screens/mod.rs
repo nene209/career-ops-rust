@@ -11,6 +11,7 @@
 
 pub mod components;
 pub mod lock;
+pub mod portals;
 pub mod shell;
 
-pub use components::{labelled_input, EmptyState, LoadingSpinner, StatusBadge};
+pub use components::{labelled_input, labelled_multiline, EmptyState, LoadingSpinner, StatusBadge};

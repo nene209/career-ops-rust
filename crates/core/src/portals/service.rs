@@ -4,6 +4,8 @@
 //! takes explicit dependencies (a pool, a `FetchSource`, an optional
 //! `BrowserBackend`) so tests can inject mocks without any framework.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use sqlx::SqlitePool;
 
 use super::health::PortalHealth;
@@ -99,6 +101,43 @@ pub async fn fetch_batch<F>(
     portal_ids: &[i64],
     source: &dyn FetchSource,
     browser: Option<&dyn BrowserBackend>,
+    progress: F,
+) -> Result<BatchReport>
+where
+    F: FnMut(&BatchEntry),
+{
+    fetch_batch_inner(pool, portal_ids, source, browser, None, progress).await
+}
+
+/// Fetch a batch of portals, stopping between portals when `cancel` is set.
+///
+/// A fetch that is already in progress finishes first; cancellation is checked
+/// before the next portal starts. This is the same coarse guarantee the UI
+/// offers: the user does not have to wait for the whole batch, but no portal is
+/// left half-written.
+///
+/// The callback still receives every completed entry, so the caller can keep
+/// per-portal progress without waiting for the batch to return.
+pub async fn fetch_batch_cancellable<F>(
+    pool: &SqlitePool,
+    portal_ids: &[i64],
+    source: &dyn FetchSource,
+    browser: Option<&dyn BrowserBackend>,
+    cancel: &AtomicBool,
+    progress: F,
+) -> Result<BatchReport>
+where
+    F: FnMut(&BatchEntry),
+{
+    fetch_batch_inner(pool, portal_ids, source, browser, Some(cancel), progress).await
+}
+
+async fn fetch_batch_inner<F>(
+    pool: &SqlitePool,
+    portal_ids: &[i64],
+    source: &dyn FetchSource,
+    browser: Option<&dyn BrowserBackend>,
+    cancel: Option<&AtomicBool>,
     mut progress: F,
 ) -> Result<BatchReport>
 where
@@ -107,6 +146,10 @@ where
     let mut results = Vec::with_capacity(portal_ids.len());
 
     for &portal_id in portal_ids {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+            break;
+        }
+
         let name = portals::get(pool, portal_id)
             .await?
             .map(|p| p.company_name)
