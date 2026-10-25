@@ -1,7 +1,9 @@
 # Career-Ops Rust Desktop Application — Search References by Phase
 
 **Purpose:** A consolidated index of the external references consulted or cited while drafting the phase execution plans. Organized by phase, with a cross-phase reference section for reusable topics.
-**Last updated:** 2026-10-12
+**Last updated:** 2026-10-24
+
+**Note:** the GPUI references in this document were used during Phase 2.01 and superseded by the egui choice
 
 **Important caveat:** These are pointers for further investigation, not verified endorsements. Package versions, API surfaces, and project status change rapidly. Verify anything load-bearing against the current source before depending on it — especially crate versions, `rig` API shape, GPUI internals, and any browser backend named here.
 

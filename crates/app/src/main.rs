@@ -1,8 +1,13 @@
 //! Career-Ops desktop application — Phase 1 skeleton.
 //!
-//! The state machine (`state.rs`) is fully implemented and testable without
-//! GPUI. The GPUI view layer (`screens.rs`) is a placeholder. When GPUI's
-//! API stabilises, the views will be filled in against the same state.
+//! This file bootstraps the application state and exits. The UI shell —
+//! window, screens, navigation — is implemented in **Phase 2.1**. The
+//! framework-independent pieces that Phase 2.1 will use (`AppState`,
+//! `NavigationState`, `AsyncTask`, the view-models) already live in the
+//! library and are tested.
+//!
+//! When Phase 2.1 lands, this file becomes the `eframe::run_native`
+//! entry point for a `CareerOpsApp` that implements `eframe::App`.
 
 use career_ops_app::state::AppState;
 
@@ -15,21 +20,17 @@ fn main() -> Result<()> {
         .init();
 
     let data_dir = career_ops_core::data_dir();
-
-    // Phase 1: construct the state machine. The GPUI event loop is where the
-    // view rendering would attach — see `screens.rs`.
     let state = AppState::bootstrap(data_dir)?;
 
-    // In the finished application, this would be:
-    //     gpui::Application::new().run(move |cx| {
-    //         cx.open_window(Default::default(), |_window, cx| {
-    //             cx.new(|_cx| screens::RootView::new(state))
-    //         });
-    //     });
-    //
-    // Left commented out because GPUI's API is pre-1.0 and the exact call
-    // signature is unstable.
     tracing::info!(state = ?state.current(), "app state initialized");
+
+    // Phase 2.1 attaches the egui/eframe event loop here. Until then,
+    // the binary is a smoke test for the state machine: it exercises
+    // bootstrap, reports the resulting screen, and exits.
+    eprintln!(
+        "Application state: {:?}. The UI shell is implemented in Phase 2.1.",
+        state.current()
+    );
 
     Ok(())
 }

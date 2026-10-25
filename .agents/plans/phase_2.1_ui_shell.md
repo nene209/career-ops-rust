@@ -1,0 +1,566 @@
+# Phase 2.1: UI Shell — Detailed Execution Plan
+
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.5), §12
+**Status:** Draft — rewritten against egui after Phase 2.01 evaluation
+**Last updated:** 2026-10-24
+**Duration:** 1.5–2 weeks
+**Depends on:** Phase 2 completion (2026-10-23) and Phase 2.01 (2026-10-24)
+
+---
+
+## Change Log
+
+| Version | Change |
+| :--- | :--- |
+| v0.1 | Initial Phase 2.1 plan written against GPUI. |
+| v0.2 | Rewritten against egui/eframe after Phase 2.01 found GPUI's test harness and API stability unsuitable for a five-phase dependency. View-model, navigation, and async bridge survive unchanged. View layer, test patterns, and toolchain requirements are replaced. The accessibility gap found during the egui prototype (text inputs have no accessible label) is addressed as an implementation note and a Phase 5 audit item. |
+| v0.3 | Entry conditions updated to record the actual repo state at entry: `main.rs` is a state-bootstrap placeholder, the framework-independent modules from the aborted GPUI start survive, and `screens` is a directory module. Added WS1 deliverable 3a: `data_dir()` cleanup, replacing the `CAREER_OPS_DATA_DIR` env-var requirement with a `directories`-crate lookup. Toolchain requirement reworded to defer to the workspace `rust-version` field rather than pinning 1.80. Added a clean-machine acceptance criterion for WS1. |
+
+---
+
+## Purpose
+
+Phase 2 delivered a service layer — `list_with_health`, `fetch_one`, `fetch_batch`, `add_job_from_url`, `add_job_from_text` — with no consumer. Phase 2.1 makes the application runnable by building the shell that the user interacts with, wiring the Phase 1 unlock flow to real screens, and consuming the Phase 2 service layer from the Portals and Pipeline screens.
+
+The phase has three defining characteristics:
+
+1. **First real consumer of the service layer.** If `PortalHealth` has a field the UI cannot use, or lacks a field the UI needs, this phase will find out. That is the point.
+2. **Establishes the view patterns Phase 3, 4, and 5 reuse.** List, form, async-with-progress, navigation, status indicator. Inventing them once is cheaper than inventing them per-screen across three phases.
+3. **Concentrates the framework risk.** The framework was chosen in Phase 2.01 after four prototypes. This phase is the first real test of that choice. If egui turns out to be wrong for a data-dense application, the cost of finding out is two weeks and a small set of screens, not five phases.
+
+---
+
+## Entry Conditions
+
+Phase 2.1 begins after Phase 2.01 (confirmed 2026-10-24). Consumed outputs:
+
+| Source | How Phase 2.1 Uses It |
+| :--- | :--- |
+| `portals::service::list_with_health` | Portals screen data source |
+| `portals::service::fetch_one`, `fetch_batch` | Portals action handlers |
+| `portals::service::FetchReport`, `BatchReport`, `BatchEntry` | Shapes the view renders |
+| `portals::health::PortalHealth`, `HealthState`, `suggested_action` | Health badges and drill-down text |
+| `acquisition::manual::add_job_from_url`, `add_job_from_text` | Manual entry form handlers |
+| `repo::job_descriptions::list_recent` | Pipeline screen data source |
+| `repo::portals::create`, `update`, `delete` | Portal CRUD from the UI |
+| `ObscuraBrowserBackend` | Constructed by the app, passed into `fetch_one`/`fetch_batch` |
+| Phase 1 `AppState` state machine | Drives unlock → first-launch → recovery → ready transitions |
+| Phase 2.01 recommendation | egui/eframe as the framework |
+
+**Repo state at entry.** The tree is not empty. Three things from the aborted GPUI start survive, and one thing needs replacing:
+
+| Item | State at entry | What Phase 2.1 does with it |
+| :--- | :--- | :--- |
+| `crates/app/src/main.rs` | State-bootstrap placeholder — builds `AppState`, prints the current screen to stderr, exits | **Replaced** by WS1 with the `eframe::run_native` entry point |
+| `crates/app/src/state.rs` | Complete `AppState` state machine, tested | Unchanged |
+| `crates/app/src/navigation.rs` | `MainScreen` enum and `NavigationState`, tested | Unchanged; consumed by WS1's sidebar |
+| `crates/app/src/async_bridge.rs` | `AsyncTask<T>` primitive, tested | Unchanged; consumed by WS2 and WS3 |
+| `crates/app/src/view_models/mod.rs` | Empty placeholder with commented module declarations | WS3 and WS4 add `portals.rs` and `pipeline.rs` |
+| `crates/app/src/screens/` | Empty directory module (`screens/mod.rs`) | WS1–WS4 add submodules; the Phase 1 `screens.rs` file must not also exist |
+| `career_ops_core::data_dir()` | Reads `CAREER_OPS_DATA_DIR`, panics if unset | **Replaced** by WS1 deliverable 3a |
+
+The three framework-independent modules — `state`, `navigation`, `async_bridge` — are the payoff from the aborted GPUI start. They compile today and need no changes. The framework swap in Phase 2.01 touched only the view layer and the test patterns.
+
+**Toolchain requirement:** the workspace's `rust-version` field in the root `Cargo.toml` is authoritative. The 1.95.0 requirement from the GPUI version of this plan no longer applies, because GPUI's `std::hint::cold_path` dependency is gone. Verify the field before pinning anything, and raise it if an egui/eframe dependency requires more. Do not lower it below whatever `career-ops-core` already requires.
+
+**Framework versions:** `egui 0.37`, `eframe 0.37`, `egui_kittest 0.37` (with `snapshot` and `wgpu` features). These are the versions current as of the Phase 2.01 evaluation. Pin them in `Cargo.toml`.
+
+---
+
+## Scope
+
+| In scope | Out of scope |
+| :--- | :--- |
+| `eframe::App` implementation, window, sidebar, content panel | Visual polish, theming, animations (Phase 5) |
+| Async bridge for tokio → eframe update loop | Settings screen (Phase 5) |
+| Unlock, first-launch, and recovery screens | Accessibility compliance beyond the input-label fix (Phase 5) |
+| Portals screen: list with health, add/edit/delete, fetch one, batch with progress | Evaluation UI (Phase 3) |
+| Pipeline screen: job list, filtering | CV editor (Phase 4) |
+| Manual entry form: URL fetch and paste | PDF preview (Phase 4) |
+| Sidecar status indicator | Prompt management (Phase 3) |
+| View-model layer with unit tests | Onboarding wizard beyond first-launch (Phase 5) |
+| `data_dir()` lookup via `directories` | Full keyboard navigation (Phase 5) |
+| Verification pass | |
+
+---
+
+## Sequencing Rationale
+
+```
+W1: WS1 Shell infrastructure + WS2 Unlock/first-launch/recovery
+    └── W2: WS3 Portals screen + WS4 Pipeline screen and manual entry
+        └── W2.5: WS5 Verification pass and retrospective
+```
+
+**Shell infrastructure comes first** because every other workstream builds on it. If the async bridge or the panel layout is wrong, every screen changes.
+
+**Unlock flow comes next** because it is the entry point. The state machine already decides the transitions; the shell renders them.
+
+**Portals before Pipeline** because Portals is the harder screen — health badges, batch fetch, sidecar status — and it consumes more of the service layer. If the service layer has gaps, Portals finds them first.
+
+**Verification pass is folded into the second half of Week 2.** UI phases are especially prone to "the test passes but the screen is blank." The verification pass is where that is caught.
+
+---
+
+## Workstream 1 — Shell Infrastructure
+
+**Priority:** First.
+**Estimated duration:** 2–3 days
+
+### Deliverables
+
+1. **`eframe::App` implementation.** The binary's `main.rs` replaces the Phase 1 state-bootstrap placeholder with `eframe::run_native`. A `CareerOpsApp` implements `eframe::App::update` and holds the Phase 1 `AppState`, the `NavigationState` from `navigation.rs`, and a `tokio::runtime::Runtime`. The runtime is constructed in `main` before `run_native` and moved into the app, so its lifetime is tied to the process; async work in later workstreams is spawned via `self.runtime.spawn(...)`.
+
+   `main.rs` at the end of this deliverable:
+
+   ```rust
+   fn main() -> eframe::Result<()> {
+       tracing_subscriber::fmt()
+           .with_env_filter(EnvFilter::from_default_env())
+           .init();
+
+       let state = AppState::bootstrap(career_ops_core::data_dir())?;
+       let runtime = tokio::runtime::Builder::new_multi_thread()
+           .enable_all()
+           .build()
+           .expect("tokio runtime");
+
+       let options = eframe::NativeOptions {
+           viewport: egui::ViewportBuilder::default()
+               .with_inner_size([1024.0, 720.0])
+               .with_min_inner_size([640.0, 480.0]),
+           ..Default::default()
+       };
+
+       eframe::run_native(
+           "Career-Ops",
+           options,
+           Box::new(move |_cc| Ok(Box::new(CareerOpsApp::new(state, runtime)))),
+       )
+   }
+   ```
+
+2. **Panel layout.** `egui::SidePanel::left` renders the navigation sidebar with one `selectable_label` per `MainScreen` variant. `egui::CentralPanel` renders the currently-selected screen. The two panels are the frame for every screen that follows.
+
+3. **Async bridge for the eframe update loop.** The `AsyncTask` type from `async_bridge.rs` survives unchanged. The pattern that connects it to eframe is:
+
+   ```rust
+   // In CareerOpsApp::update
+   if let Some(task) = &mut self.pending_fetch {
+       match task.try_recv() {
+           TaskPoll::Ready(report) => {
+               self.apply_fetch_result(report);
+               self.pending_fetch = None;
+               ctx.request_repaint();
+           }
+           TaskPoll::Pending => {
+               // Ask egui to re-run update soon so we poll again.
+               ctx.request_repaint_after(Duration::from_millis(50));
+           }
+           TaskPoll::Cancelled => { self.pending_fetch = None; }
+       }
+   }
+   ```
+
+   The key difference from GPUI: egui does not call `update()` continuously by default. `ctx.request_repaint_after` schedules the next poll; without it, the update loop sleeps and the task result is never observed. That is the one non-obvious thing about integrating async with eframe, and it is worth a note in `patterns.md`.
+
+3a. **`data_dir()` cleanup.** The Phase 1 placeholder reads `CAREER_OPS_DATA_DIR` from the environment and panics if it is unset. Replace it with a `directories`-crate lookup for the OS-appropriate app data directory, with the env var retained as an override for development:
+
+   ```rust
+   pub fn data_dir() -> std::path::PathBuf {
+       if let Some(dir) = std::env::var_os("CAREER_OPS_DATA_DIR") {
+           return std::path::PathBuf::from(dir);
+       }
+       directories::ProjectDirs::from("", "", "career-ops")
+           .map(|d| d.data_dir().to_path_buf())
+           .unwrap_or_else(|| std::path::PathBuf::from("."))
+   }
+   ```
+
+   Add `directories = "5"` to `crates/core/Cargo.toml`. Without this change, the shell cannot be demonstrated on a clean machine without setting the env var on every invocation, which is not the behaviour of a shipped desktop app. The WS1 acceptance criterion "opens on a clean machine" depends on this deliverable.
+
+4. **Three shared components:**
+   - `EmptyState` — an icon, a message, an optional action button. Used by Portals ("no portals configured"), Pipeline ("no jobs yet"), and any future screen with a list.
+   - `StatusBadge` — a colored label with an icon and text. Variants for the four `HealthState` values plus the sidecar `Running`/`Stopped`.
+   - `LoadingSpinner` — `egui::Spinner` wrapped in a helper that matches the project's spacing.
+
+5. **Accessible-input helper.** egui's `TextEdit` does not expose `hint_text` as an accessible label — a gap found during the Phase 2.01 prototype and confirmed in the accessibility tree. A helper function:
+
+   ```rust
+   pub fn labelled_input(
+       ui: &mut egui::Ui,
+       label: &str,
+       value: &mut String,
+       password: bool,
+   ) -> egui::Response
+   ```
+
+   renders `ui.label(label)` and then a `TextEdit`, and associates them so a screen reader reads the label with the field. The exact mechanism depends on egui 0.37's `labelled_by` API — check the version's `Response` methods and use whichever association the version provides. **If no association exists at 0.37, the helper renders the label as visible text and records the limitation in a comment for the Phase 5 audit.** Either way, the helper is the single place the pattern lives, so a later fix updates one function.
+
+6. **`crates/app/docs/patterns.md`** documenting the list, form, and async-with-progress patterns against egui. These are the contract Phase 3, 4, and 5 add screens against. The async pattern must call out `request_repaint_after` explicitly, because omitting it produces a UI that silently never updates.
+
+### Acceptance Criteria
+
+| Criterion | Verification |
+| :--- | :--- |
+| `cargo run -p career-ops-app` opens a window | Manual test |
+| `cargo run -p career-ops-app` opens without requiring any env var to be set | Manual test on a clean checkout |
+| Sidebar navigation changes the rendered screen | Manual test |
+| `EmptyState`, `StatusBadge`, `LoadingSpinner` render in isolation | Manual test on a scratch screen |
+| Async task completes and the UI reflects the result | Unit test on `AsyncTask` plus manual test |
+| Idle CPU is near zero with no async task running | Manual test — `top` or `htop`, 30-second sample |
+| `labelled_input` produces an accessible label | `egui_kittest` test asserting the input is queryable by label |
+| `patterns.md` documents all three patterns, including the repaint requirement | Documentation review |
+
+---
+
+## Workstream 2 — Unlock, First-Launch, Recovery Screens
+
+**Priority:** After WS1.
+**Estimated duration:** 2–3 days
+
+### Deliverables
+
+1. **Unlock screen.** Rendered when `AppState::current() == Screen::Unlocking`. Uses `labelled_input` for the passphrase field, two buttons, and an error area. The "Unlock" button calls `AppState::try_passphrase` via `AsyncTask`; the "Try keychain" button calls `AppState::try_keychain`.
+
+2. **First-launch wizard.** Rendered when `AppState::current() == Screen::FirstLaunch`. Three steps as a single `egui::Window` with a step indicator:
+   - Welcome — one paragraph explaining what the application does and that data is encrypted at rest.
+   - Passphrase creation — two `labelled_input` fields (passphrase, confirmation), strength feedback, and a typed acknowledgement phrase ("I understand that if I lose my passphrase and my keychain entry, my data cannot be recovered"). The Continue button stays disabled until the acknowledgement matches.
+   - Backup guidance — explains that `dek.wrapped.json` and `career-ops.db` should be backed up together, with a button that opens the data directory.
+
+   On completion, calls `AppState::complete_first_launch(passphrase)` via `AsyncTask` and transitions.
+
+3. **Recovery screen.** Rendered when `AppState::current() == Screen::Recovery { reason }`. Displays the reason in a header, then five cards for the options from §7 of the main plan. The "Start fresh" card requires a typed confirmation before its button enables.
+
+4. **The "ready" shell.** Once `AppState::current() == Screen::Ready`, the main layout renders with the sidebar and the currently-selected screen.
+
+### Critical implementation notes
+
+1. **The state machine is the source of truth.** Screens render `AppState::current()`; they do not maintain navigation state of their own. When `AppState` transitions, `update()` renders the new state on the next frame.
+
+2. **The passphrase is never logged.** Grep `tracing::debug!` calls in the shell before merging. Also confirm the passphrase `String` is cleared from the view-model after unlock — egui's `TextEdit` keeps its binding alive, so an explicit `passphrase.clear()` after success is worth doing.
+
+3. **First-launch acknowledgement is typed, not checked.** The typed-phrase requirement is deliberate friction from the Phase 1 plan. A checkbox is skippable by reflex; typing is not.
+
+4. **Recovery is not a modal.** It is a full-screen flow, because a user seeing it is already worried and a modal over a locked shell is more alarming than a calm full-screen explanation.
+
+### Acceptance Criteria
+
+| Criterion | Verification |
+| :--- | :--- |
+| Window opens to unlock when `dek.wrapped.json` exists | Manual test |
+| Window opens to first-launch when no files exist | Manual test |
+| Window opens to recovery when unlock fails | Manual test |
+| Successful unlock reaches the main layout | `egui_kittest` test plus manual test |
+| First-launch completion reaches the main layout | `egui_kittest` test |
+| Recovery screen offers all five options | Manual test |
+| Typed acknowledgement is required | `egui_kittest` test asserting the button is disabled until the phrase matches |
+| No passphrase appears in logs | Code review + grep |
+
+---
+
+## Workstream 3 — Portals Screen
+
+**Priority:** After WS2. The primary consumer of the service layer.
+**Estimated duration:** 3–4 days
+
+### Deliverables
+
+1. **Portals list.** Renders `portals::service::list_with_health` via a `PortalsViewModel`. Each row shows:
+   - Company name
+   - URL
+   - Health badge
+   - Last attempt timestamp (relative)
+   - Suggested action (Degraded/Broken only, as an inline hint)
+
+   egui's `egui_extras::TableBuilder` provides virtualized row rendering if the list grows; for Phase 2.1's expected portal count (a dozen or fewer), a plain `ScrollArea` with `ui.horizontal` per row is simpler and correct. Note the swap point in `patterns.md` so Phase 3's Pipeline (which will have many more rows) uses the right primitive.
+
+2. **Add/edit portal forms.** `egui::Window` modals with `labelled_input` fields and a `ComboBox` for render mode. Submit calls `portals::create` / `portals::update` via `AsyncTask`.
+
+3. **Delete confirmation.** `egui::Window` with a two-button confirmation.
+
+4. **"Fetch now" per row.** A small icon button or a `ui.menu_button("⋯", ...)` context menu. Calls `portals::service::fetch_one`. During the fetch, the row shows `LoadingSpinner` in place of the health badge. On completion, the row updates from `FetchReport.portal`.
+
+5. **"Fetch all" batch.** A button in the screen header. Calls `portals::service::fetch_batch`. Because `fetch_batch` takes an `FnMut(&BatchEntry)` callback, the callback sends entries through an `mpsc` channel that `update()` drains each frame. That is the eframe equivalent of the callback: the router's plain-closure design pays off here.
+
+   During the batch:
+   - Each row shows the batch state (spinner or result)
+   - A progress bar in the header shows `completed / total`
+   - A "Cancel" button sets a shared `AtomicBool` that the callback checks; the batch stops after the current fetch
+
+6. **Sidecar status indicator.** A small badge in the screen header showing the last Tier 2 fetch outcome: "Sidecar: not started" before any, "Sidecar: running" after a successful Tier 2 fetch, "Sidecar: stopped" after a failed one. Coarse by design; Phase 5's Settings screen will replace it with real status from the backend.
+
+7. **Manual entry modal.** Reachable from both Portals and Pipeline. Two tabs:
+   - From URL — `labelled_input` for the URL, "Fetch" button, calls `add_job_from_url`. On success, shows the job's title and company plus a "View in Pipeline" link. On failure, shows the classified cause and `suggested_action`.
+   - Paste text — `labelled_input` fields for title, company, and body. Submit calls `add_job_from_text`.
+
+### View models (survive unchanged from the GPUI version)
+
+`crates/app/src/view_models/portals.rs`:
+
+```rust
+pub struct PortalsViewModel {
+    pub rows: Vec<PortalRow>,
+    pub sidecar: SidecarStatus,
+    pub batch: Option<BatchProgress>,
+}
+
+pub struct PortalRow {
+    pub id: i64,
+    pub name: String,
+    pub url: String,
+    pub health: HealthBadge,
+    pub last_attempt: Option<String>,
+    pub suggested_action: Option<String>,
+}
+
+pub enum HealthBadge {
+    NeverFetched,
+    Healthy,
+    Degraded { cause: String },
+    Broken { cause: String },
+}
+
+pub enum SidecarStatus {
+    NotStarted,
+    Running,
+    Stopped,
+}
+
+pub struct BatchProgress {
+    pub total: usize,
+    pub completed: Vec<BatchEntry>,
+    pub in_flight: Option<i64>,
+    pub cancelled: bool,
+}
+
+impl PortalsViewModel {
+    pub fn from_entries(entries: Vec<PortalWithHealth>) -> Self;
+    pub fn apply_fetch_result(&mut self, portal_id: i64, report: &FetchReport);
+    pub fn apply_batch_entry(&mut self, entry: &BatchEntry);
+}
+```
+
+These are framework-independent. They compile today. Every function has a unit test that constructs inputs by hand and asserts on outputs.
+
+### Critical implementation notes
+
+1. **The health drill-down uses `suggested_action` directly.** No reimplementation of message-mapping in the view.
+
+2. **Batch progress flows through an `mpsc` channel.** `fetch_batch`'s `FnMut(&BatchEntry)` callback sends on `std::sync::mpsc::Sender`; `update()` drains with `try_iter()` each frame. `ctx.request_repaint_after` keeps the frame loop live while the batch runs.
+
+3. **Cancellation uses a shared `AtomicBool`.** The callback checks it before applying each entry; if cancelled, the router's remaining fetches are skipped. A fetch in progress finishes first — that is coarse but correct.
+
+4. **`egui_extras::TableBuilder` is available but not used in Phase 2.1.** A dozen portals do not need virtualization. Phase 3's Pipeline screen will, and that is when the primitive changes. `patterns.md` records the swap point.
+
+### Acceptance Criteria
+
+| Criterion | Verification |
+| :--- | :--- |
+| Portals screen lists all portals with health badges | Manual test |
+| Add/edit forms create and update portals | `egui_kittest` test plus manual test |
+| Delete confirmation removes a portal | `egui_kittest` test |
+| "Fetch now" updates the row's health without a full refresh | Manual test |
+| "Fetch all" shows per-portal progress and updates all rows | Manual test |
+| Batch can be cancelled | Manual test |
+| Sidecar status reflects the last Tier 2 outcome | Manual test |
+| "Add job from URL" fetches and stores | Manual test |
+| "Add job from paste" stores | Manual test |
+| `PortalsViewModel::from_entries` maps health states correctly | Unit test (4 cases) |
+| `PortalsViewModel::apply_fetch_result` updates the row | Unit test |
+| `PortalsViewModel::apply_batch_entry` accumulates progress | Unit test |
+
+---
+
+## Workstream 4 — Pipeline Screen and Manual Entry
+
+**Priority:** After WS3.
+**Estimated duration:** 2 days
+
+### Deliverables
+
+1. **Pipeline list.** Renders `job_descriptions::list_recent` via a `PipelineViewModel`. Rows show title, company, tier label, fetched-at timestamp, and application status badge when attached.
+
+2. **Filter.** A horizontal `SelectableLabel` row for All / Not applied / Applied / Rejected. Filtering is client-side over the loaded list.
+
+3. **Job detail placeholder.** Clicking a row replaces the central panel with a detail view: title, company, tier, timestamps, raw description. Two buttons — "Evaluate" and "Generate cover letter" — are disabled with a tooltip ("Available in a later phase"). This reserves the space Phase 3 fills.
+
+4. **"Add job" button** in the header, opening the manual entry modal from WS3.
+
+### View models (survive unchanged)
+
+`crates/app/src/view_models/pipeline.rs`:
+
+```rust
+pub struct PipelineViewModel {
+    pub rows: Vec<JobRow>,
+    pub filter: JobFilter,
+}
+
+pub struct JobRow {
+    pub id: i64,
+    pub title: String,
+    pub company: String,
+    pub tier: TierLabel,
+    pub fetched_at: String,
+    pub status: Option<StatusLabel>,
+}
+
+pub enum TierLabel { Ats, Html, Tier2, Manual }
+pub enum StatusLabel { Discovered, Ready, Applied /* ... */ }
+pub enum JobFilter { All, NotApplied, Applied, Rejected }
+
+impl PipelineViewModel {
+    pub fn from_jobs(jobs: Vec<JobDescription>) -> Self;
+    pub fn apply_filter(&self) -> Vec<&JobRow>;
+}
+```
+
+### Acceptance Criteria
+
+| Criterion | Verification |
+| :--- | :--- |
+| Pipeline lists all jobs | Manual test |
+| Tier label matches `fetch_tier` | `egui_kittest` test with jobs from each tier |
+| All four filters work | `egui_kittest` test plus manual test |
+| Job detail shows raw description | Manual test |
+| Placeholder buttons are disabled with tooltip | Manual test |
+| Manual entry from Pipeline works | Manual test |
+| `PipelineViewModel::from_jobs` maps tiers correctly | Unit test |
+| `PipelineViewModel::apply_filter` filters correctly | Unit test (4 cases) |
+
+---
+
+## Workstream 5 — Verification Pass and Retrospective
+
+**Priority:** Last.
+**Estimated duration:** 1 day
+
+Same discipline as Phase 1 and Phase 2:
+
+1. **Walk every exit criterion.** For each, confirm the test or manual check exercises the property, not a proxy. Record what was checked and what was found.
+
+2. **Manual smoke test on a clean machine.** Clone, build, run without setting any env var, complete first launch, add a portal, fetch it, add a job manually, filter the pipeline. The check that no automated test covers, and the one that `data_dir()` cleanup makes possible.
+
+3. **Write the retrospective:**
+   - Whether the Phase 2 finding P2-R9 (service/view divergence) was resolved or whether the shell had to reshape the service layer
+   - Whether egui's immediate-mode model showed any performance concern on a real screen
+   - Whether the accessibility gap affected the unlock flow in practice
+   - Whether the async bridge pattern (`request_repaint_after` polling) was ergonomic
+   - Estimate accuracy, with a section on how the framework swap affected the total
+
+---
+
+## Test Strategy
+
+### View-model tests (unit)
+
+Pure Rust, no egui dependency. Every view-model function has a unit test that constructs inputs by hand and asserts on outputs. These run under `cargo test -p career-ops-app` and cover the logic that decides what the user sees.
+
+### View tests (`egui_kittest`)
+
+egui's harness supports the assertions this phase needs:
+
+- `Harness::builder().build_ui_state(|ui, app| app.ui(ui), app)` for state-bearing screens
+- `harness.get_by_label("...")`, `harness.get_by_role(Role::Button)` for semantic queries
+- `harness.state()` for state assertions
+- `harness.click("...")`, `harness.type_text("...")` for interaction
+- `harness.snapshot("...")` for visual regression (feature-gated on `snapshot` + `wgpu`)
+
+The screens that get harness tests in this phase are the ones with the highest decision value:
+
+- Unlock (wrong passphrase / correct passphrase)
+- First-launch (acknowledgement gating)
+- Portals add form (validation)
+- Portals delete confirmation (two-button semantics)
+- Pipeline filter (four filters)
+
+Screens that are layout-only (Dashboard placeholder, Settings placeholder) are covered by manual smoke test rather than harness tests, on the grounds that a harness test for a screen with no interactive content proves nothing the smoke test does not.
+
+### Manual test script
+
+`docs/manual-test-script.md` documents:
+
+- First launch (no files, no env vars set)
+- Unlock (with the created files)
+- Recovery (induced by corrupting `dek.wrapped.json`)
+- Portals: add, edit, delete, fetch one, fetch all, cancel batch
+- Manual entry: URL and paste
+- Pipeline: list, filter, job detail
+
+Each step lists the expected outcome. This is the "does the application work" check for anyone before Phase 3 starts.
+
+---
+
+## Risks
+
+| ID | Risk | Impact | Mitigation |
+| :--- | :--- | :--- | :--- |
+| P2.1-R1 | **egui is the wrong framework after all.** The data-dense screens cost more CPU than expected, or immediate-mode ergonomics do not scale. | Medium | Two weeks to find out. If the framework has to change, the view-model and navigation layers survive unchanged — the rewrite is the view layer only. Record the finding in the retrospective as evidence for the next evaluation. |
+| P2.1-R2 | **The accessibility gap is harder to fix than expected.** `labelled_input` cannot associate the label with the field at 0.37. | Medium | Accept as a Phase 5 audit item. The helper localizes the workaround so the fix is one function. Do not let it block Phase 2.1. |
+| P2.1-R3 | **The service layer's shapes are awkward to render.** | Medium | This is what the phase is for. If a shape is wrong, fix it in the service layer (test-first) rather than in the view. |
+| P2.1-R4 | **Scope creep into polish.** | High | Explicitly out of scope. Polish is Phase 5. |
+| P2.1-R5 | **Scope creep into Phase 3.** | High | Buttons are disabled placeholders. |
+| P2.1-R6 | **`request_repaint_after` polling causes a busy loop or a frozen UI.** | Low | `request_repaint_after(Duration::from_millis(50))` during an active task, no repaint request when idle. Verify manually that idle CPU is near zero. |
+| P2.1-R7 | **Manual test script gets skipped.** | Medium | The script is an exit criterion, not a suggestion. |
+| P2.1-R8 | **`data_dir()` migration breaks an existing local database.** Moving from the env-var path to the OS-appropriate path changes where the app looks for `career-ops.db`. | Low | Document the new path in the README. The env var override remains, so a developer with an existing database can set it to the old path. There is no shipped data to migrate. |
+
+---
+
+## Weekly Budget
+
+| Week | Focus | Deliverable |
+| :--- | :--- | :--- |
+| **1** | WS1 shell infrastructure + WS2 unlock/first-launch/recovery | Window opens on a clean machine, unlock flow works, recovery is reachable |
+| **2** | WS3 Portals + WS4 Pipeline + WS5 verification | Portals CRUD + fetch + batch; Pipeline list + filter + manual entry; verification memo |
+
+**Total:** 1.5–2 weeks. The upper end assumes egui friction on the async bridge or the accessibility helper. The lower end assumes the port from the GPUI plan's framework-independent layers works as designed.
+
+---
+
+## Exit Criteria
+
+Phase 2.1 is complete when **all** of the following are true:
+
+1. The application opens to the unlock screen when `dek.wrapped.json` exists, the first-launch wizard when it does not, and the recovery screen when unlock fails.
+2. `cargo run -p career-ops-app` works on a clean checkout with no environment variables set.
+3. Successful unlock, first-launch completion, and recovery-path resolution all reach the main layout.
+4. Sidebar navigation works between Dashboard (placeholder), Pipeline, Portals, CV/Profile (placeholder), Prompts (placeholder), and Settings (placeholder).
+5. Portals lists all portals with health badges, last attempt timestamps, and suggested actions.
+6. Portals supports add, edit, delete, fetch one, and batch fetch with per-portal progress.
+7. Batch fetch can be cancelled.
+8. Pipeline lists all jobs with tier labels and timestamps, and supports filtering by status.
+9. Job detail renders the raw description with disabled placeholder buttons.
+10. Manual entry works from both Portals and Pipeline, for both URL fetch and paste.
+11. Sidecar status indicator reflects the last Tier 2 outcome.
+12. Every view-model function has a corresponding unit test.
+13. `crates/app/docs/patterns.md` documents the list, form, and async patterns, including the `request_repaint_after` requirement.
+14. `docs/manual-test-script.md` documents the flows and has been executed end-to-end on a clean machine.
+15. `labelled_input` produces an accessible label, or the limitation is recorded as a Phase 5 audit item with a comment naming the fix location.
+16. CI is green on all platforms.
+17. The verification pass is complete: every criterion above has been checked against the code, with a note on how it was verified and whether the check exercises the property.
+18. A retrospective memo records P2-R9's status, egui-specific findings, the async bridge experience, and estimate accuracy.
+
+---
+
+## What Phase 2.1 Is Not
+
+Phase 2.1 makes the application runnable. It does not evaluate jobs, generate cover letters, render PDFs, or polish any of the screens. Specifically:
+
+- **No evaluation.** The Evaluate button is a disabled placeholder.
+- **No cover letter generation.** Same.
+- **No PDF rendering.** The CV/Profile screen is a placeholder.
+- **No prompt management.** The Prompts screen is a placeholder.
+- **No settings screen.** Settings is a placeholder.
+- **No accessibility work** beyond `labelled_input`. Contrast, keyboard navigation, and focus order are Phase 5.
+- **No visual polish.** egui's defaults; theming is Phase 5.
+- **No auto-update, telemetry, or crash reporting.**
+- **No localization.**
+
+The temptation to "just add the evaluate button while I'm here" is the most common way shell phases overrun. Phase 3 adds the evaluate button; Phase 2.1 reserves the space and disables it.
+
+---
+
+The single most important thing to take from this plan: **the shell exists to make the service layer honest, not to look good.** Every screen calls a service-layer function and renders the result. If the service layer's shapes fit the view-models without adjustment, Phase 2's design was right. If they do not, the fix is in the service layer, not the view.
+
+The second: **the view-model layer is where correctness lives.** egui is the chosen framework, but the view-models do not know what egui is. Phase 3, 4, and 5 add screens by extending the view-models and wiring new views to them. The view code is replaceable; the view-model code is the application.

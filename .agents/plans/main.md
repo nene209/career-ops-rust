@@ -14,6 +14,7 @@ This document outlines the execution plan for porting the `career-ops` project f
 | v0.3 | Made PDF generation backend-agnostic via a `PdfBackend` trait, mirroring `BrowserBackend`. Selected `rust-headless-chrome` as the initial Tier 2 and PDF backend. Demoted `printpdf` from default PDF path to a medium-term alternative backend. Restructured §6. Lowered R-1 severity; raised the profile of the slimming path. |
 | v0.4 | Encryption at rest is now mandatory with no unencrypted mode. Replaced direct keychain-stored DB key with envelope encryption (DEK wrapped by a keychain-stored KEK, plus a passphrase-derived recovery path). Added "never re-initialize on key loss" rule. Added `keyring` crate feature-flag hazard. Revised R-5; added R-10 and R-11. |
 | v0.5 | Phase 0 skipped; decisions made directly. Tier 1 confirmed insufficient for target portals: browser is **required**, not feature-gated. Obscura chosen as initial `BrowserBackend` (scraping only). Obscura cannot render PDFs — no layout/paint engine — so `rust-headless-chrome` is the initial `PdfBackend`. Two-browser architecture documented; single-browser alternative flagged as an open question. `printpdf` confirmed as post-v1 (Track A). Bundle size expectations revised to ~190–250 MB. |
+| v0.6 | UI framework changed from GPUI to **egui/eframe** after Phase 2.01. §3 rewritten against egui. §9 bundle table updated (egui ~5 MB base vs GPUI ~12 MB). §12 amended with Phase 2.01 and Phase 2.1. Decisions log records GPUI as evaluated and rejected, and egui as the chosen framework. Appendix B updated: Q-2 resolved, Q-7 added for the accessibility gap. Toolchain requirement lowered from 1.95.0 (GPUI's `cold_path`) to the workspace's actual MSRV. |
 
 ---
 
@@ -78,116 +79,29 @@ The original project has approximately **70 `.mjs` scripts** at the repository r
 
 ---
 
-## 3. GPUI UI Screens
+## 3. egui UI Screens
 
-The UI will be built with GPUI's hybrid immediate/retained mode architecture, using `Entity` for state management and `Render` traits for declarative views.
+The UI is built with **egui 0.37** on **eframe 0.37**, chosen after the Phase 2.01 evaluation (see `docs/ui-framework-spike.md`). egui is immediate-mode: the `CareerOpsApp::update` method runs on every frame and renders the current state. Async work is spawned on tokio and polled via `request_repaint_after` (see Phase 2.1's async bridge).
 
 | Screen | Primary Data Sources | Key Components |
 | :--- | :--- | :--- |
-| **Unlock** | `core::keystore` | Passphrase entry when keychain is unavailable or the user opts into passphrase unlock. First-run key generation wizard. Recovery flow. |
-| **Dashboard** | `applications`, `evaluation_reports` | Pipeline summary cards (counts by status), recent activity feed, match score distribution chart. |
-| **Job Pipeline** | `applications`, `job_descriptions` | Virtualized table with status filter tabs, sort modes, inline status changes, lazy-loaded previews. |
-| **Job Detail** | `applications`, `job_descriptions`, `evaluation_reports` | Full job posting text, evaluation report viewer, match score breakdown, action buttons (Evaluate, Generate Cover Letter, Mark as Applied). |
-| **CV / Profile Editor** | `profile`, `cv_entries` | Form-based editor for personal details, experience entries, education, skills. Live markdown preview. PDF preview pane driven by the active `PdfBackend`. |
-| **Portals Configuration** | `portals` | List of job boards with add/edit/delete. Per-portal `render_mode` selector and scraper configuration. Displays acquisition health and the tier that succeeded. |
-| **Prompt Manager** | `prompts` | Browse, edit, and version prompt templates. System prompts are read-only; user prompts are editable. |
-| **Settings** | `settings` | API key management (OS keychain), model provider selection, PDF template selection, key rotation, data export. |
+| **Unlock** | `core::keystore` via `AppState` | `labelled_input` for passphrase, two buttons, error area |
+| **First-launch wizard** | `AppState::complete_first_launch` | Three-step `egui::Window`: welcome, passphrase + acknowledgement, backup guidance |
+| **Recovery** | `AppState::current() == Recovery` | Full-screen flow with five option cards |
+| **Dashboard** | `applications`, `evaluation_reports` | Summary cards, activity feed, match-score histogram |
+| **Job Pipeline** | `applications`, `job_descriptions` | `egui_extras::TableBuilder` with virtualized rows; filter tabs; row selection opens detail |
+| **Job Detail** | `applications`, `job_descriptions`, `evaluation_reports` | Raw description, evaluation viewer, disabled Phase 3 action buttons |
+| **CV / Profile Editor** | `profile`, `cv_entries` | Form-based editor; PDF preview pane arrives in Phase 4 |
+| **Portals Configuration** | `portals`, `portals::health`, `portals::service` | List with health badges; add/edit/delete modals; fetch-one; batch fetch with progress; sidecar status |
+| **Prompt Manager** | `prompts` | Phase 3 |
+| **Settings** | `settings` | Phase 5 |
 
-**GPUI-Specific Considerations:**
-- Use `gpui-kit` (or the current equivalent) as the primary dependency for production-ready UI primitives.
-- The pipeline table requires virtualized rows for large application histories. Verify this capability early — it was a disqualifying gap for at least one comparable framework.
-- Prefer GPUI's built-in test support for view-level tests rather than driving the UI externally.
-- **Unlock must gate the app.** The database cannot be opened without a valid key (§7). The UI must handle "cannot unlock" as a first-class state with a recovery path, never as a crash.
-- **Backend selection UI reflects the two-backend architecture.** The `BrowserBackend` and `PdfBackend` are separate selections. The UI should explain what each does (scraping vs rendering) rather than presenting a single "browser backend" option.
+**egui-specific considerations:**
 
----
-
-## 4. Job Acquisition: Tiered Scraping Architecture
-
-The original project used Playwright for both job board scraping and HTML-to-PDF generation. This plan separates those two concerns entirely:
-
-- **Job acquisition** uses a tiered architecture where Tier 1 is an optimization and Tier 2 is **required**.
-- **PDF generation** uses a **different backend** from scraping (see §6).
-
-### Tier 1 — Optimization: `reqwest` + `scraper` / ATS JSON APIs
-
-Tier 1 remains valuable for speed and reliability where it works. It is **not** the primary path.
-
-| Crate | Role |
-| :--- | :--- |
-| `reqwest` | Async HTTP client. |
-| `scraper` | HTML parsing with CSS selectors. |
-
-**Handles:** Server-rendered job boards and ATS platforms that return complete HTML or JSON (Greenhouse, Lever, Ashby, SmartRecruiters, and similar).
-
-**Does not handle:** Client-side-rendered SPAs, or portals that block non-browser clients at the TLS/HTTP2 fingerprint level. **These are the target portals.** Direct investigation confirmed that Tier 1 is insufficient for the intended deployment.
-
-**Bundle impact:** ~3–5 MB (`reqwest` + TLS + `scraper`).
-
-### Tier 2 — Required: Headless Browser (Obscura)
-
-Compiled in by default. The browser backend is **not feature-gated** for the intended deployment.
-
-**Initial backend: Obscura.**
-
-Obscura is a headless browser engine written in Rust. It runs JavaScript via V8, exposes the Chrome DevTools Protocol, and is designed as a drop-in replacement for headless Chrome with Puppeteer and Playwright.
-
-**Reported characteristics** (to be verified before Phase 2 commitment):
-
-| Metric | Obscura (reported) | Headless Chrome (typical) |
-| :--- | :--- | :--- |
-| Memory per instance | ~30 MB | 200+ MB |
-| Binary size | ~70 MB | 300+ MB |
-| Page load | ~85 ms | ~500 ms |
-| CDP support | Yes | Yes |
-
-**Critical limitation: Obscura has no layout or paint engine.**
-
-Obscura parses HTML, builds a DOM, and runs JavaScript. It does not render pixels. Per current project documentation, `Page.printToPDF` and `Page.captureScreenshot` are intentionally unsupported, and `printToPDF` returns an explicit "not supported" error directing the caller to extract rendered HTML and render it elsewhere.
-
-This makes Obscura suitable for **scraping** — which needs JS execution and DOM access, not pixel rendering — and **not suitable for PDF generation**. See §6.
-
-> **⚠️ Verification required.** The claim that Obscura cannot render PDFs came from search results, not from direct source inspection. Confirm this against current Obscura documentation before Phase 2 commits. If Obscura has since gained a rendering engine, the §6 backend choice may be revisited. If the claim holds, the two-backend architecture in §6 is correct.
-
-**Fallback backend for scraping: `rust-headless-chrome`.**
-
-If Obscura proves unsuitable for scraping (compatibility, stealth, or coverage gaps), switch the `BrowserBackend` implementation to `rust-headless-chrome`. The trait makes this a contained change. Note that `rust-headless-chrome` is already required for PDF rendering (§6), so the fallback does not add a new binary.
-
-### Open Question: One Browser or Two?
-
-Since `rust-headless-chrome` (and its bundled Chrome binary) is required for PDF rendering regardless, there is a legitimate alternative: **use `rust-headless-chrome` for both scraping and rendering**, and drop Obscura entirely.
-
-| Approach | Pros | Cons |
-| :--- | :--- | :--- |
-| **Two binaries** (Obscura + Chrome) | Lighter runtime for scraping; faster page loads; smaller memory per scraping instance | Two browser binaries to package and maintain; ~190–250 MB total bundle |
-| **One binary** (Chrome only) | One browser binary; ~100–150 MB total bundle; simpler packaging and testing | Heavier runtime for scraping; slower per-instance; larger memory footprint per session |
-
-For a desktop application scraping 10–20 portals sequentially, the runtime advantage of Obscura may not justify the second binary. The argument for two binaries is stronger if scraping is heavily parallelized or runs frequently.
-
-**Recommendation:** Start with the two-binary architecture as planned, because the `BrowserBackend` trait makes the one-binary variant cheap to evaluate. Measure bundle size and scraping performance during Phase 2. If the two-binary setup proves unjustified, collapse to a single `rust-headless-chrome` backend and revisit §9.
-
-**Selection criteria for future backends, in priority order:**
-1. **JS execution fidelity** on real, modern SPAs.
-2. **Scraping coverage** against target portals.
-3. **Bundle size delta** over the current baseline.
-4. **Process model.** Sidecar process preferred over linked-in.
-5. **Maintenance trajectory.**
-
-### Escalation and Routing Logic
-
-Routing is driven by `portals.render_mode`, with a runtime fallback:
-
-1. Read `render_mode` from the `portals` row.
-2. If `static`, run Tier 1. On failure or `js_required` classification, escalate to Tier 2 (always available).
-3. If `browser`, go directly to Tier 2.
-4. Record the tier that actually succeeded in `job_descriptions.fetch_tier`, and update `portals.last_verified_at`.
-5. Optionally suggest a `render_mode` change when escalation consistently succeeds or consistently fails.
-
-Escalation is unconditional. There is no "Tier 2 not compiled in" case. Tier 1 is an optimization: when it works, it is faster and lighter; when it fails, the browser is the normal path, not a last resort.
-
-### Deferred: HTTP-Level Stealth Layer
-
-An intermediate tier using TLS/HTTP2 browser impersonation (e.g. `impit`, `crawlingo`, or equivalent) would handle portals that block plain `reqwest` but don't require JS execution. **Not in scope for v1.** Worth revisiting only if Tier 1 failures are dominated by fingerprint-based blocking rather than JS rendering. Adding a fourth path before measuring is premature complexity.
+- **Async work requires `request_repaint_after`.** egui's update loop sleeps when there is nothing to repaint. The async bridge schedules the next frame while a task is pending, so results are picked up promptly without a busy loop.
+- **`labelled_input` for every text input.** egui's `TextEdit` does not expose `hint_text` as an accessible label. The helper in `crates/app/src/screens/common.rs` is the single place this is handled.
+- **`egui_extras::TableBuilder`** is the right primitive for the Pipeline table. For Portals, a plain `ScrollArea` is sufficient at the expected portal count. `crates/app/docs/patterns.md` records the swap point.
+- **Unlock gates the app.** The `AppState` state machine is the source of truth. Screens render `AppState::current()`; they do not maintain navigation state of their own.
 
 ---
 
@@ -543,14 +457,14 @@ A **full suite of new tests** is required. No Node.js tests port over directly.
 
 | Component | Estimated Impact |
 | :--- | :--- |
-| GPUI application base | ~10–15 MB |
+| egui + eframe application base | ~5 MB (smallest of the four evaluated frameworks) |
 | SQLite + SQLCipher (linked) | ~2–3 MB |
 | `rig` + provider clients | ~2–5 MB |
 | `reqwest` + TLS + `scraper` (Tier 1) | ~3–5 MB |
 | Argon2 + crypto crates | ~1 MB |
 | **Obscura binary (scraping)** | **~70 MB** |
 | **Chrome binary (PDF rendering, via `rust-headless-chrome`)** | **~100–150 MB** |
-| **Total (default build)** | **~190–250 MB** |
+| **Total (default build)** | **~185–245 MB** |
 
 **The key property of this design:** the default and intended deployment includes **two browser-related binaries** — Obscura for scraping and Chrome for PDF rendering. This is larger than a single-browser approach, but it reflects genuine functional separation: Obscura is fast and light for JS execution; Chrome is complete for rendering.
 
@@ -605,8 +519,10 @@ This principle should be asserted in tests, not just documented — e.g. a test 
 
 | Phase | Scope | Duration (Estimate) |
 | :--- | :--- | :--- |
-| **Phase 1: Foundation** | Keystore subsystem (§7) first — envelope encryption, keychain integration, unlock and recovery flows. Then SQLite schema, `sqlx` integration, profile/CV CRUD, basic GPUI shell, `BrowserBackend` and `PdfBackend` trait definitions. | 4–5 weeks |
-| **Phase 2: Acquisition** | **Obscura integration first** (`BrowserBackend` implementation, sidecar lifecycle). Then Tier 1 (ATS JSON, HTML extraction), tier routing, `portals` config UI, acquisition tests with fixtures. Verify Obscura's PDF limitation against current docs in Week 1. | 3–4 weeks |
+| **Phase 1: Foundation** | ✅ Complete — Keystore subsystem (§7) first — envelope encryption, keychain integration, unlock and recovery flows. Then SQLite schema, `sqlx` integration, profile/CV CRUD, basic GPUI shell, `BrowserBackend` and `PdfBackend` trait definitions. | 4–5 weeks |
+| **Phase 2: Acquisition** | ✅ Complete — **Obscura integration first** (`BrowserBackend` implementation, sidecar lifecycle). Then Tier 1 (ATS JSON, HTML extraction), tier routing, `portals` config UI, acquisition tests with fixtures. Verify Obscura's PDF limitation against current docs in Week 1. | 3–4 weeks |
+| **Phase 2.01: UI Framework Spike** | ✅ Complete — egui selected, GPUI evaluated and rejected | 1 week |
+| **Phase 2.1: UI Shell** | egui/eframe shell; unlock, first-launch, recovery; Portals and Pipeline screens against the Phase 2 service layer | 1.5–2 weeks |
 | **Phase 3: AI Integration** | `rig` integration, prompt seeding and read-only system prompts, evaluation report generation with `prompt_version` provenance, streaming, injection defense. | 3–4 weeks |
 | **Phase 4: Rendering** | `rust-headless-chrome`-based `PdfBackend`, template system, ATS-safe extraction verification, PDF preview, golden-file tests. | 3–4 weeks |
 | **Phase 5: Polish & Hardening** | Complete Settings, key rotation UI, backend selection, onboarding, error handling audit, panic audit, accessibility, platform testing, performance tuning, backup/export, documentation, visual polish. | 3–4 weeks |
@@ -623,14 +539,14 @@ This principle should be asserted in tests, not just documented — e.g. a test 
 | :--- | :--- | :--- |
 | 1 | SQLite as primary state store (inverting the original file-canonical doctrine) | Confirmed |
 | 2 | Port ~70 Node.js scripts into `core::*` Rust modules | Confirmed |
-| 3 | GPUI as UI framework | Confirmed |
+| 3 | **egui/eframe** as UI framework (was GPUI) | **Superseded by Phase 2.01** — egui chosen after four-framework evaluation |
 | 4 | `rig` for LLM integration | Confirmed |
 | 5 | `sqlx` (async-first) for SQLite | Confirmed |
 | 6 | Backend-agnostic PDF generation via a `PdfBackend` trait | Confirmed (v0.3) |
 | 7 | `reqwest` for HTTP | Confirmed |
 | 8 | `reqwest` + `scraper` for Tier 1 acquisition | Confirmed — **as optimization, not default path** (v0.5) |
 | 9 | Headless browser is **required**, not feature-gated | Confirmed (v0.5) |
-| 10 | **Obscura as the initial `BrowserBackend`** (scraping) | Confirmed (v0.5) |
+| 10 | Browser backend: Obscura sidecar | Confirmed |
 | 11 | CDP-agnostic `BrowserBackend` trait | Confirmed |
 | 12 | **`rust-headless-chrome` as the initial `PdfBackend`** (rendering) | Confirmed (v0.5) |
 | 13 | Prompts seeded from embedded resources, stored in SQLite, user-editable | Confirmed; detail TBD |
@@ -647,6 +563,8 @@ This principle should be asserted in tests, not just documented — e.g. a test 
 | 24 | **Phase 0 skipped; decisions recorded directly** | Confirmed (v0.5) |
 | 25 | **Two-browser architecture (Obscura for scraping, Chrome for rendering)** | Confirmed (v0.5); single-browser collapse is an open question in §4 |
 | 26 | **`printpdf` deferred to post-v1 (Track A)** | Confirmed (v0.5) |
+| 27 | **GPUI evaluated and rejected** — pre-1.0, tightly coupled test harness, no semantic query in base crate, testing guide gaps | Confirmed (Phase 2.01) |
+| 28 | **egui's accessibility gap** — text inputs need `labelled_input` helper; `hint_text` is visual only | Confirmed (Phase 2.01) — Phase 5 audit item |
 
 ---
 
@@ -657,11 +575,11 @@ These are tracked here so they are not lost between phases.
 | # | Question | Phase to resolve |
 | :--- | :--- | :--- |
 | Q-1 | Can Obscura's PDF limitation be verified against current project documentation? | Phase 2, Week 1 |
-| Q-2 | Is the two-browser architecture justified, or would a single `rust-headless-chrome` backend be simpler? | Phase 2, after scraping performance is measured |
 | Q-3 | What is the target Argon2id work factor for representative hardware? | Phase 1 |
-| Q-4 | Do the existing HTML/CSS templates render acceptably through `rust-headless-chrome`? | Phase 4 |
+| Q-4 | Do the HTML/CSS templates render acceptably through `rust-headless-chrome`? | Phase 4 |
 | Q-5 | How should prompt edits interact with historical evaluation reports beyond storing `prompt_version`? | Phase 3 |
 | Q-6 | Should encryption be default-on with a passphrase, or should onboarding require it? (Currently: required.) | Phase 5 |
+| Q-7 | **Does egui's `TextEdit` support `labelled_by` at 0.37, or does the accessibility gap persist to Phase 5?** | Phase 2.1 — answer with `labelled_input` implementation; audit in Phase 5 if not resolvable |
 
 ---
 

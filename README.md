@@ -19,9 +19,13 @@ spike complete, Weeks 2–4 remaining.
 
 ### Prerequisites
 
-- **Rust 1.95.0 or newer.** The GPUI dependency uses
-  `std::hint::cold_path`, which was stabilized in 1.95.0. Older
-  toolchains will fail to compile `career-ops-app`.
+- **Rust 1.95.0 or newer.** Run `rustc --version` to check, and
+  `rustup update stable` to upgrade. The 1.95.0 floor was originally
+  set by GPUI's use of `std::hint::cold_path`, and GPUI is no longer a
+  dependency — the constraint is now a project preference rather than
+  a technical requirement. The workspace's `rust-version` field in the
+  root `Cargo.toml` is the value `cargo` actually enforces; if the two
+  disagree, the field wins.
   Run `rustc --version` to check. Upgrade with `rustup update stable`.
 - **Linux only:** `libsecret-1-dev` and `pkg-config` for the keychain
   backend. On Debian/Ubuntu:
@@ -271,7 +275,7 @@ crates/
                   integration tests can import the state machine.
     src/
       state.rs    Application state machine, unlock gating
-      screens.rs  GPUI view placeholders
+      screens/    egui view layer (Phase 2.1)
       lib.rs      Library entry point (pub mod state, pub mod screens)
       main.rs     Binary entry point
     tests/
@@ -342,11 +346,6 @@ path if the keychain entry becomes unavailable.
 ---
 
 ## Troubleshooting
-
-### "GPUI fails to compile with E0658 `cold_path`"
-
-Your Rust toolchain is older than 1.95.0. Run `rustup update stable`
-and rebuild.
 
 ### "Dependency `keyring` has feature `mock` but it does not exist"
 

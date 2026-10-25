@@ -5,3 +5,5 @@
 **/dek.wrapped.json
 .env
 vendor/
+.kimi-data
+/spikes/**/target

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "crates/app"]
+exclude = ["spikes"]
 
 [workspace.package]
 edition = "2021"
