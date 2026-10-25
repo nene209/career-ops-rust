@@ -66,6 +66,14 @@ pub enum StatusBadge {
     NotStarted,
     Running,
     Stopped,
+    // Application statuses on the Pipeline screen.
+    Discovered,
+    Evaluating,
+    Ready,
+    Applied,
+    Interviewing,
+    Rejected,
+    Offer,
 }
 
 impl StatusBadge {
@@ -78,6 +86,13 @@ impl StatusBadge {
             Self::NotStarted => "Not started",
             Self::Running => "Running",
             Self::Stopped => "Stopped",
+            Self::Discovered => "Discovered",
+            Self::Evaluating => "Evaluating",
+            Self::Ready => "Ready",
+            Self::Applied => "Applied",
+            Self::Interviewing => "Interviewing",
+            Self::Rejected => "Rejected",
+            Self::Offer => "Offer",
         }
     }
 
@@ -85,8 +100,13 @@ impl StatusBadge {
         match self {
             Self::Healthy | Self::Running => Color32::from_rgb(0x2e, 0xa0, 0x43),
             Self::Degraded => Color32::from_rgb(0xc9, 0x8a, 0x00),
-            Self::Broken | Self::Stopped => Color32::from_rgb(0xc0, 0x39, 0x2b),
-            Self::NeverFetched | Self::NotStarted => Color32::GRAY,
+            Self::Broken | Self::Stopped | Self::Rejected => Color32::from_rgb(0xc0, 0x39, 0x2b),
+            Self::NeverFetched | Self::NotStarted | Self::Discovered => Color32::GRAY,
+            Self::Evaluating => Color32::from_rgb(0x1f, 0x6f, 0xeb),
+            Self::Ready => Color32::from_rgb(0xc9, 0x8a, 0x00),
+            Self::Applied => Color32::from_rgb(0x0e, 0x7c, 0x86),
+            Self::Interviewing => Color32::from_rgb(0x7c, 0x3a, 0xed),
+            Self::Offer => Color32::from_rgb(0x2e, 0xa0, 0x43),
         }
     }
 
@@ -151,6 +171,13 @@ mod tests {
             StatusBadge::NotStarted,
             StatusBadge::Running,
             StatusBadge::Stopped,
+            StatusBadge::Discovered,
+            StatusBadge::Evaluating,
+            StatusBadge::Ready,
+            StatusBadge::Applied,
+            StatusBadge::Interviewing,
+            StatusBadge::Rejected,
+            StatusBadge::Offer,
         ];
 
         let labels: Vec<&str> = badges.iter().map(|badge| badge.label()).collect();

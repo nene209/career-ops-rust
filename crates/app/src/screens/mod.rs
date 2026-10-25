@@ -11,6 +11,7 @@
 
 pub mod components;
 pub mod lock;
+pub mod pipeline;
 pub mod portals;
 pub mod shell;
 

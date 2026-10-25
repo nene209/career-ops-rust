@@ -40,6 +40,11 @@ egui::CentralPanel::default().show(ui, |ui| {
 Panels must be shown before the central panel. `show` takes the root `Ui`, not
 a `Context`.
 
+`CareerOpsApp::ui` renders the active screen through `shell::show_with`, then
+calls `portals::show_modal` so dialogs float above whichever screen is visible.
+The shell never runs side effects: each screen returns an action enum
+(`PortalsAction`, `PipelineAction`) and the app executes it.
+
 ## List pattern
 
 For Phase 2.1's expected data volumes (a dozen portals, a few hundred jobs),
@@ -61,7 +66,8 @@ egui::ScrollArea::vertical().show(ui, |ui| {
 
 **Swap point:** when the Pipeline list grows past a few hundred rows, replace
 the loop with `egui_extras::TableBuilder`, which virtualizes rows. Do not
-prematurely use it in Phase 2.1.
+prematurely use it in Phase 2.1. The Pipeline loads at most `PIPELINE_LIMIT`
+(500) rows, so raise that bound only together with the swap.
 
 Empty lists render `components::EmptyState`, not a blank panel. `EmptyState`
 optionally takes an action label and returns `true` in the frame it is clicked.
@@ -71,7 +77,8 @@ optionally takes an action label and returns `true` in the frame it is clicked.
 Use `components::StatusBadge` for portal health and sidecar state. Map the
 domain enum onto a badge in the view-model or in one small function; do not
 re-implement colour/label decisions per screen. `PortalHealth::suggested_action`
-is already the user-facing drill-down text — render it directly.
+is already the user-facing drill-down text — render it directly. The Pipeline
+maps its `StatusLabel` to the seven application-status badges the same way.
 
 ## Form pattern
 
@@ -168,6 +175,33 @@ returns a partial report.
 The screen uses a plain `ScrollArea` for the list; `TableBuilder` is the swap
 point when the Pipeline list grows. Health mapping lives in the view model; the
 screen only maps `HealthBadge` to `StatusBadge`.
+
+### Shared modal
+
+The add/edit/delete/manual dialogs are not rendered by `portals::show`. The app
+calls `portals::show_modal(ui, &mut portals_view, render_state.modal_state())`
+after the active screen, so the manual-entry dialog is reachable from Pipeline
+through `PortalsView::open_manual()`. `PortalsView` is modal-only state; the
+Portals screen takes just the view model and the render state.
+
+## Pipeline screen (WS4)
+
+One task (`AsyncTask<PipelineLoad>`) reads `job_descriptions::list_recent(&pool,
+PIPELINE_LIMIT)` and `applications::list(&pool)` and joins them by job id before
+the view model is built. The screen is read-only apart from the filter: it
+returns `PipelineAction::{AddJob, Reload, SetFilter}` and the app owns every
+side effect.
+
+- The filter is a view preference. `PipelineViewModel::replace_jobs` keeps it
+  across reloads; `from_jobs` resets it to `All` only for a fresh page.
+- A successful manual add sets `pipeline_loaded = false` and drops any in-flight
+  load, so a result read before the insert cannot land after it. `ui()` reloads
+  on the next frame while Pipeline is visible.
+- `selected: Option<i64>` lives in `PipelineView`, not in the view model. A
+  selection that no longer exists falls back to the list instead of rendering an
+  empty detail panel.
+- The detail view reads `source_url` and `raw_text` from the row, not from a
+  second query.
 
 ## State-mutating async work
 

@@ -36,9 +36,6 @@ views are placeholders.
 
 ## What is stubbed
 
-- **Pipeline screen** — Phase 2.1 Workstreams 1–3 render the shell, lock
-  flows, and the Portals screen. The Pipeline screen (Workstream 4) is still
-  an empty state.
 - **Template seeding** — the `templates` table and repository are in place,
   but no template `.html` files exist yet. Seeding a template system is a
   **Phase 4** deliverable, and Phase 4 should model it on `prompts_seed.rs`
@@ -67,6 +64,15 @@ views are placeholders.
   batch fetch with progress, and the manual-entry modal. The app owns the
   fetch source, browser backend, one `PortalsTask`, and the batch progress
   channel; `fetch_batch_cancellable` stops between portals.
+- **Pipeline screen** — Phase 2.1 Workstream 4 renders the 500 most recent
+  jobs with tier labels and application-status badges, four client-side
+  filters, and a read-only detail view whose "Evaluate" and "Generate
+  cover letter" buttons are disabled until Phase 3. The load task joins
+  `job_descriptions::list_recent` with `applications::list`; the screen never
+  reads the database. The manual-entry modal is app-level chrome
+  (`portals::show_modal`), rendered after the active screen, so Portals and
+  Pipeline share one dialog. A successful manual add invalidates the loaded
+  page.
 
 - **Prompt seeding** — `crates/core/src/prompts_seed.rs` embeds the
   original `modes/*.md` files at compile time and seeds them into the

@@ -43,7 +43,12 @@ fn test_harness<'a>(
 
     Harness::new_ui_state(
         move |ui, state: &mut TestState| {
-            if let Some(action) = portals::show(ui, view_model, &mut state.view, render_state) {
+            if let Some(action) = portals::show(ui, view_model, render_state) {
+                state.actions.push(action);
+            }
+            if let Some(action) =
+                portals::show_modal(ui, &mut state.view, render_state.modal_state())
+            {
                 state.actions.push(action);
             }
         },

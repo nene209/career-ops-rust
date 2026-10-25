@@ -7,7 +7,8 @@
 //! - `NavigationState`, the sidebar selection once the user reaches `Ready`.
 //! - A `tokio::runtime::Runtime`, used by the lock and Portals screens to run
 //!   service-layer calls off the UI thread.
-//! - UI-only lock state, Portals view state, and the in-flight async work.
+//! - UI-only lock state, Portals and Pipeline view state, and the in-flight
+//!   async work.
 //!
 //! ## Why the lock state is an `Option`
 //!
@@ -22,6 +23,7 @@
 //! the HTTP source and browser backend through `Arc`. The state machine stays
 //! available while a fetch or mutation runs.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,8 +34,10 @@ use career_ops_core::acquisition::http;
 use career_ops_core::acquisition::manual;
 use career_ops_core::acquisition::router::HttpFetchSource;
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
-use career_ops_core::model::FetchTier;
+use career_ops_core::model::{ApplicationStatus, FetchTier, JobDescription};
 use career_ops_core::portals::service::{self, BatchEntry, BatchReport, PortalWithHealth};
+use career_ops_core::repo::applications as application_repo;
+use career_ops_core::repo::job_descriptions as job_repo;
 use career_ops_core::repo::portals::{self as portal_repo, NewPortal, RenderMode};
 use career_ops_core::{CoreError, Result as CoreResult};
 use tokio::runtime::Runtime;
@@ -43,14 +47,35 @@ use crate::navigation::{MainScreen, NavigationState};
 use crate::recovery;
 use crate::screens;
 use crate::screens::lock::{LockAction, LockView, RESET_PHRASE};
+use crate::screens::pipeline::{PipelineAction, PipelineRenderState, PipelineView};
 use crate::screens::portals::{
-    ManualEntryView, ManualSuccess, PortalForm, PortalFormData, PortalModal, PortalsAction,
-    PortalsRenderState, PortalsView,
+    ManualSuccess, PortalForm, PortalFormData, PortalModal, PortalsAction, PortalsRenderState,
+    PortalsView,
 };
 use crate::state::{AppState, Screen};
+use crate::view_models::pipeline::PipelineViewModel;
 use crate::view_models::portals::{BatchProgress, PortalsViewModel};
 
 type StateTask = AsyncTask<(AppState, CoreResult<()>)>;
+
+/// A page of recent jobs, paired with the status of the application attached
+/// to each job id.
+type PipelineLoad = CoreResult<(Vec<JobDescription>, HashMap<i64, ApplicationStatus>)>;
+
+/// How many recent jobs the Pipeline loads at once.
+///
+/// Phase 2.1 renders the list in a plain `ScrollArea`; a bounded page keeps the
+/// per-frame cost predictable until `TableBuilder` replaces it (`docs/patterns.md`).
+const PIPELINE_LIMIT: i64 = 500;
+
+/// What the active screen asked the app to do.
+///
+/// The shell renders exactly one screen, so this union lets `ui()` route the
+/// result without the shell knowing about either screen.
+enum ScreenAction {
+    Portals(PortalsAction),
+    Pipeline(PipelineAction),
+}
 
 enum PortalsTask {
     List {
@@ -109,6 +134,12 @@ pub struct CareerOpsApp {
     batch_cancel: Arc<AtomicBool>,
     batch_ids: Vec<i64>,
     fetching_portal: Option<i64>,
+
+    pipeline: PipelineViewModel,
+    pipeline_view: PipelineView,
+    pipeline_loaded: bool,
+    pipeline_error: Option<String>,
+    pipeline_task: Option<AsyncTask<PipelineLoad>>,
 }
 
 impl CareerOpsApp {
@@ -136,6 +167,11 @@ impl CareerOpsApp {
             batch_cancel: Arc::new(AtomicBool::new(false)),
             batch_ids: Vec::new(),
             fetching_portal: None,
+            pipeline: PipelineViewModel::default(),
+            pipeline_view: PipelineView::default(),
+            pipeline_loaded: false,
+            pipeline_error: None,
+            pipeline_task: None,
         }
     }
 
@@ -238,9 +274,7 @@ impl CareerOpsApp {
                     });
                 }
             }
-            PortalsAction::OpenManual => {
-                self.portals_view.modal = Some(PortalModal::Manual(ManualEntryView::default()));
-            }
+            PortalsAction::OpenManual => self.portals_view.open_manual(),
             PortalsAction::CloseModal => self.portals_view.modal = None,
             PortalsAction::CreatePortal(data) => self.start_portal_mutation(None, data),
             PortalsAction::UpdatePortal { id, data } => {
@@ -274,6 +308,17 @@ impl CareerOpsApp {
         }
     }
 
+    /// Execute an intent emitted by the Pipeline screen.
+    ///
+    /// Public so tests can drive the same path the UI uses without rendering.
+    pub fn handle_pipeline_action(&mut self, action: PipelineAction) {
+        match action {
+            PipelineAction::AddJob => self.portals_view.open_manual(),
+            PipelineAction::Reload => self.start_pipeline_load(),
+            PipelineAction::SetFilter(filter) => self.pipeline.filter = filter,
+        }
+    }
+
     /// Poll the in-flight lock operation. Called once per frame from `ui()`.
     pub fn poll_pending(&mut self, ctx: &egui::Context) {
         let poll = match self.pending.as_mut() {
@@ -294,9 +339,10 @@ impl CareerOpsApp {
                             // Drop the transient passphrase strings once the
                             // vault is open. The shell no longer needs them.
                             self.lock_view = LockView::default();
-                            // Any Portals data belongs to the previous vault or
-                            // session; load it fresh after this unlock.
-                            self.reset_portals_state();
+                            // Any Portals or Pipeline data belongs to the
+                            // previous vault or session; load it fresh after
+                            // this unlock.
+                            self.reset_ready_state();
                         }
                     }
                     Err(error) => {
@@ -451,7 +497,7 @@ impl CareerOpsApp {
     // Portals
     // ------------------------------------------------------------------
 
-    fn reset_portals_state(&mut self) {
+    fn reset_ready_state(&mut self) {
         self.portals = PortalsViewModel::default();
         self.portals_view = PortalsView::default();
         self.portals_loaded = false;
@@ -462,6 +508,12 @@ impl CareerOpsApp {
         self.batch_cancel = Arc::new(AtomicBool::new(false));
         self.batch_ids.clear();
         self.fetching_portal = None;
+
+        self.pipeline = PipelineViewModel::default();
+        self.pipeline_view = PipelineView::default();
+        self.pipeline_loaded = false;
+        self.pipeline_error = None;
+        self.pipeline_task = None;
     }
 
     fn pool(&self) -> Option<sqlx::SqlitePool> {
@@ -846,6 +898,12 @@ impl CareerOpsApp {
                         manual.error = None;
                         manual.result = Some(success);
                     }
+
+                    // A new job invalidates the loaded Pipeline page. Drop an
+                    // in-flight refresh so its pre-insert result cannot land
+                    // after this one; `ui()` reloads once Pipeline is visible.
+                    self.pipeline_task = None;
+                    self.pipeline_loaded = false;
                 }
                 Err(error) => {
                     let message = error.to_string();
@@ -903,12 +961,81 @@ impl CareerOpsApp {
     // ------------------------------------------------------------------
     // End Portals
     // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // Pipeline
+    // ------------------------------------------------------------------
+
+    fn start_pipeline_load(&mut self) {
+        if self.pipeline_task.is_some() {
+            return;
+        }
+
+        self.pipeline_error = None;
+
+        let Some(pool) = self.pool() else {
+            self.pipeline_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let task = self.spawn(async move {
+            // Two reads joined in memory. The Pipeline shows one status per job,
+            // because a job description has at most one application.
+            let jobs = job_repo::list_recent(&pool, PIPELINE_LIMIT).await?;
+            let applications = application_repo::list(&pool).await?;
+            let statuses = applications
+                .into_iter()
+                .filter_map(|application| {
+                    ApplicationStatus::parse(&application.status)
+                        .map(|status| (application.job_description_id, status))
+                })
+                .collect();
+            Ok((jobs, statuses))
+        });
+
+        self.pipeline_task = Some(task);
+    }
+
+    fn poll_pipeline_task(&mut self, ctx: &egui::Context) {
+        let poll = match self.pipeline_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Ready(result) => {
+                self.pipeline_task = None;
+                match result {
+                    Ok((jobs, statuses)) => {
+                        self.pipeline.replace_jobs(jobs, &statuses);
+                        self.pipeline_loaded = true;
+                        self.pipeline_error = None;
+                    }
+                    Err(error) => self.pipeline_error = Some(error.to_string()),
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Cancelled => {
+                self.pipeline_task = None;
+                self.pipeline_error = Some("The operation was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // End Pipeline
+    // ------------------------------------------------------------------
 }
 
 impl Drop for CareerOpsApp {
     fn drop(&mut self) {
         // Abort any in-flight work before asking the sidecar to exit.
         self.portals_task = None;
+        self.pipeline_task = None;
         self.pending = None;
 
         if tokio::runtime::Handle::try_current().is_err() {
@@ -979,6 +1106,7 @@ impl eframe::App for CareerOpsApp {
         match screen {
             Screen::Ready => {
                 self.poll_portals_task(ui.ctx());
+                self.poll_pipeline_task(ui.ctx());
                 self.drain_batch_progress();
 
                 if self.navigation.current() == MainScreen::Portals
@@ -989,6 +1117,14 @@ impl eframe::App for CareerOpsApp {
                     self.start_portals_load(false);
                 }
 
+                if self.navigation.current() == MainScreen::Pipeline
+                    && self.pipeline_task.is_none()
+                    && !self.pipeline_loaded
+                    && self.pipeline_error.is_none()
+                {
+                    self.start_pipeline_load();
+                }
+
                 let render_state = PortalsRenderState {
                     loading: matches!(&self.portals_task, Some(PortalsTask::List { .. })),
                     busy: self.portals_task.is_some(),
@@ -997,13 +1133,23 @@ impl eframe::App for CareerOpsApp {
                     error: self.portals_error.as_deref(),
                     message: self.portals_message.as_deref(),
                 };
+                let pipeline_state = PipelineRenderState {
+                    loading: self.pipeline_task.is_some(),
+                    error: self.pipeline_error.as_deref(),
+                };
 
                 let navigation = &mut self.navigation;
                 let portals = &self.portals;
-                let portals_view = &mut self.portals_view;
+                let pipeline = &self.pipeline;
+                let pipeline_view = &mut self.pipeline_view;
+
                 let action = screens::shell::show_with(ui, navigation, |ui, screen| match screen {
                     MainScreen::Portals => {
-                        screens::portals::show(ui, portals, portals_view, render_state)
+                        screens::portals::show(ui, portals, render_state).map(ScreenAction::Portals)
+                    }
+                    MainScreen::Pipeline => {
+                        screens::pipeline::show(ui, pipeline, pipeline_view, pipeline_state)
+                            .map(ScreenAction::Pipeline)
                     }
                     other => {
                         screens::shell::placeholder(ui, other);
@@ -1011,7 +1157,21 @@ impl eframe::App for CareerOpsApp {
                     }
                 });
 
-                if let Some(action) = action {
+                // The modal is app-level chrome: it is reachable from both
+                // Portals and Pipeline, so it renders after the active screen.
+                let modal_action = screens::portals::show_modal(
+                    ui,
+                    &mut self.portals_view,
+                    render_state.modal_state(),
+                );
+
+                match action {
+                    Some(ScreenAction::Portals(action)) => self.handle_portals_action(action),
+                    Some(ScreenAction::Pipeline(action)) => self.handle_pipeline_action(action),
+                    None => {}
+                }
+
+                if let Some(action) = modal_action {
                     self.handle_portals_action(action);
                 }
             }
@@ -1032,6 +1192,7 @@ mod tests {
 
     use super::*;
     use crate::async_bridge::TaskPoll;
+    use crate::view_models::pipeline::{JobFilter, StatusLabel, TierLabel};
     use crate::view_models::portals::{HealthBadge, PortalRow};
 
     /// Serializes the tests that create a vault. The test keychain uses one
@@ -1289,6 +1450,28 @@ mod tests {
         assert!(app.batch_ids.is_empty());
     }
 
+    #[test]
+    fn pipeline_add_job_opens_the_shared_manual_modal() {
+        let (mut app, _dir) = test_app();
+
+        app.handle_pipeline_action(PipelineAction::AddJob);
+
+        assert!(matches!(
+            app.portals_view.modal,
+            Some(PortalModal::Manual(_))
+        ));
+    }
+
+    #[test]
+    fn pipeline_set_filter_only_mutates_the_view_model() {
+        let (mut app, _dir) = test_app();
+
+        app.handle_pipeline_action(PipelineAction::SetFilter(JobFilter::Rejected));
+
+        assert_eq!(app.pipeline.filter, JobFilter::Rejected);
+        assert!(!app.pipeline_loaded, "changing a filter must not load");
+    }
+
     fn wait_until(
         app: &mut CareerOpsApp,
         ctx: &egui::Context,
@@ -1298,6 +1481,7 @@ mod tests {
         while Instant::now() < deadline {
             app.poll_pending(ctx);
             app.poll_portals_task(ctx);
+            app.poll_pipeline_task(ctx);
             app.drain_batch_progress();
             if condition(app) {
                 return;
@@ -1394,6 +1578,103 @@ mod tests {
             app.portals.rows.is_empty() && app.portals_task.is_none()
         });
         assert!(app.portals_view.modal.is_none());
+    }
+
+    /// Exercises the Pipeline task against a real encrypted database: the list
+    /// loads, application statuses are joined in, the filter survives a
+    /// reload, and a manual add invalidates the loaded page.
+    #[test]
+    fn pipeline_joins_statuses_and_manual_add_invalidates_it() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut app = CareerOpsApp::new(state, runtime);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        app.start_pipeline_load();
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+        assert!(app.pipeline.rows.is_empty());
+
+        // The Pipeline's "Add job" opens the same modal Portals uses.
+        app.handle_pipeline_action(PipelineAction::AddJob);
+        app.handle_portals_action(PortalsAction::ManualFromText {
+            title: "Engineer".into(),
+            company: "Acme".into(),
+            body: "Build things.".into(),
+        });
+        wait_until(&mut app, &ctx, |app| {
+            app.portals_view.manual_result().is_some()
+        });
+        assert!(
+            !app.pipeline_loaded,
+            "a manual add must invalidate the loaded page"
+        );
+
+        app.start_pipeline_load();
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+        assert_eq!(app.pipeline.rows.len(), 1);
+        assert_eq!(app.pipeline.rows[0].title, "Engineer");
+        assert_eq!(app.pipeline.rows[0].tier, TierLabel::Manual);
+        assert!(app.pipeline.rows[0].status.is_none());
+
+        let job_id = app.pipeline.rows[0].id;
+        let pool = app.pool().expect("pool");
+        app.runtime()
+            .block_on(application_repo::create(&pool, job_id))
+            .expect("create application");
+
+        app.handle_pipeline_action(PipelineAction::SetFilter(JobFilter::Applied));
+        assert_eq!(app.pipeline.apply_filter().count(), 0);
+
+        app.start_pipeline_load();
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+        assert_eq!(
+            app.pipeline.rows[0].status,
+            Some(StatusLabel::Discovered),
+            "the application status is joined by job id"
+        );
+        assert_eq!(
+            app.pipeline.filter,
+            JobFilter::Applied,
+            "a reload keeps the user's filter"
+        );
+        assert_eq!(
+            app.pipeline.apply_filter().count(),
+            0,
+            "a discovered application is not in the applied filter"
+        );
     }
 
     #[test]

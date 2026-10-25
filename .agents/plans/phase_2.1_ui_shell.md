@@ -1,8 +1,8 @@
 # Phase 2.1: UI Shell — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.5), §12
-**Status:** In progress — Workstreams 1–3 implemented (2026-10-24)
-**Last updated:** 2026-10-24
+**Status:** In progress — Workstreams 1–4 implemented (2026-10-25)
+**Last updated:** 2026-10-25
 **Duration:** 1.5–2 weeks
 **Depends on:** Phase 2 completion (2026-10-23) and Phase 2.01 (2026-10-24)
 
@@ -18,6 +18,7 @@
 | v0.4 | Workstream 1 implemented and the plan corrected against the actual egui/eframe 0.37 API: `eframe::App` exposes `ui(&mut self, &mut egui::Ui, ...)`, not `update`; `SidePanel`/`TopBottomPanel` are replaced by `Panel::left` and friends; `Response::labelled_by(Id)` exists at 0.37, so the accessible-input workaround is a real association rather than a documented limitation. Added `CareerOpsApp::spawn` because `AsyncTask::spawn` calls `tokio::spawn` and panics outside a runtime context. Recorded the WS1 implementation files and tests. |
 | v0.5 | Workstream 2 implemented: unlock, first-launch wizard, and recovery screens; filesystem recovery actions (locate key file, export encrypted bundle, explicit reset); async state hand-off. Recorded that `AppState` is moved into the task rather than borrowed across an await, that secrets are cleared when the task takes ownership, and that a partially completed first launch is re-bootstrapped to surface Recovery. Added `screens/lock.rs`, `recovery.rs`, and `tests/lock_screens.rs`. |
 | v0.6 | Workstream 3 implemented: Portals list with health badges, CRUD forms, delete confirmation, fetch-one, cancellable batch with `mpsc` progress, sidecar indicator, and the manual-entry modal. Added `portals::service::fetch_batch_cancellable` because the callback cannot stop `fetch_batch`'s loop. The Portals view model carries `render_mode` and `scraper_config` so the edit form round-trips them without a second read. Added `view_models/portals.rs`, `screens/portals.rs`, and `tests/portals_screen.rs`; app-level tests cover CRUD and manual paste against a real database. |
+| v0.7 | Workstream 4 implemented: Pipeline list with tier labels and application-status badges, four client-side filters, read-only detail view with disabled Phase 3 placeholders, and a bounded 500-row load. The manual modal is now app-level chrome (`portals::show_modal`), rendered after the active screen so "Add job" works from Pipeline without a second implementation; `show` no longer takes `PortalsView`. `PipelineViewModel::from_jobs` takes the application statuses as a second argument so the join happens in the load task, and `replace_jobs` preserves the user's filter across refreshes. Added `tests/pipeline_screen.rs` and an app-level test that loads a real database, joins a status, and checks that a manual add invalidates the pipeline page. |
 
 ---
 
@@ -407,13 +408,15 @@ These are framework-independent. They compile today. Every function has a unit t
 
 ### Deliverables
 
-1. **Pipeline list.** Renders `job_descriptions::list_recent` via a `PipelineViewModel`. Rows show title, company, tier label, fetched-at timestamp, and application status badge when attached.
+1. **Pipeline list.** Renders `job_descriptions::list_recent` via a `PipelineViewModel`. Rows show title, company, tier label, fetched-at timestamp, and application status badge when attached. The load is bounded to the 500 most recent jobs; the plain `ScrollArea` stays correct at that size, and `TableBuilder` is the swap point if the bound ever moves.
+
+   Application statuses come from `applications::list`, joined by job id inside the load task. A job description has at most one application, so the view model carries `Option<StatusLabel>` rather than a list.
 
 2. **Filter.** A horizontal `SelectableLabel` row for All / Not applied / Applied / Rejected. Filtering is client-side over the loaded list.
 
 3. **Job detail placeholder.** Clicking a row replaces the central panel with a detail view: title, company, tier, timestamps, raw description. Two buttons — "Evaluate" and "Generate cover letter" — are disabled with a tooltip ("Available in a later phase"). This reserves the space Phase 3 fills.
 
-4. **"Add job" button** in the header, opening the manual entry modal from WS3.
+4. **"Add job" button** in the header, opening the manual entry modal from WS3. The modal is rendered by the app after the active screen, so the same dialog serves Portals and Pipeline.
 
 ### View models (survive unchanged)
 
@@ -432,17 +435,24 @@ pub struct JobRow {
     pub tier: TierLabel,
     pub fetched_at: String,
     pub status: Option<StatusLabel>,
+    // Added during implementation: the detail view renders the posting from
+    // the row instead of issuing a second database read.
+    pub source_url: String,
+    pub raw_text: String,
 }
 
-pub enum TierLabel { Ats, Html, Tier2, Manual }
-pub enum StatusLabel { Discovered, Ready, Applied /* ... */ }
+pub enum TierLabel { Ats, Html, Tier2, Manual, Other }
+pub enum StatusLabel { Discovered, Evaluating, Ready, Applied, Interviewing, Rejected, Offer }
 pub enum JobFilter { All, NotApplied, Applied, Rejected }
 
 impl PipelineViewModel {
-    pub fn from_jobs(jobs: Vec<JobDescription>) -> Self;
-    pub fn apply_filter(&self) -> Vec<&JobRow>;
+    pub fn from_jobs(jobs: Vec<JobDescription>, statuses: &HashMap<i64, ApplicationStatus>) -> Self;
+    pub fn replace_jobs(&mut self, jobs: Vec<JobDescription>, statuses: &HashMap<i64, ApplicationStatus>);
+    pub fn apply_filter(&self) -> impl Iterator<Item = &JobRow>;
 }
 ```
+
+`from_jobs` takes the application statuses as a second argument rather than reading them itself, which keeps the view model pure. `replace_jobs` keeps the current filter so a refresh does not reset the user's selection. `TierLabel::Other` exists because the database stores `fetch_tier` as text; an unknown value must still render.
 
 ### Acceptance Criteria
 
@@ -456,6 +466,10 @@ impl PipelineViewModel {
 | Manual entry from Pipeline works | Manual test |
 | `PipelineViewModel::from_jobs` maps tiers correctly | Unit test |
 | `PipelineViewModel::apply_filter` filters correctly | Unit test (4 cases) |
+
+**Implementation note (2026-10-25).** Workstream 4 landed as `crates/app/src/view_models/pipeline.rs`, `crates/app/src/screens/pipeline.rs`, and `crates/app/tests/pipeline_screen.rs`. `CareerOpsApp` owns one `AsyncTask<PipelineLoad>` that reads `job_descriptions::list_recent` and `applications::list` and joins them in memory; the screen never touches the database. The `PipelineAction` set is `AddJob`, `Reload`, and `SetFilter`. `AddJob` opens the shared manual modal, and a successful manual add drops any in-flight pipeline load and marks the page stale so the next visit reloads it. `StatusBadge` gained the seven application-status variants it needs.
+
+Two structural decisions are worth recording. First, the modal is no longer rendered inside `portals::show`: the app renders `portals::show_modal` after the active screen, so the dialog is reachable from Pipeline and `PortalsView` is now modal-only state. Second, the shell's content closure returns a small `ScreenAction` enum (`Portals` | `Pipeline`) so `ui()` routes the result without the shell knowing either screen. `tests/portals_screen.rs` renders `show` and `show_modal` in that order, matching the app.
 
 ---
 

@@ -1,8 +1,12 @@
 //! Portals screen.
 //!
-//! The screen is a pure view: it renders a `PortalsViewModel`, mutates only
-//! its own form state, and returns a `PortalsAction`. `CareerOpsApp` owns the
-//! database, fetch source, browser backend, and async tasks.
+//! The screen is a pure view: it renders a `PortalsViewModel` and returns a
+//! `PortalsAction`. `CareerOpsApp` owns the database, fetch source, browser
+//! backend, and async tasks.
+//!
+//! The add/edit/delete/manual dialogs live in `PortalsView` and render through
+//! `show_modal`, which the app calls after the active screen. That keeps the
+//! manual-entry dialog reachable from Pipeline without a second copy.
 //!
 //! The health badge uses `StatusBadge`; the drill-down text is
 //! `PortalHealth::suggested_action`, rendered directly rather than rephrased in
@@ -25,6 +29,14 @@ pub struct PortalsView {
 }
 
 impl PortalsView {
+    /// Open the manual-entry dialog.
+    ///
+    /// Both Portals and Pipeline expose "Add job", so the dialog lives on the
+    /// shared view state rather than on either screen.
+    pub fn open_manual(&mut self) {
+        self.modal = Some(PortalModal::Manual(ManualEntryView::default()));
+    }
+
     pub fn manual_mut(&mut self) -> Option<&mut ManualEntryView> {
         match &mut self.modal {
             Some(PortalModal::Manual(manual)) => Some(manual),
@@ -211,10 +223,31 @@ pub struct PortalsRenderState<'a> {
     pub message: Option<&'a str>,
 }
 
+impl PortalsRenderState<'_> {
+    /// The subset the shared modal needs.
+    ///
+    /// The modal is app-level chrome: it is reachable from Pipeline as well as
+    /// Portals, so the app renders it after whichever screen is active.
+    pub fn modal_state(self) -> ModalState {
+        ModalState {
+            busy: self.busy,
+            manual_busy: self.manual_busy,
+        }
+    }
+}
+
+/// The render state the add/edit/delete/manual dialogs need.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModalState {
+    /// A portal task is in flight; form and delete actions are disabled.
+    pub busy: bool,
+    /// A manual add is in flight; the manual dialog's submit button is disabled.
+    pub manual_busy: bool,
+}
+
 pub fn show(
     ui: &mut Ui,
     view_model: &PortalsViewModel,
-    view: &mut PortalsView,
     state: PortalsRenderState<'_>,
 ) -> Option<PortalsAction> {
     let mut action = None;
@@ -235,8 +268,20 @@ pub fn show(
 
     ui.separator();
     body(ui, view_model, state, &mut action);
-    modals(ui, view, state, &mut action);
 
+    // Modal rendering is deliberately not part of this screen. See
+    // `show_modal`.
+    action
+}
+
+/// Render the shared modal, if one is open.
+///
+/// `CareerOpsApp` calls this after the active screen so the manual-entry dialog
+/// is available from Portals and Pipeline alike. Rendering it here rather than
+/// inside `show` keeps the dialog reachable while another screen is selected.
+pub fn show_modal(ui: &mut Ui, view: &mut PortalsView, state: ModalState) -> Option<PortalsAction> {
+    let mut action = None;
+    modals(ui, view, state, &mut action);
     action
 }
 
@@ -434,7 +479,7 @@ fn sidecar_badge(status: SidecarStatus) -> StatusBadge {
 fn modals(
     ui: &mut Ui,
     view: &mut PortalsView,
-    state: PortalsRenderState<'_>,
+    state: ModalState,
     action: &mut Option<PortalsAction>,
 ) {
     match &mut view.modal {
@@ -461,7 +506,7 @@ fn portal_form_modal(
     title: &str,
     form: &mut PortalForm,
     id: Option<i64>,
-    state: PortalsRenderState<'_>,
+    state: ModalState,
     action: &mut Option<PortalsAction>,
 ) {
     Window::new(title)
@@ -525,7 +570,7 @@ fn delete_modal(
     ui: &mut Ui,
     id: i64,
     name: &str,
-    state: PortalsRenderState<'_>,
+    state: ModalState,
     action: &mut Option<PortalsAction>,
 ) {
     Window::new("Delete portal?")
@@ -560,7 +605,7 @@ fn delete_modal(
 fn manual_modal(
     ui: &mut Ui,
     manual: &mut ManualEntryView,
-    state: PortalsRenderState<'_>,
+    state: ModalState,
     action: &mut Option<PortalsAction>,
 ) {
     Window::new("Add a job")
