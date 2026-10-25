@@ -20,7 +20,7 @@
 //! untouched and avoids holding a mutex across an await.
 //!
 //! Portals work does not move the state: it clones the `SqlitePool` and shares
-//! the HTTP source and browser backend through `Arc`. The state machine stays
+//! the fetch source and browser backend through `Arc`. The state machine stays
 //! available while a fetch or mutation runs.
 
 use std::collections::HashMap;
@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use career_ops_core::acquisition::http;
 use career_ops_core::acquisition::manual;
-use career_ops_core::acquisition::router::HttpFetchSource;
+use career_ops_core::acquisition::router::{FetchSource, HttpFetchSource};
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
 use career_ops_core::model::{ApplicationStatus, FetchTier, JobDescription};
 use career_ops_core::portals::service::{self, BatchEntry, BatchReport, PortalWithHealth};
@@ -121,7 +121,7 @@ pub struct CareerOpsApp {
     /// reopened. The app then renders a fatal screen instead of a spinner.
     fatal_error: Option<String>,
 
-    http_source: Arc<HttpFetchSource>,
+    fetch_source: Arc<dyn FetchSource>,
     browser: Arc<ObscuraBrowserBackend>,
 
     portals: PortalsViewModel,
@@ -144,8 +144,24 @@ pub struct CareerOpsApp {
 
 impl CareerOpsApp {
     pub fn new(state: AppState, runtime: Runtime) -> Self {
-        let data_dir = state.data_dir().clone();
         let client = http::default_client().expect("build the HTTP client");
+        Self::with_fetch_source(state, runtime, Arc::new(HttpFetchSource::new(client)))
+    }
+
+    /// Construct the app with a specific Tier 1 fetch source.
+    ///
+    /// Production always goes through `new`, which uses `HttpFetchSource`. This
+    /// constructor exists so app-level tests can drive the real orchestration —
+    /// router, storage, portal health, pipeline reload — with a scripted source,
+    /// because the network paths in `docs/manual-test-script.md` cannot run in
+    /// CI. The router already depends on the `FetchSource` trait, so this adds a
+    /// test seam without changing any production behaviour.
+    pub fn with_fetch_source(
+        state: AppState,
+        runtime: Runtime,
+        fetch_source: Arc<dyn FetchSource>,
+    ) -> Self {
+        let data_dir = state.data_dir().clone();
 
         Self {
             state: Some(state),
@@ -155,7 +171,7 @@ impl CareerOpsApp {
             lock_view: LockView::default(),
             pending: None,
             fatal_error: None,
-            http_source: Arc::new(HttpFetchSource::new(client)),
+            fetch_source,
             browser: Arc::new(ObscuraBrowserBackend::with_defaults()),
             portals: PortalsViewModel::default(),
             portals_view: PortalsView::default(),
@@ -612,7 +628,7 @@ impl CareerOpsApp {
             return;
         };
 
-        let source = Arc::clone(&self.http_source);
+        let source = Arc::clone(&self.fetch_source);
         let browser = Arc::clone(&self.browser);
         let task = self.spawn(async move {
             service::fetch_one(&pool, id, source.as_ref(), Some(browser.as_ref())).await
@@ -633,7 +649,7 @@ impl CareerOpsApp {
             return;
         };
 
-        let source = Arc::clone(&self.http_source);
+        let source = Arc::clone(&self.fetch_source);
         let browser = Arc::clone(&self.browser);
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_task = Arc::clone(&cancel);
@@ -682,7 +698,7 @@ impl CareerOpsApp {
             manual.result = None;
         }
 
-        let source = Arc::clone(&self.http_source);
+        let source = Arc::clone(&self.fetch_source);
         let browser = Arc::clone(&self.browser);
         let task = self.spawn(async move {
             manual::add_job_from_url(&pool, &url, source.as_ref(), Some(browser.as_ref()))
@@ -1194,6 +1210,10 @@ mod tests {
     use crate::async_bridge::TaskPoll;
     use crate::view_models::pipeline::{JobFilter, StatusLabel, TierLabel};
     use crate::view_models::portals::{HealthBadge, PortalRow};
+
+    use career_ops_core::acquisition::ats::{AtsAdapter, NormalizedJob};
+    use career_ops_core::acquisition::error::AtsResult;
+    use career_ops_core::acquisition::html::selectors::SelectorConfig;
 
     /// Serializes the tests that create a vault. The test keychain uses one
     /// fixed service/account pair for the whole process, so two first-launch
@@ -1733,6 +1753,126 @@ mod tests {
             0,
             "a discovered application is not in the applied filter"
         );
+    }
+
+    /// A `FetchSource` that returns one scripted HTML job and records the URLs
+    /// it was asked for.
+    ///
+    /// The network half of the manual test script cannot run in CI, so this
+    /// substitutes only the HTTP layer: the router, storage, portal health, and
+    /// the pipeline load are the real ones.
+    #[derive(Default)]
+    struct StubFetchSource {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl StubFetchSource {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FetchSource for StubFetchSource {
+        async fn fetch_ats(
+            &self,
+            _adapter: &dyn AtsAdapter,
+            _slug: &str,
+            _company_name: &str,
+        ) -> AtsResult<Vec<NormalizedJob>> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_html(
+            &self,
+            url: &url::Url,
+            _company_name: &str,
+            _config: Option<&SelectorConfig>,
+        ) -> AtsResult<Vec<NormalizedJob>> {
+            self.calls.lock().unwrap().push(url.to_string());
+            Ok(vec![NormalizedJob {
+                external_id: "job-1".into(),
+                title: "Engineer".into(),
+                company: "Acme".into(),
+                location: Some("Remote".into()),
+                department: Some("Engineering".into()),
+                employment_type: None,
+                workplace_type: None,
+                source_url: url.clone(),
+                raw_text: "Build things.".into(),
+                posted_at: None,
+            }])
+        }
+    }
+
+    /// Drives a portal fetch through the app with a scripted HTTP source, then
+    /// asserts that the stored job reaches the Pipeline. This is the
+    /// orchestration half of manual-test-script §4.4 and §5.2 without a
+    /// network.
+    #[test]
+    fn portal_fetch_stores_a_job_that_the_pipeline_lists() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::default());
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source.clone());
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        // A non-ATS URL in static mode routes to Tier 1b, which is the mock.
+        app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            render_mode: "static".into(),
+            scraper_config: None,
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals.rows.len() == 1 && app.portals_task.is_none()
+        });
+
+        let portal_id = app.portals.rows[0].id;
+        app.handle_portals_action(PortalsAction::FetchOne(portal_id));
+        wait_until(&mut app, &ctx, |app| app.portals_task.is_none());
+
+        assert_eq!(source.calls(), vec!["https://example.com/jobs".to_string()]);
+        assert_eq!(app.portals.rows[0].health, HealthBadge::Healthy);
+        assert!(app.portals.rows[0].last_attempt.is_some());
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+
+        assert_eq!(app.pipeline.rows.len(), 1);
+        assert_eq!(app.pipeline.rows[0].title, "Engineer");
+        assert_eq!(app.pipeline.rows[0].company, "Acme");
+        assert_eq!(app.pipeline.rows[0].tier, TierLabel::Html);
+        assert_eq!(app.pipeline.rows[0].raw_text, "Build things.");
     }
 
     #[test]

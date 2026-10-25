@@ -126,6 +126,12 @@ Writing it exposed two facts worth recording:
 Executing the 🌐 rows needs a human with network access; that is the only
 remaining part of criterion 14.
 
+*Post-pass follow-up:* `CareerOpsApp::with_fetch_source` now injects the Tier 1
+source, so the orchestration half of those rows (router → storage → health →
+Pipeline) runs in CI with a scripted source. The manual rows keep what only a
+real page can prove: JSON-LD extraction against actual markup, Tier 2 through
+the sidecar, and the UI feedback while a fetch is in flight.
+
 ### F4 — Criterion 4 named a screen that does not exist (documentation drift)
 
 The criterion lists "Dashboard (placeholder)" alongside Pipeline, Portals,

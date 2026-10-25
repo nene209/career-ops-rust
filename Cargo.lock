@@ -669,6 +669,7 @@ name = "career-ops-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "career-ops-core",
  "career-ops-test-support",
  "chrono",

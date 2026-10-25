@@ -32,6 +32,7 @@ eframe = "0.37"
 [dev-dependencies]
 career-ops-core = { path = "../core", features = ["keychain"] }
 career-ops-test-support = { workspace = true }
+async-trait = "0.1"
 egui_kittest = { version = "0.37", features = ["snapshot", "wgpu"] }
 keyring = "3"
 sqlx = { workspace = true }

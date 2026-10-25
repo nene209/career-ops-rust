@@ -184,6 +184,18 @@ after the active screen, so the manual-entry dialog is reachable from Pipeline
 through `PortalsView::open_manual()`. `PortalsView` is modal-only state; the
 Portals screen takes just the view model and the render state.
 
+### Testing a fetch path without a network
+
+`CareerOpsApp::new` builds an `HttpFetchSource`. `CareerOpsApp::with_fetch_source`
+takes an `Arc<dyn FetchSource>` instead, so an app-level test can drive the real
+router, storage, portal health update, and Pipeline reload with a scripted
+source (`app::tests::StubFetchSource` is the example). Use it for any new screen
+that fetches: the only thing replaced is the HTTP call.
+
+Tier 2 still needs a `BrowserBackend` and a sidecar process, so those paths stay
+in `docs/manual-test-script.md`. So does the part of Tier 1 that only a real page
+can prove: whether `jsonld` extraction matches the markup a given board emits.
+
 ## Pipeline screen (WS4)
 
 One task (`AsyncTask<PipelineLoad>`) reads `job_descriptions::list_recent(&pool,
