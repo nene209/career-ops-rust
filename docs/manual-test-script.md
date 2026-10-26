@@ -149,7 +149,55 @@ A CPU reading that stays above a few percent while nothing is happening means a
 repaint is being requested in a loop. That is the `P2.1-R6` regression; report
 it with the screen name.
 
-## 8. Sign-off
+## 8. Automated live check (optional)
+
+`crates/app/src/app.rs` contains an ignored test that runs real fetches through
+the app: create portals → `FetchOne` on the first → `FetchAll` (batch, which
+re-fetches the first and therefore also exercises dedup) → storage → Pipeline.
+
+```bash
+cargo test -p career-ops-app --features keychain -- --ignored live_fetch
+```
+
+It creates its own portals in a throwaway vault and never reads or writes your
+data directory. The app does not ship example portals.
+
+Default list, one board per supported ATS (last verified 2026-10-25):
+
+| URL | Adapter | Jobs |
+| :--- | :--- | ---: |
+| `https://jobs.ashbyhq.com/linear` | Ashby | 34 |
+| `https://jobs.lever.co/spotify` | Lever | 90 |
+| `https://boards.greenhouse.io/figma` | Greenhouse | 139 |
+| `https://jobs.smartrecruiters.com/Ubisoft2` | SmartRecruiters | 237 |
+
+Override the list (comma-separated) without editing the file:
+
+```bash
+CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
+  cargo test -p career-ops-app --features keychain -- --ignored live_fetch
+```
+
+That run on 2026-10-25 stored 500 unique jobs across the four portals — exactly
+the Pipeline page size — so the test also asserts the page bound rather than
+assuming every row is visible.
+
+Why Waymo's URL is not in the default list:
+
+- Its search page is rendered by JS controllers and the static HTML carries no
+  `JobPosting` JSON-LD. Tier 1b therefore fails and the fetch escalates to Tier
+  2. On a machine without `vendor/obscura` the test fails with
+  `Broken { cause: "other" }`; that is the expected outcome there, not a
+  regression. With the sidecar present, success depends on the rendered DOM
+  containing JSON-LD.
+- A career page with neither JSON-LD nor a portal `scraper_config` cannot be
+  fetched by either tier. The selector path exists in the core extractor, but
+  the Phase 2.1 portal form does not expose a `scraper_config` field.
+- This checks the fetch, storage, portals health, and Pipeline contents. The UI
+  feedback while a fetch is in flight (spinner, per-portal progress, cancel
+  button) is still section 4's job.
+
+## 9. Sign-off
 
 | Date | Runner | Build (`git rev-parse --short HEAD`) | Sections run | Result | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |

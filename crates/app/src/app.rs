@@ -1553,9 +1553,18 @@ mod tests {
     fn wait_until(
         app: &mut CareerOpsApp,
         ctx: &egui::Context,
+        condition: impl FnMut(&CareerOpsApp) -> bool,
+    ) {
+        wait_until_within(app, ctx, Duration::from_secs(20), condition);
+    }
+
+    fn wait_until_within(
+        app: &mut CareerOpsApp,
+        ctx: &egui::Context,
+        timeout: Duration,
         mut condition: impl FnMut(&CareerOpsApp) -> bool,
     ) {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             app.poll_pending(ctx);
             app.poll_portals_task(ctx);
@@ -1566,7 +1575,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("condition not met within 20s");
+        panic!("condition not met within {timeout:?}");
     }
 
     /// Exercises the Portals task path against a real encrypted database:
@@ -1873,6 +1882,219 @@ mod tests {
         assert_eq!(app.pipeline.rows[0].company, "Acme");
         assert_eq!(app.pipeline.rows[0].tier, TierLabel::Html);
         assert_eq!(app.pipeline.rows[0].raw_text, "Build things.");
+    }
+
+    /// Boards verified against this code on 2026-10-25, one per supported ATS.
+    ///
+    /// Order matters only for reporting: the test fetches the first one
+    /// individually, then all of them as a batch. Override the whole list
+    /// without editing this file:
+    ///
+    /// ```text
+    /// CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
+    ///     cargo test -p career-ops-app --features keychain -- --ignored live_fetch
+    /// ```
+    ///
+    /// A board on a supported ATS exercises Tier 1a. Any other server-rendered
+    /// page exercises Tier 1b, which needs JSON-LD `JobPosting` markup or a
+    /// portal `scraper_config`. Waymo's search page has neither — its job table
+    /// is loaded by JavaScript — so it fails Tier 1b and escalates to Tier 2;
+    /// expect `Broken { cause: "other" }` for it on a machine without the
+    /// sidecar. That is why it is not in the default list.
+    const LIVE_PORTAL_URLS: &[&str] = &[
+        "https://jobs.ashbyhq.com/linear",
+        "https://jobs.lever.co/spotify",
+        "https://boards.greenhouse.io/figma",
+        "https://jobs.smartrecruiters.com/Ubisoft2",
+    ];
+
+    /// The URLs for this run: `CAREER_OPS_LIVE_PORTALS` (comma-separated) or the
+    /// default list.
+    fn live_portal_urls() -> Vec<String> {
+        match std::env::var("CAREER_OPS_LIVE_PORTALS") {
+            Ok(raw) => raw
+                .split(',')
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .map(str::to_string)
+                .collect(),
+            Err(_) => LIVE_PORTAL_URLS.iter().map(|url| url.to_string()).collect(),
+        }
+    }
+
+    /// The portal name for a live URL: host plus first path segment, so the
+    /// per-board assertion output says which board produced which jobs.
+    fn live_portal_name(url: &str) -> String {
+        let parsed = url::Url::parse(url).expect("valid live URL");
+        let host = parsed.host_str().unwrap_or("live");
+        match parsed
+            .path_segments()
+            .and_then(|mut segments| segments.next())
+        {
+            Some(slug) if !slug.is_empty() => format!("{host}/{slug}"),
+            _ => host.to_string(),
+        }
+    }
+
+    /// The network test the manual script cannot automate in CI: real portal
+    /// URLs, the production `HttpFetchSource`, the real router, storage, portal
+    /// health, batch progress, and the real Pipeline.
+    ///
+    /// It creates its own portals in a throwaway vault; nothing is read from or
+    /// written to the user's data directory, and the app never seeds example
+    /// portals into a real database.
+    ///
+    /// Ignored by default. Run it with:
+    ///
+    /// ```text
+    /// cargo test -p career-ops-app --features keychain -- --ignored live_fetch
+    /// ```
+    #[test]
+    #[ignore = "hits the network; run with --ignored"]
+    fn live_fetch_reaches_the_pipeline() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let urls = live_portal_urls();
+        assert!(!urls.is_empty(), "CAREER_OPS_LIVE_PORTALS produced no URLs");
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        // The production HTTP source, deliberately: this test exists to prove
+        // that the real one works, not that the seam does.
+        let mut app = CareerOpsApp::new(state, runtime);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        // One at a time: the app runs a single `PortalsTask`, so a create that
+        // arrives while the reload is in flight is dropped by design.
+        for (index, url) in urls.iter().enumerate() {
+            app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
+                company_name: live_portal_name(url),
+                url: url.clone(),
+                render_mode: "static".into(),
+                scraper_config: None,
+            }));
+            wait_until(&mut app, &ctx, |app| {
+                app.portals.rows.len() == index + 1 && app.portals_task.is_none()
+            });
+        }
+
+        // Single fetch first: the one-portal path, including Tier 2 escalation
+        // when the URL is not a supported ATS. 90s allows a sidecar start.
+        let first = app.portals.rows[0].id;
+        app.handle_portals_action(PortalsAction::FetchOne(first));
+        wait_until_within(&mut app, &ctx, Duration::from_secs(90), |app| {
+            app.portals_task.is_none()
+        });
+
+        let portal = &app.portals.rows[0];
+        assert_eq!(
+            portal.health,
+            HealthBadge::Healthy,
+            "fetching {} did not succeed (health: {:?}, hint: {:?}). \
+             Tier 1b needs JSON-LD markup; a JS-only page escalates to Tier 2, \
+             which needs vendor/obscura.",
+            portal.url,
+            portal.health,
+            portal.suggested_action
+        );
+
+        // Then the batch over every portal. It re-fetches the first one, which
+        // also exercises dedup against rows that already exist.
+        app.handle_portals_action(PortalsAction::FetchAll);
+        wait_until_within(&mut app, &ctx, Duration::from_secs(240), |app| {
+            app.portals_task.is_none()
+        });
+
+        for row in &app.portals.rows {
+            assert_eq!(
+                row.health,
+                HealthBadge::Healthy,
+                "portal {} failed in the batch (hint: {:?})",
+                row.url,
+                row.suggested_action
+            );
+        }
+        assert!(
+            app.portals_error.is_none(),
+            "portals error: {:?}",
+            app.portals_error
+        );
+        assert!(
+            app.portals_message.is_some(),
+            "the batch should report a summary"
+        );
+
+        // Storage truth: every portal must have stored jobs. Read the table
+        // directly so the per-board count is not capped by the Pipeline page.
+        let pool = app.pool().expect("pool");
+        let stored = app
+            .runtime()
+            .block_on(job_repo::list_recent(&pool, 10_000))
+            .expect("list stored jobs");
+
+        for portal in &app.portals.rows {
+            let jobs = stored
+                .iter()
+                .filter(|job| job.company == portal.name)
+                .count();
+            assert!(
+                jobs > 0,
+                "{} fetched successfully but stored no jobs",
+                portal.url
+            );
+            eprintln!("live fetch: {} -> {jobs} jobs", portal.name);
+        }
+
+        // Then the Pipeline page: the most recent `PIPELINE_LIMIT` jobs.
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+
+        assert!(!app.pipeline.rows.is_empty(), "the Pipeline is empty");
+        for row in &app.pipeline.rows {
+            assert!(
+                !row.title.trim().is_empty(),
+                "a stored job from the live run has an empty title"
+            );
+        }
+        assert_eq!(
+            app.pipeline.rows.len(),
+            stored.len().min(PIPELINE_LIMIT as usize),
+            "the Pipeline page should hold min(stored, {PIPELINE_LIMIT}) jobs"
+        );
+
+        eprintln!(
+            "live fetch: {} unique jobs stored across {} portals; Pipeline shows {} (first tier: {})",
+            stored.len(),
+            app.portals.rows.len(),
+            app.pipeline.rows.len(),
+            app.pipeline.rows[0].tier.label()
+        );
     }
 
     #[test]

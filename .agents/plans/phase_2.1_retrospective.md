@@ -132,6 +132,34 @@ Pipeline) runs in CI with a scripted source. The manual rows keep what only a
 real page can prove: JSON-LD extraction against actual markup, Tier 2 through
 the sidecar, and the UI feedback while a fetch is in flight.
 
+A second follow-up closes most of the first of those: an ignored live test
+(`live_fetch_reaches_the_pipeline`, URLs overridable with
+`CAREER_OPS_LIVE_PORTALS`) runs the production `HttpFetchSource` through the
+app. It defaults to one board per supported ATS — Ashby/linear (34 jobs),
+Lever/spotify (90), Greenhouse/figma (139), SmartRecruiters/Ubisoft2 (237) —
+fetches the first individually and the rest as a batch, and asserts portal
+health, stored jobs per company, and the Pipeline page. On 2026-10-25 it stored
+500 unique jobs across the four boards, which covers the Tier 1a half of manual
+script §4.4 and the batch orchestration of §4.6. The Tier 1b and Tier 2 halves
+still need a hand, because they depend on the markup a specific page emits.
+
+The test creates its portals in a throwaway vault. Seeding these four boards
+into the real database was considered and rejected: portals are user data, an
+unannounced migration that inserts companies a user never chose is
+indistinguishable from a bug, and a test that reads its fixtures from the user'
+sdatabase is neither deterministic nor safe. If a starter kit is ever wanted, it
+belongs to onboarding with explicit consent, not to a seed step.
+
+That run also produced a finding worth carrying into Phase 3: Waymo's careers
+search page is a JS-driven search form whose static HTML contains no
+`JobPosting` JSON-LD. Tier 1b fails on it and escalates to Tier 2, which reuses
+the *same* JSON-LD/selector extraction on the rendered DOM. So a general career
+page with neither JSON-LD nor a `scraper_config` cannot be fetched by either
+tier — and the Phase 2.1 portal form does not expose `scraper_config`, so the
+selector path is currently unreachable from the UI. Phase 3 should either
+expose that field or add a real extraction strategy for such pages; the current
+error (`Parse: no jobs found in HTML`) is accurate but not actionable for a user.
+
 ### F4 — Criterion 4 named a screen that does not exist (documentation drift)
 
 The criterion lists "Dashboard (placeholder)" alongside Pipeline, Portals,
