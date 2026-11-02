@@ -176,6 +176,17 @@ The screen uses a plain `ScrollArea` for the list; `TableBuilder` is the swap
 point when the Pipeline list grows. Health mapping lives in the view model; the
 screen only maps `HealthBadge` to `StatusBadge`.
 
+### Selector pagination
+
+A configured portal can follow more than one page. The config is part of
+`scraper_config` (`pagination: { next, url_template, max_pages }`) and the loop
+lives in `core::acquisition::html::fetch_static_jobs`, not in the app: the app
+still makes one call per portal and gets the accumulated jobs back. Page one is
+the portal URL; later pages come from the page's next link or from a URL
+template. Errors after page one stop the loop and keep the earlier pages;
+errors on page one are returned so the router can escalate. `max_pages` defaults
+to 5 and is clamped to 20.
+
 ### Shared modal
 
 The add/edit/delete/manual dialogs are not rendered by `portals::show`. The app

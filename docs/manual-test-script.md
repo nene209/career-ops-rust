@@ -187,8 +187,9 @@ assuming every row is visible.
 
 The page is **server-rendered** (Rails + Stimulus), but it carries no
 `JobPosting` JSON-LD, so the default extraction fails. It does not need
-JavaScript: a selector config extracts the cards as-is. Verified on 2026-10-25 —
-30 jobs, Tier 1b, no sidecar:
+JavaScript: a selector config extracts the cards as-is, and the pagination block
+follows the site's `rel=next` link. Verified on 2026-10-25 — 90 jobs from 3 pages
+of 30, Tier 1b, no sidecar:
 
 ```bash
 CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
@@ -200,10 +201,19 @@ CAREER_OPS_LIVE_SCRAPER_CONFIG='{
     "department": "li.job-component-department span",
     "employment_type": "li.job-component-employment-type span",
     "description": "p.job-search-results-summary"
+  },
+  "pagination": {
+    "next": "a[rel=next]",
+    "url_template": "https://careers.withwaymo.com/jobs/search?page={page}",
+    "max_pages": 3
   }
 }' \
   cargo test -p career-ops-app --features keychain -- --ignored live_fetch
 ```
+
+Either pagination mechanism works; `next` is used when the link exists and
+`url_template` is the fallback. `max_pages` includes the first page (default 5,
+ceiling 20). Omitting the block keeps the single-page behaviour.
 
 `crates/core/tests/ats_adapters.rs::selectors_extract_a_server_rendered_vendor_card`
 pins the same selector shape against a fixture, so a change to the extractor
@@ -211,12 +221,16 @@ fails a test instead of silently fetching zero jobs.
 
 What this config still does not give you:
 
-- **Pagination.** The page holds 30 cards; the site paginates to 13 pages
-  (`?page=2` … `?page=13`), and the extractor follows no links. One fetch yields
-  the first page.
 - **Full descriptions.** `raw_text` becomes the two-sentence card summary, not
-  the job description. Evaluating such a job needs the detail page, which is not
-  fetched yet.
+  the job description. Evaluating such a job needs the detail page, which is
+  Phase 2.2 Workstream 2.
+
+**If the fetch suddenly fails with `Broken { cause: "other" }` after working:**
+Waymo's AWS WAF answers repeated automated fetches with `202` and an empty body.
+Check with
+`curl -sS -o /dev/null -w '%{http_code} %{size_download}\n' https://careers.withwaymo.com/jobs/search`
+— a `202 0` means "challenged", not "pagination broken". Wait a few minutes
+before retrying; do not raise the page limit to get around it.
 
 The config is enterable in the app: **Add portal** / **Edit** → *Scraper config
 (JSON, optional)*. It is stored in `portals.scraper_config` and re-validated on
@@ -224,8 +238,7 @@ save; empty means "no config".
 
 A page with neither JSON-LD nor a selector config still fails on both tiers
 (`Parse: no jobs found in HTML`), because Tier 2 reuses the same extraction on
-the rendered DOM. The site also serves an AWS WAF challenge script, so automated
-fetches may hit a challenge; a real browser (Tier 2) is more likely to pass it.
+the rendered DOM.
 
 This check covers the fetch, storage, portal health, and Pipeline contents. The
 UI feedback while a fetch is in flight (spinner, per-portal progress, cancel

@@ -41,6 +41,54 @@ pub struct SelectorConfig {
     /// Attribute name that holds the job URL. Defaults to `"href"`.
     #[serde(default = "default_url_attribute")]
     pub url_attribute: String,
+
+    /// How to reach the next page of results. Absent means the portal is
+    /// fetched once, which is the Phase 2 behaviour.
+    #[serde(default)]
+    pub pagination: Option<PaginationConfig>,
+}
+
+/// Follow-up pages for a selector-configured portal.
+///
+/// Both mechanisms exist because sites use both. `next` wins when the page
+/// carries a link; `url_template` covers numbered paging where the link is
+/// built from a query parameter.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PaginationConfig {
+    /// Selector for the anchor that points at the next page. Its `href` is
+    /// resolved against the page URL, so relative paths work.
+    #[serde(default)]
+    pub next: Option<String>,
+
+    /// URL with a `{page}` placeholder, used when the site exposes numbered
+    /// links instead of a next link. The first page is the portal URL itself;
+    /// the template is substituted starting at 2.
+    #[serde(default)]
+    pub url_template: Option<String>,
+
+    /// Pages to follow, including the first. Clamped to
+    /// `1..=MAX_PAGES_CEILING`.
+    #[serde(default)]
+    pub max_pages: Option<usize>,
+}
+
+impl PaginationConfig {
+    /// Pages fetched when the config does not say.
+    ///
+    /// Five is a judgement call, not a measurement: a configured portal is one
+    /// user action, and a page is one request, so the default has to be small
+    /// enough that a fetch feels like a fetch.
+    pub const DEFAULT_MAX_PAGES: usize = 5;
+
+    /// Hard ceiling, regardless of configuration.
+    pub const MAX_PAGES_CEILING: usize = 20;
+
+    /// Configured page limit, clamped to `1..=MAX_PAGES_CEILING`.
+    pub fn page_limit(&self) -> usize {
+        self.max_pages
+            .unwrap_or(Self::DEFAULT_MAX_PAGES)
+            .clamp(1, Self::MAX_PAGES_CEILING)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -1973,6 +1973,13 @@ mod tests {
     #[test]
     #[ignore = "hits the network; run with --ignored"]
     fn live_fetch_reaches_the_pipeline() {
+        // Let `RUST_LOG=warn` reach the service layer when a live run fails.
+        // Without this the router's "ignoring an invalid scraper_config"
+        // warning is swallowed and the test only shows the final classification.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+
         let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
         career_ops_test_support::install();
 

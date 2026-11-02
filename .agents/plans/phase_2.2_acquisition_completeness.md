@@ -1,7 +1,7 @@
 # Phase 2.2: Acquisition Completeness — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.7), §12
-**Status:** Draft — not started
+**Status:** In progress — Workstream 1 implemented (2026-10-25)
 **Last updated:** 2026-10-25
 **Duration:** 4–6 days (two workstreams deliver usable scraping; the rest is quality)
 **Depends on:** Phase 2 (acquisition) and Phase 2.1 (UI shell)
@@ -13,6 +13,7 @@
 | Version | Change |
 | :--- | :--- |
 | v0.1 | Initial plan. Written after the Phase 2.1 verification run against `https://careers.withwaymo.com/jobs/search`, which proved that a server-rendered page with a `scraper_config` works on Tier 1b (30 jobs, no sidecar) but exposed three gaps that would starve Phase 3: no pagination, no job descriptions for page-based portals, and no description at all from the SmartRecruiters adapter. |
+| v0.2 | Workstream 1 implemented: `PaginationConfig` on `SelectorConfig` (`next`, `url_template`, `max_pages`), the page loop in `html::fetch_static_jobs`, and thirteen unit tests covering every stop condition. Verified live against Waymo: 90 jobs from 3 pages via `rel=next` (Tier 1b). Also learned that the site's AWS WAF answers sustained fetching with `202`/empty body, which the manual script now documents. |
 
 ---
 
@@ -148,6 +149,26 @@ sites use both; `next` wins when present.
 | A failing middle page returns the earlier pages | Mock `FetchSource`/fixture test |
 | Duplicate cards across pages yield one job | Fixture test + `upsert` count assertion |
 | Waymo fetches more than 30 jobs | Live test (§8 of the manual script) |
+
+**Implementation note (2026-10-25).** Landed as `PaginationConfig` in
+`crates/core/src/acquisition/html/selectors.rs` and a page loop in
+`html::fetch_static_jobs`. The loop sits behind a private `PageSource` trait with
+an HTTP implementation and a scripted one for tests, because every stop
+condition (failure after page one, a repeated page, the cap) needs a server that
+misbehaves on purpose. Thirteen unit tests cover them. Verified live against
+Waymo through the app: 90 jobs from 3 pages via `rel=next` (6.7 s), and 60 jobs
+from 2 pages via `url_template` (4.9 s).
+
+One operational finding: the site's AWS WAF answers sustained automated fetching
+with `202` and an empty body. A run that fails with `Broken { cause: "other" }`
+after a previous run succeeded is a challenge, not a pagination bug; the manual
+script now documents the `curl` check and the wait. This is risk P2.2-R1
+happening in practice.
+
+Two deliberate deviations from the plan text: partial-page outcomes are logged
+with `tracing::warn!` rather than surfaced in the portal message (the message
+belongs with the enrichment counts in WS2/WS5), and `max_pages` is clamped to
+`1..=20` so an accidental `0` cannot mean "fetch nothing".
 
 ---
 
