@@ -32,10 +32,21 @@
 //! or, for a request that needs more than a URL:
 //!
 //! ```text
-//! let resp = http::send_with_retry(|| client.get(&url).header("X", "y")).await?;
+//! let resp = http::send_with_retry(&url, || client.get(&url).header("X", "y")).await?;
 //! ```
 
-use std::time::Duration;
+//! ## Politeness
+//!
+//! Requests to the same host are spaced by a minimum interval plus random
+//! jitter (see `RequestSpacing`). The spacing is per host and process-wide, so
+//! it covers pagination, adapter pagination, manual URL fetches, and batch
+//! runs without any caller having to remember it. It is politeness, not
+//! evasion: a site that challenges or rate-limits the application gets a
+//! classified failure, never a workaround.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use rand::Rng;
 use reqwest::header::RETRY_AFTER;
@@ -43,6 +54,128 @@ use reqwest::{RequestBuilder, Response, StatusCode};
 use tracing::warn;
 
 use crate::error::{CoreError, Result};
+
+/// Minimum spacing between requests to the same host.
+///
+/// The defaults are a judgement call, not a measurement: 400 ms of guaranteed
+/// gap plus up to 400 ms of jitter. That turns a three-page fetch into roughly
+/// one extra second and a forty-detail fetch into roughly half a minute —
+/// slow enough to look like one careful client, fast enough to stay usable.
+/// Phase 2.2's verification pass revisits them with real timings.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestSpacing {
+    /// Guaranteed gap between two requests to the same host.
+    pub min_interval: Duration,
+    /// Upper bound of the random extra delay added to `min_interval`.
+    pub jitter: Duration,
+}
+
+impl Default for RequestSpacing {
+    fn default() -> Self {
+        Self {
+            min_interval: Duration::from_millis(400),
+            jitter: Duration::from_millis(400),
+        }
+    }
+}
+
+impl RequestSpacing {
+    /// Defaults, overridable for development and live tests:
+    ///
+    /// - `CAREER_OPS_HTTP_MIN_INTERVAL_MS`
+    /// - `CAREER_OPS_HTTP_JITTER_MS`
+    ///
+    /// Setting both to `0` disables pacing. A value that does not parse is
+    /// ignored with a warning rather than silently becoming zero.
+    pub fn from_env() -> Self {
+        let default = Self::default();
+        Self {
+            min_interval: millis_from_env("CAREER_OPS_HTTP_MIN_INTERVAL_MS", default.min_interval),
+            jitter: millis_from_env("CAREER_OPS_HTTP_JITTER_MS", default.jitter),
+        }
+    }
+}
+
+fn millis_from_env(name: &str, default: Duration) -> Duration {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(ms) => Duration::from_millis(ms),
+        Err(error) => {
+            warn!(variable = name, %error, "ignoring a non-numeric request-pacing value");
+            default
+        }
+    }
+}
+
+/// Per-host request pacing.
+///
+/// Callers are assumed to be sequential per host, which every fetch path is
+/// today. Concurrent callers still get distinct slots because `reserve` books
+/// the slot under the lock; it never holds the lock across the sleep.
+struct HostSpacer {
+    spacing: RequestSpacing,
+    next_slot: Mutex<HashMap<String, Instant>>,
+}
+
+impl HostSpacer {
+    fn new(spacing: RequestSpacing) -> Self {
+        Self {
+            spacing,
+            next_slot: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Book the next slot for `host` and return how long the caller must wait.
+    fn reserve(&self, host: &str) -> Duration {
+        let required = self.spacing.min_interval + self.jitter();
+        let now = Instant::now();
+
+        let mut slots = self
+            .next_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let earliest = slots.get(host).map(|last| *last + required).unwrap_or(now);
+        let slot = earliest.max(now);
+        slots.insert(host.to_string(), slot);
+
+        slot.saturating_duration_since(now)
+    }
+
+    async fn wait_for(&self, host: &str) {
+        let wait = self.reserve(host);
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    fn jitter(&self) -> Duration {
+        let max_ms = self.spacing.jitter.as_millis() as u64;
+        if max_ms == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(rand::thread_rng().gen_range(0..=max_ms))
+        }
+    }
+}
+
+/// The host whose pacing budget a request consumes.
+///
+/// `None` when the URL cannot be parsed; that request fails anyway, so delaying
+/// it would only delay the error.
+fn request_host(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+}
+
+/// The process-wide spacer. One instance so that pagination, adapters, and
+/// batch runs share what they have already learned about a host.
+fn global_spacer() -> &'static HostSpacer {
+    static SPACER: OnceLock<HostSpacer> = OnceLock::new();
+    SPACER.get_or_init(|| HostSpacer::new(RequestSpacing::from_env()))
+}
 
 /// Retry policy for a single request.
 #[derive(Debug, Clone)]
@@ -81,34 +214,46 @@ pub fn default_client() -> Result<reqwest::Client> {
 }
 
 /// GET `url`, retrying on transient failure with the default policy.
+///
+/// Requests to the same host are spaced by `RequestSpacing`.
 pub async fn get_with_retry(client: &reqwest::Client, url: &str) -> Result<Response> {
-    send_with_retry(|| client.get(url)).await
+    send_with_retry(url, || client.get(url)).await
 }
 
 /// Send a request built by `build`, retrying on transient failure with
 /// the default policy.
 ///
+/// `url` determines which host's pacing budget the attempt consumes; the
+/// request itself is built by `build`, so headers and methods are free.
 /// `build` is called once per attempt. That is why it is a closure
 /// rather than a `RequestBuilder`: `RequestBuilder` is consumed by
 /// `send()`, so retrying requires rebuilding it.
-pub async fn send_with_retry<F>(build: F) -> Result<Response>
+pub async fn send_with_retry<F>(url: &str, build: F) -> Result<Response>
 where
     F: Fn() -> RequestBuilder,
 {
-    send_with_retry_policy(build, RetryPolicy::default()).await
+    send_with_retry_policy(url, build, RetryPolicy::default()).await
 }
 
 /// As `send_with_retry`, with an explicit policy.
-pub async fn send_with_retry_policy<F>(build: F, policy: RetryPolicy) -> Result<Response>
+pub async fn send_with_retry_policy<F>(url: &str, build: F, policy: RetryPolicy) -> Result<Response>
 where
     F: Fn() -> RequestBuilder,
 {
     debug_assert!(policy.max_attempts >= 1, "max_attempts must be at least 1");
 
+    let host = request_host(url);
     let mut attempt: u32 = 0;
 
     loop {
         attempt += 1;
+
+        // Pace every attempt, including retries: a retry is still a request to
+        // the same host, and the retry backoff is measured from the previous
+        // failure, not from the last request that actually left the machine.
+        if let Some(host) = host.as_deref() {
+            global_spacer().wait_for(host).await;
+        }
 
         match build().send().await {
             Ok(resp) if is_retryable_status(resp.status()) && attempt < policy.max_attempts => {
@@ -247,5 +392,91 @@ mod tests {
     #[test]
     fn default_client_builds() {
         default_client().expect("client builds");
+    }
+
+    fn spacer(min_ms: u64, jitter_ms: u64) -> HostSpacer {
+        HostSpacer::new(RequestSpacing {
+            min_interval: Duration::from_millis(min_ms),
+            jitter: Duration::from_millis(jitter_ms),
+        })
+    }
+
+    #[test]
+    fn a_host_is_taken_from_the_url() {
+        assert_eq!(
+            request_host("https://careers.example.com/jobs?page=2").as_deref(),
+            Some("careers.example.com")
+        );
+        assert!(request_host("not a url").is_none());
+    }
+
+    #[test]
+    fn the_first_request_to_a_host_is_not_delayed() {
+        let spacer = spacer(500, 0);
+        assert_eq!(spacer.reserve("a.example"), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_second_request_to_the_same_host_waits_the_interval() {
+        let spacer = spacer(500, 0);
+        spacer.reserve("a.example");
+
+        let wait = spacer.reserve("a.example");
+
+        assert!(
+            wait > Duration::ZERO && wait <= Duration::from_millis(500),
+            "expected roughly 500ms, got {wait:?}"
+        );
+    }
+
+    #[test]
+    fn different_hosts_are_paced_independently() {
+        let spacer = spacer(500, 0);
+        spacer.reserve("a.example");
+
+        assert_eq!(spacer.reserve("b.example"), Duration::ZERO);
+        assert!(spacer.reserve("a.example") > Duration::ZERO);
+    }
+
+    #[test]
+    fn queued_requests_get_distinct_slots() {
+        // Reserve without sleeping, the way a caller that never awaits would.
+        // Each reservation must push the next one further out rather than
+        // handing out the same instant.
+        let spacer = spacer(100, 0);
+        let first = spacer.reserve("a.example");
+        let second = spacer.reserve("a.example");
+        let third = spacer.reserve("a.example");
+
+        assert_eq!(first, Duration::ZERO);
+        assert!(second > Duration::from_millis(80));
+        assert!(
+            third > second + Duration::from_millis(80),
+            "third slot {third:?} should be a full interval past the second {second:?}"
+        );
+    }
+
+    #[test]
+    fn jitter_stays_within_its_bound() {
+        // A fresh spacer per iteration: reservations without sleeping stack up
+        // (each one books a later slot), so reuse would measure the queue.
+        for _ in 0..20 {
+            let spacer = spacer(100, 50);
+            spacer.reserve("a.example");
+
+            let wait = spacer.reserve("a.example");
+            assert!(
+                wait >= Duration::from_millis(90) && wait <= Duration::from_millis(151),
+                "expected 100..=150ms (minus scheduling noise), got {wait:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_spacing_never_waits() {
+        let spacer = spacer(0, 0);
+        for _ in 0..5 {
+            assert_eq!(spacer.reserve("a.example"), Duration::ZERO);
+        }
     }
 }

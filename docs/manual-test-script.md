@@ -227,10 +227,12 @@ What this config still does not give you:
 
 **If the fetch suddenly fails with `Broken { cause: "other" }` after working:**
 Waymo's AWS WAF answers repeated automated fetches with `202` and an empty body.
-Check with
+The app already spaces requests to the same host (400 ms minimum plus up to
+400 ms of jitter, see README "Request pacing"), which helps but does not make a
+quota disappear. Check with
 `curl -sS -o /dev/null -w '%{http_code} %{size_download}\n' https://careers.withwaymo.com/jobs/search`
 — a `202 0` means "challenged", not "pagination broken". Wait a few minutes
-before retrying; do not raise the page limit to get around it.
+before retrying; do not raise `max_pages` to get around it.
 
 The config is enterable in the app: **Add portal** / **Edit** → *Scraper config
 (JSON, optional)*. It is stored in `portals.scraper_config` and re-validated on

@@ -322,6 +322,23 @@ Two files live there:
   alongside the database.** Losing it means losing access to the
   database.
 
+### Request pacing
+
+Fetches to the same host are spaced by a minimum interval plus random jitter, so
+pagination, batch runs, and (from Phase 2.2) detail fetches look like one
+careful client rather than a burst. The default is **400 ms minimum plus up to
+400 ms of jitter per host**, applied inside `core::acquisition::http` so no
+caller can forget it. Different hosts are not delayed against each other.
+
+Override for development or a faster live test:
+
+```bash
+CAREER_OPS_HTTP_MIN_INTERVAL_MS=200 CAREER_OPS_HTTP_JITTER_MS=100 cargo test ...
+```
+
+`0` disables the wait. This is politeness, not evasion: a site that challenges or
+rate-limits the application produces a classified failure, never a workaround.
+
 ### API keys
 
 API keys for LLM providers are stored in the OS keychain, not in the

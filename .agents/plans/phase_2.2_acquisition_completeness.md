@@ -1,7 +1,7 @@
 # Phase 2.2: Acquisition Completeness — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.7), §12
-**Status:** In progress — Workstream 1 implemented (2026-10-25)
+**Status:** In progress — Workstreams 1 and 1b implemented (2026-10-25)
 **Last updated:** 2026-10-25
 **Duration:** 4–6 days (two workstreams deliver usable scraping; the rest is quality)
 **Depends on:** Phase 2 (acquisition) and Phase 2.1 (UI shell)
@@ -14,6 +14,7 @@
 | :--- | :--- |
 | v0.1 | Initial plan. Written after the Phase 2.1 verification run against `https://careers.withwaymo.com/jobs/search`, which proved that a server-rendered page with a `scraper_config` works on Tier 1b (30 jobs, no sidecar) but exposed three gaps that would starve Phase 3: no pagination, no job descriptions for page-based portals, and no description at all from the SmartRecruiters adapter. |
 | v0.2 | Workstream 1 implemented: `PaginationConfig` on `SelectorConfig` (`next`, `url_template`, `max_pages`), the page loop in `html::fetch_static_jobs`, and thirteen unit tests covering every stop condition. Verified live against Waymo: 90 jobs from 3 pages via `rel=next` (Tier 1b). Also learned that the site's AWS WAF answers sustained fetching with `202`/empty body, which the manual script now documents. |
+| v0.3 | Workstream 1b implemented before WS2: per-host request pacing (400 ms minimum + up to 400 ms jitter) inside `core::acquisition::http`, so pagination, adapter paging, batch runs, and the detail fetches WS2 adds are all spaced without per-caller code. Env overrides and README documentation added. |
 
 ---
 
@@ -172,6 +173,63 @@ belongs with the enrichment counts in WS2/WS5), and `max_pages` is clamped to
 
 ---
 
+## Workstream 1b — Request pacing
+
+**Priority:** Immediately after WS1, before detail enrichment.
+**Estimated duration:** 0.5 day.
+
+Pagination made the cost of repeated requests visible, and the live verification
+hit Waymo's AWS WAF (`202`, empty body) after a handful of runs. Workstream 2
+multiplies requests per host by the number of postings, so the pacing has to
+exist before it lands, not after.
+
+### Behaviour
+
+Every request to the same host is spaced by a minimum interval plus random
+jitter. The spacing lives inside `core::acquisition::http`, so it covers
+pagination, adapter pagination (SmartRecruiters), manual URL fetches, batch
+runs, and the detail fetches WS2 adds — no caller has to remember it.
+
+- Default: **400 ms minimum + up to 400 ms of jitter**, per host.
+- `CAREER_OPS_HTTP_MIN_INTERVAL_MS` / `CAREER_OPS_HTTP_JITTER_MS` override them;
+  `0` disables pacing. A non-numeric value is ignored with a warning rather than
+  silently becoming zero.
+- Slots are booked under a lock and slept outside it, so queued callers get
+  distinct times instead of firing together.
+- The first request to a host in a process is never delayed; different hosts are
+  paced independently, so a batch over distinct boards pays nothing.
+
+### What it deliberately is not
+
+- Not a retry-backoff change: failed attempts still back off as before, and the
+  pacing applies to the retry as well because a retry is still a request.
+- Not applied to the browser backend (Tier 2): one navigation per fetch, not a
+  request stream.
+- Not a rate-limit solver. A site with a per-minute quota can still refuse the
+  application; pacing prevents bursts, it does not negotiate with a WAF.
+
+### Acceptance criteria
+
+| Criterion | Verification |
+| :--- | :--- |
+| The first request to a host is not delayed | Unit test |
+| A second request to the same host waits the interval | Unit test |
+| Different hosts are paced independently | Unit test |
+| Queued reservations get distinct, increasing slots | Unit test |
+| Jitter stays within its bound | Unit test |
+| Zero spacing disables the wait | Unit test |
+| A paginated live fetch still succeeds, with the expected extra time | Live run |
+
+**Implementation note (2026-10-25).** Landed as `RequestSpacing` + `HostSpacer`
+in `crates/core/src/acquisition/http.rs`, applied in `send_with_retry_policy`.
+`send_with_retry`/`send_with_retry_policy` gained a `url` argument so the host is
+explicit rather than guessed from the request builder; the only caller was
+`get_with_retry`. Seven unit tests cover the scheduling. Live check: the Waymo
+3-page fetch still returns 90 jobs and took 8.36 s instead of 6.67 s, which is
+the two ~600 ms gaps plus jitter. README documents the env overrides.
+
+---
+
 ## Workstream 2 — Detail-page enrichment
 
 **Priority:** Second. This is what makes a fetched job evaluable.
@@ -217,10 +275,11 @@ hard ceiling 200. The cap exists because each job is one HTTP request: 390 jobs
 1. `detail: Option<DetailConfig>` on `SelectorConfig`.
 2. `html::fetch_detail(client, job, config)` returning
    `Option<String>` (the description) — tries JSON-LD, then selectors.
-3. Sequential enrichment with a small inter-request delay (start at 150 ms,
-   configurable in code, not per portal). Sequential is deliberate: a desktop
-   app fetching a user's chosen board should look like one careful client, not
-   a burst. Revisit only if a real board makes it too slow.
+3. Sequential enrichment. Raw spacing is already applied by
+   `http::get_with_retry` (Workstream 1b: 400 ms + jitter per host), so this
+   workstream adds no second delay. Sequential is deliberate: a desktop app
+   fetching a user's chosen board should look like one careful client, not a
+   burst. Revisit only if a real board makes it too slow.
 4. **Cancellation.** Enrichment must stop between jobs when the user cancels, or
    a 40-job pass becomes uninterruptible. This needs a cancellation token in the
    router/service path — the same `AtomicBool` pattern the batch fetch uses,
