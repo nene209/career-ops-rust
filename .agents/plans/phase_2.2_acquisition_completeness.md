@@ -331,8 +331,13 @@ Seven router tests and nine detail-extraction tests cover the acceptance table.
 Live verification on the Waymo detail route was blocked by the site's WAF
 (`202`, empty body) after a handful of requests, which is the P2.2-R1 risk in
 practice: the list route still returns 200 while detail routes are challenged.
-The path is proven against scripted pages and will be re-verified live after a
-cooldown; the manual script records the symptom and the wait.
+A browser-saved copy of the real posting page (2026-10-25) was trimmed to its
+JSON-LD block and committed as
+`crates/core/tests/fixtures/waymo_job_posting.html`;
+`the_real_waymo_detail_page_yields_its_description` asserts that the extractor
+turns it into the full ~4 KB description, so the markup is verified even while
+the live route is challenged. The manual script records the symptom and the
+wait.
 
 The first live attempt also found a shape bug, now fixed: `SelectorConfig`
 required `list` and `fields`, so a detail-only config (`{"detail": {...}}`) was

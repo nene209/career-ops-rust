@@ -10,6 +10,7 @@
 //! `acquisition-fixtures` CI job; they are not part of this file.
 
 use career_ops_core::acquisition::ats::{self, ashby, greenhouse, lever, smartrecruiters};
+use career_ops_core::acquisition::html::detail::{extract_detail, DetailConfig};
 use career_ops_core::acquisition::html::{
     self, jsonld,
     selectors::{self, SelectorConfig},
@@ -650,4 +651,45 @@ fn malformed_html_does_not_panic() {
         let _ = jsonld::extract(case, &url, "Acme");
         let _ = selectors::extract(case, &url, "Acme", &selector_config());
     }
+}
+
+// -----------------------------------------------------------------
+// Detail extraction against a real posting page
+// -----------------------------------------------------------------
+
+/// A real Waymo posting page, saved from a browser session on 2026-10-25 and
+/// trimmed to its `JobPosting` JSON-LD block.
+///
+/// The site's WAF challenges scripted detail fetches, so this fixture is how the
+/// detail path is verified against the markup the site actually serves. A change
+/// in the extraction that stops matching this shape fails a test instead of
+/// silently leaving every job with its card teaser.
+const WAYMO_DETAIL_FIXTURE: &str = include_str!("fixtures/waymo_job_posting.html");
+
+#[test]
+fn the_real_waymo_detail_page_yields_its_description() {
+    let url =
+        Url::parse("https://careers.withwaymo.com/jobs/2027-summer-intern-bs-depot-automation")
+            .unwrap();
+    let config = DetailConfig {
+        fields: None,
+        max_jobs: None,
+    };
+    let title = "2027 Summer Intern, BS, Depot Automation";
+
+    let text = extract_detail(WAYMO_DETAIL_FIXTURE, &url, title, &config)
+        .expect("the JobPosting must yield a description");
+
+    assert!(
+        text.len() > 3_000,
+        "expected a full posting description, got {} chars",
+        text.len()
+    );
+    assert!(text.contains("Waymo Driver"));
+    assert!(text.starts_with("<div class=\"content-intro\">"));
+
+    // One posting on the page: a title mismatch still yields its text.
+    let fallback = extract_detail(WAYMO_DETAIL_FIXTURE, &url, "Some Other Role", &config)
+        .expect("the only posting is used when the title does not match");
+    assert_eq!(fallback, text);
 }
