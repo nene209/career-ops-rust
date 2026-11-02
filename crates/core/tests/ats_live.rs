@@ -174,3 +174,49 @@ async fn smartrecruiters_live() {
     let slug = slug_or("LIVE_SMARTRECRUITERS_SLUG", "Ubisoft2");
     assert_well_formed(&SmartRecruitersAdapter, &slug, "Ubisoft").await;
 }
+
+/// The list endpoint omits descriptions, so the adapter's value depends on the
+/// detail endpoint still returning `jobAd.sections`. Assert that one real
+/// posting yields text: a shape change there would leave every row empty while
+/// the list test above stayed green.
+#[tokio::test]
+async fn smartrecruiters_detail_live() {
+    if !live_enabled() {
+        eprintln!("skipping smartrecruiters_detail_live: RUN_LIVE_ATS_TESTS not set");
+        return;
+    }
+
+    let slug = slug_or("LIVE_SMARTRECRUITERS_SLUG", "Ubisoft2");
+    let adapter = SmartRecruitersAdapter;
+    let client = http::default_client().expect("http client");
+    let jobs = adapter
+        .fetch_jobs(&client, &slug, "Ubisoft")
+        .await
+        .expect("live fetch");
+    let job = jobs.first().expect("a non-empty board");
+
+    let url = adapter.detail_url(&slug, job).expect("detail url");
+    let resp = http::get_with_retry(&client, url.as_str())
+        .await
+        .expect("detail request");
+    assert!(
+        resp.status().is_success(),
+        "detail returned {}",
+        resp.status()
+    );
+    let body = resp.text().await.expect("detail body");
+
+    let detail = adapter
+        .detail_from_body(&body)
+        .unwrap_or_else(|| panic!("detail for `{}` did not parse", job.title));
+    assert!(
+        !detail.text.trim().is_empty(),
+        "detail for `{}` produced no description text; jobAd.sections may have changed",
+        job.title
+    );
+    eprintln!(
+        "smartrecruiters detail: {} bytes for `{}`",
+        detail.text.len(),
+        job.title
+    );
+}

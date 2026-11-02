@@ -1,8 +1,8 @@
 # Phase 2.2: Acquisition Completeness — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.7), §12
-**Status:** In progress — Workstreams 1, 1b, and 2 implemented (2026-10-25)
-**Last updated:** 2026-10-25
+**Status:** In progress — Workstreams 1, 1b, 2, and 3 implemented (2026-11-02)
+**Last updated:** 2026-11-02
 **Duration:** 4–6 days (two workstreams deliver usable scraping; the rest is quality)
 **Depends on:** Phase 2 (acquisition) and Phase 2.1 (UI shell)
 
@@ -16,6 +16,7 @@
 | v0.2 | Workstream 1 implemented: `PaginationConfig` on `SelectorConfig` (`next`, `url_template`, `max_pages`), the page loop in `html::fetch_static_jobs`, and thirteen unit tests covering every stop condition. Verified live against Waymo: 90 jobs from 3 pages via `rel=next` (Tier 1b). Also learned that the site's AWS WAF answers sustained fetching with `202`/empty body, which the manual script now documents. |
 | v0.3 | Workstream 1b implemented before WS2: per-host request pacing (400 ms minimum + up to 400 ms jitter) inside `core::acquisition::http`, so pagination, adapter paging, batch runs, and the detail fetches WS2 adds are all spaced without per-caller code. Env overrides and README documentation added. |
 | v0.4 | Workstream 2 implemented: `detail` config on `SelectorConfig`, JSON-LD-then-selector extraction, bounded and cancellable enrichment between list extraction and storage, 200 KB truncation, and `details_attempted`/`details_enriched` on `FetchOutcome` plus a one-line result message in the app. Live verification hit Waymo's WAF on the detail route (`202`/empty body), recorded as an operational limit rather than a code failure. |
+| v0.5 | Workstream 3 implemented: `smartrecruiters::normalize` emits a stable per-posting URL (`https://jobs.smartrecruiters.com/{slug}/{id}`) and department/employment type from the list item; the adapter exposes `detail_url`/`detail_from_body` so the router's existing bounded enrichment pass reads `jobAd.sections` from the posting API and `compose_description` skips empty sections. Live against Ubisoft2: 206 unique postings, 2 of 2 descriptions, longest 6,031 bytes. |
 
 ---
 
@@ -375,6 +376,23 @@ Lever: `Fetched 85 jobs; 1 of 1 description.`, longest description 4,888 bytes
 | `raw_text` composes the four sections | Fixture test with all four, and with a missing section |
 | Detail failures do not fail the fetch | Mock test: 404 on one posting |
 | The live SmartRecruiters board stores non-empty text | Live test assertion |
+
+**Implementation note (2026-11-02).** The detail pass lives in the router, not in
+`fetch_jobs`. The adapter answers two questions — where the detail lives
+(`detail_url`) and how to read it (`detail_from_body`) — and the router keeps the
+`detail.max_jobs` bound, the per-host pacing, and the cancellation check it
+already applies to every other portal. Without a `detail` block a SmartRecruiters
+portal stores titles and URLs but no text, exactly like every other ATS board.
+
+Two consequences worth remembering. The URL is built from the API `id`, not from
+the API's own `postingUrl`: the latter appends a slugified title, so it changes
+when a posting is retitled and differs between language copies. And
+`additionalInformation` is routinely empty on Ubisoft's board, so
+`compose_description` skips empty sections instead of emitting a bare heading.
+
+Department and employment type are now populated on `NormalizedJob` (list first,
+detail as the fallback), but `job_descriptions` has no columns for them yet, so
+they are not persisted — a storage concern for a later phase, not a parsing one.
 
 ---
 

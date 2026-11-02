@@ -228,6 +228,26 @@ A **detail-only** config (`{"detail": {"max_jobs": 1}}`) is valid and is how an
 ATS board — which already has full list data — opts into refreshing descriptions.
 Verified on Lever: `Fetched 85 jobs; 1 of 1 description.`
 
+### SmartRecruiters descriptions
+
+SmartRecruiters' list endpoint carries no body. The adapter reads
+`GET https://api.smartrecruiters.com/v1/companies/{slug}/postings/{id}` and
+composes `jobAd.sections` (company description, job description,
+qualifications, additional information, in that order). No selectors are
+involved, and the same `detail.max_jobs` bound applies:
+
+```bash
+CAREER_OPS_LIVE_PORTALS=https://jobs.smartrecruiters.com/Ubisoft2 \
+CAREER_OPS_LIVE_SCRAPER_CONFIG='{"detail":{"max_jobs":2}}' \
+  cargo test -p career-ops-app --features keychain -- --ignored live_fetch
+```
+
+Verified on 2026-11-02: 206 unique postings (294 raw, deduplicated across
+languages), `Fetched 206 jobs; 2 of 2 descriptions.`, longest description 6,031
+bytes. Keep the JSON in **single quotes**: unquoted, the shell strips the double
+quotes, the config fails to parse, and the fetch proceeds silently without
+descriptions.
+
 `crates/core/tests/ats_adapters.rs::selectors_extract_a_server_rendered_vendor_card`
 pins the same selector shape against a fixture, so a change to the extractor
 fails a test instead of silently fetching zero jobs.

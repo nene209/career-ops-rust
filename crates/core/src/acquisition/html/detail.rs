@@ -108,7 +108,7 @@ fn from_jsonld(html: &str, base_url: &Url, expected_title: &str) -> Option<Strin
 }
 
 /// Clamp to `MAX_DESCRIPTION_BYTES`, cutting on a character boundary.
-fn truncate(text: String) -> String {
+pub(crate) fn truncate(text: String) -> String {
     if text.len() <= MAX_DESCRIPTION_BYTES {
         return text;
     }

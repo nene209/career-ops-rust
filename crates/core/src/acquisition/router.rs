@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use sqlx::SqlitePool;
 use url::Url;
 
-use super::ats::{self, AtsAdapter, NormalizedJob};
+use super::ats::{self, AtsAdapter, JobDetail, NormalizedJob};
 use super::error::{AtsError, AtsResult, FailureCause};
 use super::html;
 use super::html::detail::DetailConfig;
@@ -279,21 +279,26 @@ pub async fn fetch_portal_inner(
     // config, and a triplicate parse would let them disagree.
     let config = parse_scraper_config(portal.scraper_config.as_deref());
 
+    // The adapter that produced the list, when the route was 1a. Enrichment
+    // asks it where descriptions live; Tier 1b and Tier 2 have no adapter.
+    let mut ats_source: Option<(&dyn AtsAdapter, String)> = None;
+
     let (jobs, tier, tier1_failure) = match route {
         InitialRoute::Tier2 => {
             let jobs = fetch_tier2(&portal, &url, browser, config.as_ref()).await?;
             (jobs, FetchTier::Tier2Obscura, None)
         }
         InitialRoute::Tier1a { adapter_name, slug } => {
-            let adapter = adapters
+            let adapter: &dyn AtsAdapter = adapters
                 .iter()
                 .find(|a| a.name() == adapter_name)
+                .map(|a| a.as_ref())
                 .expect("adapter registry is stable");
-            match source
-                .fetch_ats(adapter.as_ref(), &slug, &portal.company_name)
-                .await
-            {
-                Ok(jobs) => (jobs, FetchTier::Tier1aAts, None),
+            match source.fetch_ats(adapter, &slug, &portal.company_name).await {
+                Ok(jobs) => {
+                    ats_source = Some((adapter, slug));
+                    (jobs, FetchTier::Tier1aAts, None)
+                }
                 Err(e) if e.escalatable() && browser.is_some() => {
                     let failure = e.cause();
                     let jobs = fetch_tier2(&portal, &url, browser, config.as_ref()).await?;
@@ -330,6 +335,9 @@ pub async fn fetch_portal_inner(
     let (details_attempted, details_enriched) = enrich_details(
         &mut jobs,
         source,
+        ats_source
+            .as_ref()
+            .map(|(adapter, slug)| (*adapter, slug.as_str())),
         config.as_ref().and_then(|config| config.detail.as_ref()),
         cancel,
     )
@@ -357,14 +365,17 @@ pub async fn fetch_portal_inner(
     })
 }
 
-/// Replace card-level text with the posting description, best effort.
+/// Fill in descriptions, best effort.
 ///
 /// Bounded by `detail.max_jobs`, sequential, and checked for cancellation
-/// between jobs. A failed detail fetch leaves that job's list-level text in
-/// place: enrichment never fails the portal fetch.
+/// between jobs. Boards with a detail endpoint use it (one request per
+/// posting); every other portal fetches the posting page and extracts
+/// JSON-LD or a selector. A failed detail request leaves the list-level text
+/// in place: enrichment never fails the portal fetch.
 async fn enrich_details(
     jobs: &mut [NormalizedJob],
     source: &dyn FetchSource,
+    ats: Option<(&dyn AtsAdapter, &str)>,
     detail: Option<&DetailConfig>,
     cancel: Option<&AtomicBool>,
 ) -> (usize, usize) {
@@ -382,16 +393,55 @@ async fn enrich_details(
         }
 
         attempted += 1;
-        if let Some(text) = detail_text(source, job, detail).await {
-            job.raw_text = text;
+        let Some(found) = job_detail(source, ats, job, detail).await else {
+            continue;
+        };
+
+        if !found.text.trim().is_empty() {
+            job.raw_text = found.text;
             enriched += 1;
+        }
+        // List metadata wins when present; the detail fills the gaps.
+        if job.department.is_none() {
+            job.department = found.department;
+        }
+        if job.employment_type.is_none() {
+            job.employment_type = found.employment_type;
         }
     }
 
     (attempted, enriched)
 }
 
-async fn detail_text(
+/// One posting's description: the board's detail endpoint when it has one,
+/// otherwise the job page itself.
+async fn job_detail(
+    source: &dyn FetchSource,
+    ats: Option<(&dyn AtsAdapter, &str)>,
+    job: &NormalizedJob,
+    detail: &DetailConfig,
+) -> Option<JobDetail> {
+    if let Some((adapter, slug)) = ats {
+        if let Some(url) = adapter.detail_url(slug, job) {
+            let body = match source.fetch_page(&url).await {
+                Ok(body) => body,
+                Err(error) => {
+                    tracing::warn!(%url, %error, "board detail request failed");
+                    return None;
+                }
+            };
+            return adapter.detail_from_body(&body);
+        }
+    }
+
+    let text = html_detail_text(source, job, detail).await?;
+    Some(JobDetail {
+        text,
+        ..JobDetail::default()
+    })
+}
+
+async fn html_detail_text(
     source: &dyn FetchSource,
     job: &NormalizedJob,
     detail: &DetailConfig,

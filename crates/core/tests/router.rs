@@ -585,3 +585,138 @@ async fn no_detail_config_means_no_detail_requests() {
 
     db.close().await;
 }
+
+// -----------------------------------------------------------------
+// SmartRecruiters detail endpoint
+// -----------------------------------------------------------------
+
+/// A list-level row in the shape `smartrecruiters::normalize` produces: the
+/// posting id in the URL and no description.
+fn smartrecruiters_job(title: &str, id: &str) -> career_ops_core::acquisition::ats::NormalizedJob {
+    let mut job = sample_job(title);
+    job.source_url =
+        Url::parse(&format!("https://jobs.smartrecruiters.com/Ubisoft2/{id}")).expect("job url");
+    job.raw_text = String::new();
+    job.department = None;
+    job.employment_type = None;
+    job
+}
+
+const SMART_DETAIL: &str = r#"{
+  "id": "744000159231819",
+  "department": { "id": 42, "label": "Art/Creative" },
+  "typeOfEmployment": { "id": "permanent", "label": "Full-time" },
+  "jobAd": {
+    "sections": {
+      "companyDescription": { "title": "Company Description", "text": "<p>We make games.</p>" },
+      "jobDescription": { "title": "Job Description", "text": "<p>Build them.</p>" },
+      "qualifications": { "title": "Qualifications", "text": "<p>Ten years.</p>" },
+      "additionalInformation": { "title": "Additional Information", "text": "" }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn a_smartrecruiters_board_enriches_from_the_posting_api() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://jobs.smartrecruiters.com/Ubisoft2",
+            serde_json::json!({ "detail": { "max_jobs": 2 } }),
+        ),
+    )
+    .await
+    .expect("create portal");
+
+    let job = smartrecruiters_job("Technical Art Director", "744000159231819");
+    let source =
+        Arc::new(MockFetchSource::with_ats(Ok(vec![job])).pages([Ok(SMART_DETAIL.to_string())]));
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.tier, FetchTier::Tier1aAts);
+    assert_eq!(outcome.details_attempted, 1);
+    assert_eq!(outcome.details_enriched, 1);
+    assert_eq!(
+        source.page_calls(),
+        vec![
+            "https://api.smartrecruiters.com/v1/companies/Ubisoft2/postings/744000159231819"
+                .to_string()
+        ],
+        "SmartRecruiters reads its own detail endpoint, not the posting page"
+    );
+
+    let texts = stored_texts(&db.pool).await;
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].starts_with("Company Description"), "{}", texts[0]);
+    assert!(texts[0].contains("<p>Build them.</p>"));
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_failed_smartrecruiters_detail_keeps_the_list_row() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://jobs.smartrecruiters.com/Ubisoft2",
+            serde_json::json!({ "detail": { "max_jobs": 2 } }),
+        ),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(
+        MockFetchSource::with_ats(Ok(vec![smartrecruiters_job("Engineer", "1")]))
+            .pages([Err(AtsError::NotFound("gone".into()))]),
+    );
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("a failed detail must not fail the fetch");
+
+    assert_eq!(outcome.jobs_fetched, 1);
+    assert_eq!(outcome.details_attempted, 1);
+    assert_eq!(outcome.details_enriched, 0);
+    assert_eq!(stored_texts(&db.pool).await, vec![String::new()]);
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn the_detail_cap_bounds_smartrecruiters_requests() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://jobs.smartrecruiters.com/Ubisoft2",
+            serde_json::json!({ "detail": { "max_jobs": 2 } }),
+        ),
+    )
+    .await
+    .expect("create portal");
+
+    let jobs = vec![
+        smartrecruiters_job("a", "1"),
+        smartrecruiters_job("b", "2"),
+        smartrecruiters_job("c", "3"),
+    ];
+    let source = Arc::new(
+        MockFetchSource::with_ats(Ok(jobs))
+            .pages([Ok(SMART_DETAIL.to_string()), Ok(SMART_DETAIL.to_string())]),
+    );
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.jobs_fetched, 3, "every list row is still stored");
+    assert_eq!(outcome.details_attempted, 2);
+    assert_eq!(source.page_calls().len(), 2, "the cap bounds requests");
+
+    db.close().await;
+}

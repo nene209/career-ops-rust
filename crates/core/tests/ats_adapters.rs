@@ -9,7 +9,9 @@
 //! Live HTTP tests are environment-gated and run in the
 //! `acquisition-fixtures` CI job; they are not part of this file.
 
-use career_ops_core::acquisition::ats::{self, ashby, greenhouse, lever, smartrecruiters};
+use career_ops_core::acquisition::ats::{
+    self, ashby, greenhouse, lever, smartrecruiters, AtsAdapter,
+};
 use career_ops_core::acquisition::html::detail::{extract_detail, DetailConfig};
 use career_ops_core::acquisition::html::{
     self, jsonld,
@@ -222,6 +224,8 @@ const SMART_PAGE_ENGLISH: &str = r#"{
       "refNumber": "REF-001",
       "language": { "code": "en" },
       "location": { "city": "Berlin", "country": "de" },
+      "department": { "id": "eng", "label": "Engineering" },
+      "typeOfEmployment": { "id": "permanent", "label": "Full-time" },
       "releasedDate": "2026-10-01T00:00:00Z"
     }
   ]
@@ -280,6 +284,40 @@ fn smartrecruiters_combines_city_and_country_into_location() {
 
     assert_eq!(normalized.location.as_deref(), Some("Berlin, de"));
     assert_eq!(normalized.external_id, "REF-001");
+    assert_eq!(normalized.department.as_deref(), Some("Engineering"));
+    assert_eq!(normalized.employment_type.as_deref(), Some("Full-time"));
+}
+
+#[test]
+fn smartrecruiters_source_url_is_the_posting_page() {
+    // Every row used to share the board root, which made dedup collapse a
+    // whole board into one URL and gave Phase 3 nothing to open.
+    let page = smartrecruiters::parse_page(SMART_PAGE_ENGLISH).expect("parse");
+    let normalized =
+        smartrecruiters::normalize(page.content.into_iter().next().unwrap(), "Acme", "acme")
+            .expect("normalize");
+
+    assert_eq!(
+        normalized.source_url.as_str(),
+        "https://jobs.smartrecruiters.com/acme/sr-001",
+        "the URL uses the API id, not the refNumber"
+    );
+}
+
+#[test]
+fn smartrecruiters_detail_url_targets_the_posting_api() {
+    let page = smartrecruiters::parse_page(SMART_PAGE_ENGLISH).expect("parse");
+    let job = smartrecruiters::normalize(page.content.into_iter().next().unwrap(), "Acme", "acme")
+        .expect("normalize");
+
+    let url = smartrecruiters::SmartRecruitersAdapter
+        .detail_url("acme", &job)
+        .expect("detail url");
+
+    assert_eq!(
+        url.as_str(),
+        "https://api.smartrecruiters.com/v1/companies/acme/postings/sr-001"
+    );
 }
 
 #[test]
@@ -288,6 +326,91 @@ fn smartrecruiters_empty_page_is_not_an_error() {
         smartrecruiters::parse_page(r#"{"offset":0,"limit":100,"totalFound":0,"content":[]}"#)
             .expect("parse");
     assert!(page.content.is_empty());
+}
+
+/// A real-shaped detail response: all four sections, with the empty
+/// `additionalInformation` Ubisoft sends.
+const SMART_DETAIL: &str = r#"{
+  "id": "sr-001",
+  "name": "Principal Engineer",
+  "refNumber": "REF-001",
+  "postingUrl": "https://jobs.smartrecruiters.com/acme/sr-001-principal-engineer",
+  "department": { "id": 42, "label": "Engineering" },
+  "typeOfEmployment": { "id": "permanent", "label": "Full-time" },
+  "jobAd": {
+    "sections": {
+      "companyDescription": { "title": "Company Description", "text": "<p>We make games.</p>" },
+      "jobDescription": { "title": "Job Description", "text": "<p>Build them.</p>" },
+      "qualifications": { "title": "Qualifications", "text": "<p>Ten years.</p>" },
+      "additionalInformation": { "title": "Additional Information", "text": "" }
+    }
+  }
+}"#;
+
+#[test]
+fn smartrecruiters_composes_the_four_sections_in_order() {
+    let detail = smartrecruiters::parse_detail(SMART_DETAIL).expect("parse");
+    let text = smartrecruiters::compose_description(&detail.job_ad.unwrap().sections);
+
+    assert_eq!(
+        text,
+        "Company Description\n\n<p>We make games.</p>\n\n\
+         Job Description\n\n<p>Build them.</p>\n\n\
+         Qualifications\n\n<p>Ten years.</p>"
+    );
+    assert!(
+        !text.contains("Additional Information"),
+        "an empty section must not leave a dangling heading"
+    );
+}
+
+#[test]
+fn smartrecruiters_compose_tolerates_missing_sections() {
+    let sections: smartrecruiters::Sections = serde_json::from_value(serde_json::json!({
+        "jobDescription": { "title": "Job Description", "text": "<p>Only this.</p>" }
+    }))
+    .expect("sections");
+
+    assert_eq!(
+        smartrecruiters::compose_description(&sections),
+        "Job Description\n\n<p>Only this.</p>"
+    );
+
+    let empty = smartrecruiters::Sections::default();
+    assert_eq!(smartrecruiters::compose_description(&empty), "");
+}
+
+#[test]
+fn smartrecruiters_detail_yields_text_and_metadata() {
+    let detail = smartrecruiters::SmartRecruitersAdapter
+        .detail_from_body(SMART_DETAIL)
+        .expect("detail");
+
+    assert!(
+        detail.text.starts_with("Company Description"),
+        "{}",
+        detail.text
+    );
+    assert!(detail.text.contains("<p>Build them.</p>"));
+    assert_eq!(detail.department.as_deref(), Some("Engineering"));
+    assert_eq!(detail.employment_type.as_deref(), Some("Full-time"));
+}
+
+#[test]
+fn smartrecruiters_detail_without_sections_has_empty_text() {
+    let detail = smartrecruiters::SmartRecruitersAdapter
+        .detail_from_body(r#"{"id":"sr-001","name":"x"}"#)
+        .expect("detail");
+
+    assert!(detail.text.is_empty());
+    assert!(detail.department.is_none());
+}
+
+#[test]
+fn smartrecruiters_detail_with_broken_json_is_none() {
+    assert!(smartrecruiters::SmartRecruitersAdapter
+        .detail_from_body("not json")
+        .is_none());
 }
 
 // -----------------------------------------------------------------

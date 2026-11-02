@@ -10,6 +10,16 @@
 //! dedup, a 210-posting board published in two languages lands as 420
 //! rows, all duplicating the same job.
 //!
+//! ## Descriptions come from a second request
+//!
+//! The list item has no body. `GET .../postings/{id}` carries
+//! `jobAd.sections` (company description, job description, qualifications,
+//! additional information); `compose_description` concatenates the
+//! non-empty ones in that order. The router drives this pass through the
+//! same `detail.max_jobs` bound as every other portal, so the adapter
+//! exposes *where* the detail lives (`detail_url`) and *how* to read it
+//! (`detail_from_body`) rather than fetching by itself.
+//!
 //! ## Empty boards vs. wrong slugs
 //!
 //! An unrecognised company slug returns **200 with an empty `content`
@@ -19,12 +29,13 @@
 //! "0 jobs — check the slug" rather than "fetch succeeded" when a
 //! SmartRecruiters board returns empty.
 //!
-//! The parsing logic is split into three pure functions so each piece
-//! can be tested in isolation:
+//! The parsing logic is split into pure functions so each piece can be
+//! tested in isolation:
 //!
 //! - `parse_page` — one JSON page → `Page` struct
 //! - `dedupe_by_ref` — group by `refNumber`, prefer the English copy
 //! - `normalize` — one `Posting` → `NormalizedJob`
+//! - `parse_detail` / `compose_description` — one detail response → text
 
 use std::collections::HashMap;
 
@@ -32,8 +43,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use url::Url;
 
-use super::{parse_iso8601, AtsAdapter, NormalizedJob};
+use super::{parse_iso8601, AtsAdapter, JobDetail, NormalizedJob};
 use crate::acquisition::error::{AtsError, AtsResult};
+use crate::acquisition::html::detail;
 use crate::acquisition::http;
 
 pub struct SmartRecruitersAdapter;
@@ -57,6 +69,8 @@ pub struct Posting {
     pub ref_number: Option<String>,
     pub language: Option<Language>,
     pub location: Option<Location>,
+    pub department: Option<Label>,
+    pub type_of_employment: Option<Label>,
     pub released_date: Option<String>,
 }
 
@@ -71,8 +85,55 @@ pub struct Location {
     pub country: Option<String>,
 }
 
+/// A `{id, label}` object. The `id` is a number on the detail endpoint and a
+/// string on some list responses, so only the label is read.
+#[derive(Debug, Deserialize)]
+pub struct Label {
+    pub label: Option<String>,
+}
+
+/// One posting-detail response.
+///
+/// Only the fields that change the stored row are modelled. `postingUrl` is
+/// deliberately ignored: it appends a slugified title, so it changes when a
+/// posting is retitled, while `{slug}/{id}` does not.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostingDetail {
+    pub department: Option<Label>,
+    pub type_of_employment: Option<Label>,
+    pub job_ad: Option<JobAd>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobAd {
+    #[serde(default)]
+    pub sections: Sections,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Sections {
+    pub company_description: Option<Section>,
+    pub job_description: Option<Section>,
+    pub qualifications: Option<Section>,
+    pub additional_information: Option<Section>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Section {
+    pub title: Option<String>,
+    pub text: Option<String>,
+}
+
 /// Parse one page of SmartRecruiters JSON.
 pub fn parse_page(body: &str) -> AtsResult<Page> {
+    serde_json::from_str(body).map_err(|e| AtsError::Parse(format!("smartrecruiters json: {e}")))
+}
+
+/// Parse one posting-detail response.
+pub fn parse_detail(body: &str) -> AtsResult<PostingDetail> {
     serde_json::from_str(body).map_err(|e| AtsError::Parse(format!("smartrecruiters json: {e}")))
 }
 
@@ -114,12 +175,52 @@ pub fn dedupe_by_ref(postings: Vec<Posting>) -> Vec<Posting> {
     result
 }
 
+/// Concatenate the non-empty description sections in reading order.
+///
+/// Each section is prefixed with its own title when the response supplies
+/// one, separated by a blank line. Empty sections are skipped rather than
+/// producing a dangling heading — Ubisoft's `additionalInformation` is
+/// routinely empty. An all-empty response yields an empty string, which the
+/// router treats as "nothing enriched".
+pub fn compose_description(sections: &Sections) -> String {
+    let ordered = [
+        sections.company_description.as_ref(),
+        sections.job_description.as_ref(),
+        sections.qualifications.as_ref(),
+        sections.additional_information.as_ref(),
+    ];
+
+    let mut parts: Vec<String> = Vec::new();
+    for section in ordered.into_iter().flatten() {
+        let text = section.text.as_deref().unwrap_or("").trim();
+        if text.is_empty() {
+            continue;
+        }
+        match section.title.as_deref().map(str::trim) {
+            Some(title) if !title.is_empty() => parts.push(format!("{title}\n\n{text}")),
+            _ => parts.push(text.to_string()),
+        }
+    }
+    parts.join("\n\n")
+}
+
+/// The stable page for one posting.
+///
+/// Built from the API `id`, not the API's own `postingUrl`: the latter
+/// appends a slugified title and differs per language, so it changes when a
+/// posting is retitled and would defeat deduplication.
+pub fn posting_url(slug: &str, id: &str) -> AtsResult<Url> {
+    Url::parse(&format!("https://jobs.smartrecruiters.com/{slug}/{id}"))
+        .map_err(|e| AtsError::Parse(format!("smartrecruiters url: {e}")))
+}
+
 /// Normalize one `Posting` into the common shape.
 ///
 /// Location is joined as `"{city}, {country}"`, matching the other
-/// adapters. `raw_text` is left empty: SmartRecruiters list responses
-/// omit descriptions, and fetching them would require one request per
-/// job. The router decides whether to fetch descriptions lazily.
+/// adapters. `raw_text` is left empty: the list response omits descriptions
+/// and the router enriches them through `detail_url`. Department and
+/// employment type are available on the list item, so every row carries them
+/// even when only the first `max_jobs` postings get a detail request.
 pub fn normalize(p: Posting, company_name: &str, slug: &str) -> AtsResult<NormalizedJob> {
     let location = p.location.and_then(|l| match (l.city, l.country) {
         (Some(c), Some(k)) => Some(format!("{c}, {k}")),
@@ -130,16 +231,15 @@ pub fn normalize(p: Posting, company_name: &str, slug: &str) -> AtsResult<Normal
 
     Ok(NormalizedJob {
         // Prefer refNumber over id: it is the stable identifier across
-        // language variants.
-        external_id: p.ref_number.unwrap_or(p.id),
+        // language variants. The id is what the per-posting URL needs.
+        external_id: p.ref_number.clone().unwrap_or_else(|| p.id.clone()),
         title: p.name,
         company: company_name.to_string(),
         location,
-        department: None,
-        employment_type: None,
+        department: p.department.and_then(|d| d.label),
+        employment_type: p.type_of_employment.and_then(|t| t.label),
         workplace_type: None,
-        source_url: Url::parse(&format!("https://jobs.smartrecruiters.com/{slug}"))
-            .map_err(|e| AtsError::Parse(format!("smartrecruiters url: {e}")))?,
+        source_url: posting_url(slug, &p.id)?,
         raw_text: String::new(),
         posted_at: p.released_date.as_deref().and_then(parse_iso8601),
     })
@@ -202,5 +302,29 @@ impl AtsAdapter for SmartRecruitersAdapter {
             .into_iter()
             .map(|p| normalize(p, company_name, slug))
             .collect()
+    }
+
+    /// The detail endpoint for a posting. The API id is the last segment of
+    /// the per-posting URL that `normalize` builds.
+    fn detail_url(&self, slug: &str, job: &NormalizedJob) -> Option<Url> {
+        let id = job.source_url.path_segments()?.next_back()?;
+        if id.is_empty() {
+            return None;
+        }
+        Url::parse(&format!(
+            "https://api.smartrecruiters.com/v1/companies/{slug}/postings/{id}"
+        ))
+        .ok()
+    }
+
+    fn detail_from_body(&self, body: &str) -> Option<JobDetail> {
+        let detail = parse_detail(body).ok()?;
+        let sections = detail.job_ad.map(|ad| ad.sections).unwrap_or_default();
+
+        Some(JobDetail {
+            text: detail::truncate(compose_description(&sections)),
+            department: detail.department.and_then(|d| d.label),
+            employment_type: detail.type_of_employment.and_then(|t| t.label),
+        })
     }
 }
