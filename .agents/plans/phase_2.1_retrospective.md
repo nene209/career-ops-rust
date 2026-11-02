@@ -159,13 +159,14 @@ with no sidecar at all (verified 2026-10-25: 30 jobs).
 
 So the real gap is not extraction capability but **configuration surface**.
 `portals.scraper_config` exists, the router parses it, and the selector engine is
-tested; the Phase 2.1 portal form does not expose a field for it, so the only
-way to configure a non-JSON-LD page is the live test or direct database access.
-Two further limits apply even with a config: the extractor follows no pagination
-(Waymo paginates 13 pages of 30), and `raw_text` becomes the card summary rather
-than the job description, which is thin input for Phase 3's evaluation. Exposing
-the field is a small UI change; detail-page fetching and pagination are a
-separate, consciously scheduled item.
+tested; the Phase 2.1 portal form did not expose a field for it, so the only way
+to configure a non-JSON-LD page was the live test or direct database access.
+*(Fixed in the follow-up commit: the add/edit form now has a
+"Scraper config (JSON, optional)" field that is validated inline and stored in
+`portals.scraper_config`.)* Two limits still apply even with a config: the
+extractor follows no pagination (Waymo paginates 13 pages of 30), and `raw_text`
+becomes the card summary rather than the job description, which is thin input
+for Phase 3's evaluation. Both are scheduled in the Phase 2.2 plan.
 
 ### F4 — Criterion 4 named a screen that does not exist (documentation drift)
 

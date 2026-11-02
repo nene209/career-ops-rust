@@ -144,7 +144,7 @@ fn add_form_requires_a_valid_http_url() {
             company_name: "Acme".into(),
             url: "not a url".into(),
             render_mode: RenderModeChoice::Static,
-            scraper_config: None,
+            scraper_config: String::new(),
             error: None,
         })),
     };
@@ -160,13 +160,53 @@ fn add_form_requires_a_valid_http_url() {
         company_name: "Acme".into(),
         url: "https://example.com/jobs".into(),
         render_mode: RenderModeChoice::Static,
-        scraper_config: None,
+        scraper_config: String::new(),
         error: None,
     }));
     harness.run();
 
     let save = harness.get_by_role_and_label(Role::Button, "Save portal");
     assert!(!save.accesskit_node().is_disabled());
+}
+
+#[test]
+fn scraper_config_is_optional_and_validated_as_json() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            render_mode: RenderModeChoice::Static,
+            scraper_config: "not json".into(),
+            error: None,
+        })),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let _field = harness.get_by_label("Scraper config (JSON, optional)");
+    let _hint = harness.get_by_label("Scraper config is not valid JSON.");
+    // Invalid JSON is reported inline; it does not silently disable saving,
+    // because the field is optional and the app re-validates on submit.
+    let save = harness.get_by_role_and_label(Role::Button, "Save portal");
+    assert!(!save.accesskit_node().is_disabled());
+
+    harness.state_mut().view.modal = Some(PortalModal::Add(PortalForm {
+        company_name: "Acme".into(),
+        url: "https://example.com/jobs".into(),
+        render_mode: RenderModeChoice::Static,
+        scraper_config: r#"{"list":"article.job"}"#.into(),
+        error: None,
+    }));
+    harness.run();
+
+    assert!(
+        harness
+            .query_by_label("Scraper config is not valid JSON.")
+            .is_none(),
+        "valid JSON must clear the hint"
+    );
 }
 
 #[test]

@@ -104,7 +104,9 @@ pub struct PortalForm {
     pub company_name: String,
     pub url: String,
     pub render_mode: RenderModeChoice,
-    pub scraper_config: Option<String>,
+    /// Raw JSON selector config. Empty means "none", which is correct for ATS
+    /// boards and for pages that expose JSON-LD `JobPosting`.
+    pub scraper_config: String,
     pub error: Option<String>,
 }
 
@@ -114,7 +116,7 @@ impl Default for PortalForm {
             company_name: String::new(),
             url: String::new(),
             render_mode: RenderModeChoice::Static,
-            scraper_config: None,
+            scraper_config: String::new(),
             error: None,
         }
     }
@@ -126,7 +128,7 @@ impl PortalForm {
             company_name: row.name.clone(),
             url: row.url.clone(),
             render_mode: RenderModeChoice::from_str(&row.render_mode),
-            scraper_config: row.scraper_config.clone(),
+            scraper_config: row.scraper_config.clone().unwrap_or_default(),
             error: None,
         }
     }
@@ -135,12 +137,24 @@ impl PortalForm {
         !self.company_name.trim().is_empty() && valid_http_url(&self.url)
     }
 
+    /// Empty is valid (no config). A non-empty config must parse as JSON; the
+    /// app parses it again on submit and returns a detailed error if it fails.
+    pub fn valid_scraper_config(&self) -> bool {
+        let raw = self.scraper_config.trim();
+        raw.is_empty() || serde_json::from_str::<serde_json::Value>(raw).is_ok()
+    }
+
     pub fn data(&self) -> PortalFormData {
+        let scraper_config = self.scraper_config.trim();
         PortalFormData {
             company_name: self.company_name.trim().to_string(),
             url: self.url.trim().to_string(),
             render_mode: self.render_mode.as_str().to_string(),
-            scraper_config: self.scraper_config.clone(),
+            scraper_config: if scraper_config.is_empty() {
+                None
+            } else {
+                Some(scraper_config.to_string())
+            },
         }
     }
 }
@@ -539,6 +553,30 @@ fn portal_form_modal(
                     "Enter a valid http(s) URL.",
                 );
             }
+
+            ui.add_space(4.0);
+            labelled_multiline(
+                ui,
+                "Scraper config (JSON, optional)",
+                &mut form.scraper_config,
+                5,
+            );
+            ui.label(
+                RichText::new(
+                    "CSS selectors for a career page that has no JSON-LD JobPosting. \
+                     Leave empty for ATS boards. Shape: {\"list\": \"…\", \"fields\": \
+                     {\"title\": \"…\"}}.",
+                )
+                .weak()
+                .small(),
+            );
+            if !form.valid_scraper_config() {
+                ui.colored_label(
+                    Color32::from_rgb(0xc0, 0x39, 0x2b),
+                    "Scraper config is not valid JSON.",
+                );
+            }
+
             if let Some(error) = &form.error {
                 ui.colored_label(Color32::from_rgb(0xc0, 0x39, 0x2b), error.as_str());
             }
@@ -697,4 +735,52 @@ fn manual_modal(
                 }
             });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scraper_config_is_optional_and_trimmed() {
+        let mut form = PortalForm {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(form.data().scraper_config, None);
+        assert!(form.valid_scraper_config());
+
+        form.scraper_config = "  \n  ".into();
+        assert_eq!(
+            form.data().scraper_config,
+            None,
+            "a whitespace-only config means none"
+        );
+        assert!(form.valid_scraper_config());
+
+        form.scraper_config = "  {\"list\":\"article.job\"}  ".into();
+        assert_eq!(
+            form.data().scraper_config.as_deref(),
+            Some("{\"list\":\"article.job\"}"),
+            "the stored config is trimmed"
+        );
+        assert!(form.valid_scraper_config());
+    }
+
+    #[test]
+    fn an_invalid_scraper_config_does_not_block_the_url_gate() {
+        let form = PortalForm {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            scraper_config: "not json".into(),
+            ..Default::default()
+        };
+
+        assert!(!form.valid_scraper_config());
+        // Invalid JSON is reported inline and re-validated on submit; it does
+        // not disable saving, because the user may still be editing it.
+        assert!(form.valid());
+    }
 }

@@ -107,6 +107,7 @@ otherwise.
 | 4.1 | Select **Portals** in the sidebar. | Empty state "No portals configured yet" with **Add your first portal**; header shows "Sidecar: Not started". |
 | 4.2 | Click **Add portal** and enter `not a url` in the URL field. | "Enter a valid http(s) URL." appears under the field and **Save portal** is disabled. |
 | 4.3 | Enter a company name and a real job-board URL, keep **Static (Tier 1)**, save. | The modal closes and the row appears with "Never fetched". |
+| 4.3b | For a career page with no JSON-LD (e.g. Waymo, §8), paste its selector config into **Scraper config (JSON, optional)** before saving. | Invalid JSON shows "Scraper config is not valid JSON." under the field. With valid JSON the portal saves, `Fetch` returns jobs, and the row becomes Healthy with tier HTML. |
 | 4.4 | Click **Fetch** on the row. 🌐 | The health badge is replaced by a spinner. Afterwards: "Healthy" and "just now", or "Broken" with a cause and a suggested action line. |
 | 4.5 | Click **Edit**, change the company name, save. | The row shows the new name; health is unchanged. |
 | 4.6 | Add a second portal configured for **Browser (Tier 2)**, then **Fetch all**. 🌐 | A progress bar counts `n / N`; each row resolves to Healthy or Broken; the sidecar badge ends as "Running" or "Stopped". |
@@ -216,9 +217,10 @@ What this config still does not give you:
 - **Full descriptions.** `raw_text` becomes the two-sentence card summary, not
   the job description. Evaluating such a job needs the detail page, which is not
   fetched yet.
-- **A UI for the config.** The portal form exposes company, URL, and render mode
-  only. Until it gains a `scraper_config` field, this config can only be set
-  through the live test or directly in the database.
+
+The config is enterable in the app: **Add portal** / **Edit** → *Scraper config
+(JSON, optional)*. It is stored in `portals.scraper_config` and re-validated on
+save; empty means "no config".
 
 A page with neither JSON-LD nor a selector config still fails on both tiers
 (`Parse: no jobs found in HTML`), because Tier 2 reuses the same extraction on

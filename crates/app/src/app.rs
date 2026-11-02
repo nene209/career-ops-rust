@@ -1433,7 +1433,7 @@ mod tests {
                 assert_eq!(form.company_name, "Acme");
                 assert_eq!(form.url, "https://example.com/jobs");
                 assert_eq!(form.render_mode.as_str(), "browser");
-                assert_eq!(form.scraper_config.as_deref(), Some("{\"title\":\"h1\"}"));
+                assert_eq!(form.scraper_config, "{\"title\":\"h1\"}");
             }
             _ => panic!("expected the edit modal"),
         }
@@ -1634,7 +1634,9 @@ mod tests {
                 company_name: "Acme Updated".into(),
                 url: "https://example.com/jobs".into(),
                 render_mode: "browser".into(),
-                scraper_config: None,
+                // The selector config must survive the write path and come back
+                // through the view model, not just through the modal.
+                scraper_config: Some(r#"{"list":"article.job"}"#.to_string()),
             },
         });
         wait_until(&mut app, &ctx, |app| {
@@ -1643,6 +1645,14 @@ mod tests {
                 && app.portals_task.is_none()
         });
         assert_eq!(app.portals.rows[0].render_mode, "browser");
+
+        let stored_config = app.portals.rows[0]
+            .scraper_config
+            .as_deref()
+            .expect("the scraper config must be stored");
+        let parsed: serde_json::Value =
+            serde_json::from_str(stored_config).expect("stored config is JSON");
+        assert_eq!(parsed["list"], "article.job");
 
         app.handle_portals_action(PortalsAction::OpenManual);
         app.handle_portals_action(PortalsAction::ManualFromText {
