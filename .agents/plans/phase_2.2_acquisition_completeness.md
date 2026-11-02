@@ -1,7 +1,7 @@
 # Phase 2.2: Acquisition Completeness — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.7), §12
-**Status:** In progress — Workstreams 1 and 1b implemented (2026-10-25)
+**Status:** In progress — Workstreams 1, 1b, and 2 implemented (2026-10-25)
 **Last updated:** 2026-10-25
 **Duration:** 4–6 days (two workstreams deliver usable scraping; the rest is quality)
 **Depends on:** Phase 2 (acquisition) and Phase 2.1 (UI shell)
@@ -15,6 +15,7 @@
 | v0.1 | Initial plan. Written after the Phase 2.1 verification run against `https://careers.withwaymo.com/jobs/search`, which proved that a server-rendered page with a `scraper_config` works on Tier 1b (30 jobs, no sidecar) but exposed three gaps that would starve Phase 3: no pagination, no job descriptions for page-based portals, and no description at all from the SmartRecruiters adapter. |
 | v0.2 | Workstream 1 implemented: `PaginationConfig` on `SelectorConfig` (`next`, `url_template`, `max_pages`), the page loop in `html::fetch_static_jobs`, and thirteen unit tests covering every stop condition. Verified live against Waymo: 90 jobs from 3 pages via `rel=next` (Tier 1b). Also learned that the site's AWS WAF answers sustained fetching with `202`/empty body, which the manual script now documents. |
 | v0.3 | Workstream 1b implemented before WS2: per-host request pacing (400 ms minimum + up to 400 ms jitter) inside `core::acquisition::http`, so pagination, adapter paging, batch runs, and the detail fetches WS2 adds are all spaced without per-caller code. Env overrides and README documentation added. |
+| v0.4 | Workstream 2 implemented: `detail` config on `SelectorConfig`, JSON-LD-then-selector extraction, bounded and cancellable enrichment between list extraction and storage, 200 KB truncation, and `details_attempted`/`details_enriched` on `FetchOutcome` plus a one-line result message in the app. Live verification hit Waymo's WAF on the detail route (`202`/empty body), recorded as an operational limit rather than a code failure. |
 
 ---
 
@@ -306,6 +307,40 @@ hard ceiling 200. The cap exists because each job is one HTTP request: 390 jobs
 | Enrichment is idempotent | Fetch twice, assert one row and updated text |
 | Oversize descriptions are truncated | Unit test with a >200 KB fixture |
 | Waymo rows carry the posting text, not the card teaser | Live test asserts a minimum `raw_text` length |
+
+**Implementation note (2026-10-25).** Landed as `crates/core/src/acquisition/html/detail.rs`
+(`DetailConfig`, `extract_detail`) plus enrichment in
+`router::fetch_portal_inner`, between the tier fetch and `store_jobs`. Three
+deviations from the plan text, all for testability and honesty:
+
+1. Fetching goes through a new `FetchSource::fetch_page`, not a free
+   `fetch_detail(client, ...)`. The existing seam already exists for exactly
+   this reason, it lets every enrichment test run without a network, and the
+   HTTP pacing from Workstream 1b applies automatically. `extract_detail` is
+   the pure part: JSON-LD first (preferring a title match, falling back to the
+   only posting), then `detail.fields.description`.
+2. `DetailConfig.fields` is optional, so `{"detail": {}}` is valid for sites
+   whose detail pages emit JSON-LD. Requiring a selector merely to enable
+   JSON-LD enrichment would have been a config tax.
+3. Cancellation is a new `fetch_portal_cancellable`, used by the batch path.
+   A successful enrichment is also reported: `FetchOutcome` gained
+   `details_attempted`/`details_enriched`, and the app shows a one-line result
+   ("Fetched 60 jobs; 2 of 2 descriptions.").
+
+Seven router tests and nine detail-extraction tests cover the acceptance table.
+Live verification on the Waymo detail route was blocked by the site's WAF
+(`202`, empty body) after a handful of requests, which is the P2.2-R1 risk in
+practice: the list route still returns 200 while detail routes are challenged.
+The path is proven against scripted pages and will be re-verified live after a
+cooldown; the manual script records the symptom and the wait.
+
+The first live attempt also found a shape bug, now fixed: `SelectorConfig`
+required `list` and `fields`, so a detail-only config (`{"detail": {...}}`) was
+rejected before enrichment could run. That is the natural way to add
+descriptions to an ATS board, which already has full list data, so both fields
+are now optional and a config may carry only `detail`. Re-verified live on
+Lever: `Fetched 85 jobs; 1 of 1 description.`, longest description 4,888 bytes
+(the job page's `JobPosting` JSON-LD).
 
 ---
 

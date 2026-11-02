@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use career_ops_core::acquisition::http;
 use career_ops_core::acquisition::manual;
-use career_ops_core::acquisition::router::{FetchSource, HttpFetchSource};
+use career_ops_core::acquisition::router::{FetchOutcome, FetchSource, HttpFetchSource};
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
 use career_ops_core::model::{ApplicationStatus, FetchTier, JobDescription};
 use career_ops_core::portals::service::{self, BatchEntry, BatchReport, PortalWithHealth};
@@ -838,6 +838,9 @@ impl CareerOpsApp {
                     Ok(report) => {
                         let id = report.portal.id;
                         self.portals.apply_fetch_result(id, &report);
+                        if let Ok(outcome) = &report.outcome {
+                            self.portals_message = Some(fetch_summary(outcome));
+                        }
                     }
                     Err(error) => {
                         self.portals_error = Some(error.to_string());
@@ -1099,6 +1102,31 @@ fn friendly_error(error: &CoreError) -> String {
                 .into()
         }
         other => other.to_string(),
+    }
+}
+
+/// The one-line result shown after a single-portal fetch.
+///
+/// Description counts appear only when the portal has a `detail` config, so a
+/// plain board keeps the shorter message.
+fn fetch_summary(outcome: &FetchOutcome) -> String {
+    let jobs = count_with_noun(outcome.jobs_fetched, "job");
+    if outcome.details_attempted == 0 {
+        format!("Fetched {jobs}.")
+    } else {
+        format!(
+            "Fetched {jobs}; {} of {}.",
+            outcome.details_enriched,
+            count_with_noun(outcome.details_attempted, "description")
+        )
+    }
+}
+
+fn count_with_noun(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{count} {noun}s")
     }
 }
 
@@ -1783,11 +1811,16 @@ mod tests {
     #[derive(Default)]
     struct StubFetchSource {
         calls: std::sync::Mutex<Vec<String>>,
+        page_calls: std::sync::Mutex<Vec<String>>,
     }
 
     impl StubFetchSource {
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
+        }
+
+        fn page_calls(&self) -> Vec<String> {
+            self.page_calls.lock().unwrap().clone()
         }
     }
 
@@ -1821,6 +1854,11 @@ mod tests {
                 raw_text: "Build things.".into(),
                 posted_at: None,
             }])
+        }
+
+        async fn fetch_page(&self, url: &url::Url) -> AtsResult<String> {
+            self.page_calls.lock().unwrap().push(url.to_string());
+            Ok(r#"<html><body><div class="job-description">Full description from the detail page.</div></body></html>"#.into())
         }
     }
 
@@ -1894,6 +1932,100 @@ mod tests {
         assert_eq!(app.pipeline.rows[0].raw_text, "Build things.");
     }
 
+    #[test]
+    fn fetch_summary_reports_descriptions() {
+        let with_details = FetchOutcome {
+            jobs_fetched: 1,
+            tier: FetchTier::Tier1bHtml,
+            details_attempted: 1,
+            details_enriched: 1,
+        };
+        assert_eq!(
+            fetch_summary(&with_details),
+            "Fetched 1 job; 1 of 1 description."
+        );
+
+        let no_details = FetchOutcome {
+            jobs_fetched: 3,
+            tier: FetchTier::Tier1bHtml,
+            details_attempted: 0,
+            details_enriched: 0,
+        };
+        assert_eq!(fetch_summary(&no_details), "Fetched 3 jobs.");
+    }
+
+    /// Detail enrichment through the app: the scripted source returns a card
+    /// list and a detail document, and the app stores the detail text and
+    /// reports how many descriptions it filled in.
+    #[test]
+    fn portal_fetch_enriches_descriptions_and_reports_it() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::default());
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source.clone());
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            render_mode: "static".into(),
+            scraper_config: Some(
+                r#"{"list":"article.job","fields":{"title":"h3 a"},"detail":{"fields":{"description":".job-description"},"max_jobs":3}}"#
+                    .into(),
+            ),
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals.rows.len() == 1 && app.portals_task.is_none()
+        });
+
+        let portal_id = app.portals.rows[0].id;
+        app.handle_portals_action(PortalsAction::FetchOne(portal_id));
+        wait_until(&mut app, &ctx, |app| app.portals_task.is_none());
+
+        assert_eq!(source.page_calls().len(), 1, "one detail fetch per job");
+        assert_eq!(
+            app.portals_message.as_deref(),
+            Some("Fetched 1 job; 1 of 1 description.")
+        );
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+
+        assert_eq!(
+            app.pipeline.rows[0].raw_text,
+            "Full description from the detail page."
+        );
+    }
+
     /// Boards verified against this code on 2026-10-25, one per supported ATS.
     ///
     /// Order matters only for reporting: the test fetches the first one
@@ -1907,10 +2039,10 @@ mod tests {
     ///
     /// A board on a supported ATS exercises Tier 1a. Any other server-rendered
     /// page exercises Tier 1b, which needs JSON-LD `JobPosting` markup or a
-    /// portal `scraper_config`. Waymo's search page has neither — its job table
-    /// is loaded by JavaScript — so it fails Tier 1b and escalates to Tier 2;
-    /// expect `Broken { cause: "other" }` for it on a machine without the
-    /// sidecar. That is why it is not in the default list.
+    /// portal `scraper_config`; Waymo's search page needs the config in
+    /// `docs/manual-test-script.md` §8. A page whose jobs are not in the HTML at
+    /// all (client-rendered boards, e.g. Eightfold) escalates to Tier 2 and
+    /// needs `vendor/obscura`.
     const LIVE_PORTAL_URLS: &[&str] = &[
         "https://jobs.ashbyhq.com/linear",
         "https://jobs.lever.co/spotify",
@@ -2050,6 +2182,7 @@ mod tests {
             portal.health,
             portal.suggested_action
         );
+        eprintln!("live fetch: single-portal result {:?}", app.portals_message);
 
         // Then the batch over every portal. It re-fetches the first one, which
         // also exercises dedup against rows that already exist.
@@ -2116,6 +2249,28 @@ mod tests {
             stored.len().min(PIPELINE_LIMIT as usize),
             "the Pipeline page should hold min(stored, {PIPELINE_LIMIT}) jobs"
         );
+
+        // When the config asks for detail enrichment, at least one stored
+        // description must be longer than a card teaser. The threshold is
+        // deliberately low: this checks that the detail path ran, not that a
+        // particular site's posting is long.
+        let longest = stored
+            .iter()
+            .map(|job| job.raw_text.len())
+            .max()
+            .unwrap_or(0);
+        let detail_requested = scraper_config
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .is_some_and(|config| config.get("detail").is_some());
+        if detail_requested {
+            assert!(
+                longest > 500,
+                "detail enrichment produced no text (longest description: {longest} bytes)"
+            );
+        }
+
+        eprintln!("live fetch: longest description {longest} bytes");
 
         eprintln!(
             "live fetch: {} unique jobs stored across {} portals; Pipeline shows {} (first tier: {})",

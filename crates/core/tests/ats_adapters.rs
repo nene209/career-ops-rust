@@ -561,6 +561,23 @@ fn selectors_extract_a_server_rendered_vendor_card() {
 }
 
 #[test]
+fn a_detail_only_config_parses_without_list_selectors() {
+    let config: SelectorConfig = serde_json::from_value(serde_json::json!({
+        "detail": { "max_jobs": 1 }
+    }))
+    .expect("valid config");
+
+    assert!(config.list.is_none());
+    assert!(config.fields.is_none());
+    assert!(config.detail.is_some());
+
+    // A detail-only config cannot extract a list, and that is not an error:
+    // the ATS path never calls the selector extractor.
+    let url = Url::parse("https://example.com/careers").unwrap();
+    assert!(selectors::extract(SELECTOR_FIXTURE, &url, "Acme", &config).is_none());
+}
+
+#[test]
 fn selectors_resolve_relative_urls_against_source() {
     let url = Url::parse("https://example.com/careers").unwrap();
     let jobs =

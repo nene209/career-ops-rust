@@ -427,6 +427,8 @@ mod tests {
             outcome: Ok(FetchOutcome {
                 jobs_fetched: 3,
                 tier: FetchTier::Tier2Obscura,
+                details_attempted: 0,
+                details_enriched: 0,
             }),
         };
 

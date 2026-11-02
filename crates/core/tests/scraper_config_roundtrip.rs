@@ -36,12 +36,10 @@ async fn scraper_config_round_trips_as_selector_config() {
     let selector_config: SelectorConfig =
         serde_json::from_value(value).expect("stored config deserializes to SelectorConfig");
 
-    assert_eq!(selector_config.list, "article.job-card");
-    assert_eq!(selector_config.fields.title, "h2.title");
-    assert_eq!(
-        selector_config.fields.location.as_deref(),
-        Some(".location")
-    );
+    assert_eq!(selector_config.list.as_deref(), Some("article.job-card"));
+    let fields = selector_config.fields.as_ref().expect("fields");
+    assert_eq!(fields.title, "h2.title");
+    assert_eq!(fields.location.as_deref(), Some(".location"));
     // Default field applied even though not present in the JSON
     assert_eq!(selector_config.url_attribute, "href");
 

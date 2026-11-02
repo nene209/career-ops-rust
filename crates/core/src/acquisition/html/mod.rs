@@ -263,6 +263,7 @@ pub fn is_js_required(html: &str) -> bool {
     false
 }
 
+pub mod detail;
 pub mod jsonld;
 pub mod selectors;
 

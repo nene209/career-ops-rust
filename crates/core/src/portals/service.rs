@@ -155,7 +155,9 @@ where
             .map(|p| p.company_name)
             .unwrap_or_else(|| format!("portal {portal_id}"));
 
-        let entry = match router::fetch_portal(pool, portal_id, source, browser).await {
+        let entry = match router::fetch_portal_cancellable(pool, portal_id, source, browser, cancel)
+            .await
+        {
             Ok(outcome) => BatchEntry {
                 portal_id,
                 portal_name: name,

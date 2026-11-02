@@ -121,8 +121,10 @@ use url::Url;
 pub struct MockFetchSource {
     ats_calls: Mutex<Vec<(String, String)>>,
     html_calls: Mutex<Vec<String>>,
+    page_calls: Mutex<Vec<String>>,
     ats_queue: Mutex<VecDeque<Result<Vec<NormalizedJob>, AtsError>>>,
     html_queue: Mutex<VecDeque<Result<Vec<NormalizedJob>, AtsError>>>,
+    page_queue: Mutex<VecDeque<Result<String, AtsError>>>,
 }
 
 impl Default for MockFetchSource {
@@ -130,8 +132,10 @@ impl Default for MockFetchSource {
         Self {
             ats_calls: Mutex::new(Vec::new()),
             html_calls: Mutex::new(Vec::new()),
+            page_calls: Mutex::new(Vec::new()),
             ats_queue: Mutex::new(VecDeque::new()),
             html_queue: Mutex::new(VecDeque::new()),
+            page_queue: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -172,6 +176,17 @@ impl MockFetchSource {
     pub fn html_calls(&self) -> Vec<String> {
         self.html_calls.lock().unwrap().clone()
     }
+
+    /// Raw detail pages, popped in call order. Chain onto a `with_*`
+    /// constructor: `with_html(Ok(jobs)).pages([Ok(detail_html)])`.
+    pub fn pages(self, pages: impl IntoIterator<Item = Result<String, AtsError>>) -> Self {
+        self.page_queue.lock().unwrap().extend(pages);
+        self
+    }
+
+    pub fn page_calls(&self) -> Vec<String> {
+        self.page_calls.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -205,6 +220,15 @@ impl FetchSource for MockFetchSource {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| Ok(vec![]))
+    }
+
+    async fn fetch_page(&self, url: &Url) -> Result<String, AtsError> {
+        self.page_calls.lock().unwrap().push(url.to_string());
+        self.page_queue
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(String::new()))
     }
 }
 

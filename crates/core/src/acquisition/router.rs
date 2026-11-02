@@ -20,6 +20,8 @@
 //! exercised without a network. Tier 2 is already abstracted through
 //! `BrowserBackend`, so no additional indirection is needed there.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use async_trait::async_trait;
 use sqlx::SqlitePool;
 use url::Url;
@@ -27,6 +29,7 @@ use url::Url;
 use super::ats::{self, AtsAdapter, NormalizedJob};
 use super::error::{AtsError, AtsResult, FailureCause};
 use super::html;
+use super::html::detail::DetailConfig;
 use super::html::selectors::SelectorConfig;
 use crate::backend::{BrowserBackend, RenderOpts};
 use crate::error::Result;
@@ -85,6 +88,13 @@ pub trait FetchSource: Send + Sync {
         company_name: &str,
         config: Option<&SelectorConfig>,
     ) -> AtsResult<Vec<NormalizedJob>>;
+
+    /// Fetch one raw HTML document, such as a job's detail page.
+    ///
+    /// Separate from `fetch_html` because detail enrichment needs the document
+    /// itself: it tries JSON-LD first and selectors second, which is a
+    /// different decision from "extract a list of jobs".
+    async fn fetch_page(&self, url: &Url) -> AtsResult<String>;
 }
 
 /// Production `FetchSource`, backed by a `reqwest::Client`.
@@ -117,6 +127,20 @@ impl FetchSource for HttpFetchSource {
     ) -> AtsResult<Vec<NormalizedJob>> {
         html::fetch_static_jobs(&self.client, url, company_name, config).await
     }
+
+    async fn fetch_page(&self, url: &Url) -> AtsResult<String> {
+        let resp = super::http::get_with_retry(&self.client, url.as_str())
+            .await
+            .map_err(|e| AtsError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(AtsError::from_status(resp.status()));
+        }
+
+        resp.text()
+            .await
+            .map_err(|e| AtsError::Transport(e.to_string()))
+    }
 }
 
 /// The tier that actually produced the returned jobs.
@@ -124,6 +148,11 @@ impl FetchSource for HttpFetchSource {
 pub struct FetchOutcome {
     pub jobs_fetched: usize,
     pub tier: FetchTier,
+    /// Detail pages fetched to fill in descriptions. Zero when the portal has
+    /// no `detail` config.
+    pub details_attempted: usize,
+    /// Detail pages that produced usable text.
+    pub details_enriched: usize,
 }
 
 /// Failure returned when every attempted tier failed. Carries the
@@ -198,7 +227,23 @@ pub async fn fetch_portal(
     source: &dyn FetchSource,
     browser: Option<&dyn BrowserBackend>,
 ) -> FetchResult<FetchOutcome> {
-    let result = fetch_portal_inner(pool, portal_id, source, browser).await;
+    fetch_portal_cancellable(pool, portal_id, source, browser, None).await
+}
+
+/// As `fetch_portal`, but stops detail enrichment between jobs when `cancel`
+/// is set.
+///
+/// The batch path passes its shared flag so a 40-posting enrichment can be
+/// interrupted; a single fetch has no cancel control in the UI and passes
+/// `None`.
+pub async fn fetch_portal_cancellable(
+    pool: &SqlitePool,
+    portal_id: i64,
+    source: &dyn FetchSource,
+    browser: Option<&dyn BrowserBackend>,
+    cancel: Option<&AtomicBool>,
+) -> FetchResult<FetchOutcome> {
+    let result = fetch_portal_inner(pool, portal_id, source, browser, cancel).await;
     record_fetch_outcome(pool, portal_id, &result).await;
     result
 }
@@ -213,6 +258,7 @@ pub async fn fetch_portal_inner(
     portal_id: i64,
     source: &dyn FetchSource,
     browser: Option<&dyn BrowserBackend>,
+    cancel: Option<&AtomicBool>,
 ) -> FetchResult<FetchOutcome> {
     let portal = portals::get(pool, portal_id)
         .await
@@ -229,10 +275,13 @@ pub async fn fetch_portal_inner(
 
     let adapters = ats::adapters();
     let route = decide_initial_route(&portal.render_mode, &url, &adapters);
+    // Parsed once: the tier paths and the enrichment step all use the same
+    // config, and a triplicate parse would let them disagree.
+    let config = parse_scraper_config(portal.scraper_config.as_deref());
 
     let (jobs, tier, tier1_failure) = match route {
         InitialRoute::Tier2 => {
-            let jobs = fetch_tier2(&portal, &url, browser).await?;
+            let jobs = fetch_tier2(&portal, &url, browser, config.as_ref()).await?;
             (jobs, FetchTier::Tier2Obscura, None)
         }
         InitialRoute::Tier1a { adapter_name, slug } => {
@@ -247,14 +296,13 @@ pub async fn fetch_portal_inner(
                 Ok(jobs) => (jobs, FetchTier::Tier1aAts, None),
                 Err(e) if e.escalatable() && browser.is_some() => {
                     let failure = e.cause();
-                    let jobs = fetch_tier2(&portal, &url, browser).await?;
+                    let jobs = fetch_tier2(&portal, &url, browser, config.as_ref()).await?;
                     (jobs, FetchTier::Tier2Obscura, Some(failure))
                 }
                 Err(e) => return Err(FetchError::from_ats(e, "Tier 1a")),
             }
         }
         InitialRoute::Tier1b => {
-            let config = parse_scraper_config(portal.scraper_config.as_deref());
             match source
                 .fetch_html(&url, &portal.company_name, config.as_ref())
                 .await
@@ -262,7 +310,7 @@ pub async fn fetch_portal_inner(
                 Ok(jobs) => (jobs, FetchTier::Tier1bHtml, None),
                 Err(e) if e.escalatable() && browser.is_some() => {
                     let failure = e.cause();
-                    let jobs = fetch_tier2(&portal, &url, browser).await?;
+                    let jobs = fetch_tier2(&portal, &url, browser, config.as_ref()).await?;
                     (jobs, FetchTier::Tier2Obscura, Some(failure))
                 }
                 Err(e) => return Err(FetchError::from_ats(e, "Tier 1b")),
@@ -278,20 +326,92 @@ pub async fn fetch_portal_inner(
         );
     }
 
+    let mut jobs = jobs;
+    let (details_attempted, details_enriched) = enrich_details(
+        &mut jobs,
+        source,
+        config.as_ref().and_then(|config| config.detail.as_ref()),
+        cancel,
+    )
+    .await;
+
     let count = store_jobs(pool, &portal, &jobs, tier)
         .await
         .map_err(|e| FetchError::internal(format!("could not store jobs: {e}")))?;
 
+    if details_attempted > 0 {
+        tracing::info!(
+            portal = portal_id,
+            jobs = count,
+            attempted = details_attempted,
+            enriched = details_enriched,
+            "enriched job descriptions"
+        );
+    }
+
     Ok(FetchOutcome {
         jobs_fetched: count,
         tier,
+        details_attempted,
+        details_enriched,
     })
+}
+
+/// Replace card-level text with the posting description, best effort.
+///
+/// Bounded by `detail.max_jobs`, sequential, and checked for cancellation
+/// between jobs. A failed detail fetch leaves that job's list-level text in
+/// place: enrichment never fails the portal fetch.
+async fn enrich_details(
+    jobs: &mut [NormalizedJob],
+    source: &dyn FetchSource,
+    detail: Option<&DetailConfig>,
+    cancel: Option<&AtomicBool>,
+) -> (usize, usize) {
+    let Some(detail) = detail else {
+        return (0, 0);
+    };
+
+    let mut attempted = 0;
+    let mut enriched = 0;
+
+    for job in jobs.iter_mut().take(detail.max_jobs()) {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+            tracing::info!(attempted, enriched, "detail enrichment cancelled");
+            break;
+        }
+
+        attempted += 1;
+        if let Some(text) = detail_text(source, job, detail).await {
+            job.raw_text = text;
+            enriched += 1;
+        }
+    }
+
+    (attempted, enriched)
+}
+
+async fn detail_text(
+    source: &dyn FetchSource,
+    job: &NormalizedJob,
+    detail: &DetailConfig,
+) -> Option<String> {
+    let body = match source.fetch_page(&job.source_url).await {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(url = %job.source_url, %error, "detail page fetch failed");
+            return None;
+        }
+    };
+
+    html::detail::extract_detail(&body, &job.source_url, &job.title, detail)
 }
 
 async fn fetch_tier2(
     portal: &Portal,
     url: &Url,
     browser: Option<&dyn BrowserBackend>,
+    config: Option<&SelectorConfig>,
 ) -> FetchResult<Vec<NormalizedJob>> {
     let Some(backend) = browser else {
         return Err(FetchError {
@@ -308,8 +428,7 @@ async fn fetch_tier2(
     // Tier 2 returns a rendered HTML string. Extract jobs from it using
     // the same JSON-LD and selector paths as Tier 1b, since the
     // structure of a rendered page is the same as a static one.
-    let config = parse_scraper_config(portal.scraper_config.as_deref());
-    html::extract_from_html(&page.html, url, &portal.company_name, config.as_ref())
+    html::extract_from_html(&page.html, url, &portal.company_name, config)
         .map_err(|e| FetchError::from_ats(e, "Tier 2"))
 }
 

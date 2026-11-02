@@ -7,13 +7,17 @@
 
 mod common;
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use career_ops_core::acquisition::ats;
 use career_ops_core::acquisition::error::AtsError;
-use career_ops_core::acquisition::router::{decide_initial_route, fetch_portal, InitialRoute};
+use career_ops_core::acquisition::router::{
+    decide_initial_route, fetch_portal, fetch_portal_cancellable, InitialRoute,
+};
 use career_ops_core::backend::{MockBrowserBackend, RenderedPage};
 use career_ops_core::model::FetchTier;
+use career_ops_core::repo::job_descriptions;
 use career_ops_core::repo::portals::{self, NewPortal, RenderMode};
 use url::Url;
 
@@ -297,6 +301,287 @@ async fn fetching_same_portal_twice_dedups() {
         .await
         .unwrap();
     assert_eq!(ids.len(), 1);
+
+    db.close().await;
+}
+
+// -----------------------------------------------------------------
+// Detail enrichment
+// -----------------------------------------------------------------
+
+fn detail_portal(url: &str, config: serde_json::Value) -> NewPortal {
+    NewPortal {
+        company_name: "Acme".into(),
+        url: url.into(),
+        render_mode: RenderMode::Static,
+        scraper_config: Some(config),
+    }
+}
+
+fn detail_config(max_jobs: usize) -> serde_json::Value {
+    serde_json::json!({
+        "list": "article.job",
+        "fields": { "title": "h2 a" },
+        "detail": {
+            "fields": { "description": ".job-description" },
+            "max_jobs": max_jobs
+        }
+    })
+}
+
+fn detail_html(text: &str) -> String {
+    format!(r#"<html><body><div class="job-description">{text}</div></body></html>"#)
+}
+
+async fn stored_texts(pool: &sqlx::SqlitePool) -> Vec<String> {
+    job_descriptions::list_recent(pool, 100)
+        .await
+        .expect("list jobs")
+        .into_iter()
+        .map(|job| job.raw_text)
+        .collect()
+}
+
+#[tokio::test]
+async fn detail_enrichment_replaces_card_text() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal("https://example.com/careers", detail_config(5)),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(
+        MockFetchSource::with_html(Ok(vec![sample_job("engineer")]))
+            .pages([Ok(detail_html("Full description."))]),
+    );
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.jobs_fetched, 1);
+    assert_eq!(outcome.details_attempted, 1);
+    assert_eq!(outcome.details_enriched, 1);
+    assert_eq!(
+        source.page_calls(),
+        vec!["https://boards.greenhouse.io/acme/jobs/engineer".to_string()],
+        "the detail request must use the job's own URL"
+    );
+    assert_eq!(stored_texts(&db.pool).await, vec!["Full description."]);
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn jsonld_detail_enriches_without_selectors() {
+    let db = common::TestDb::new_raw().await;
+    let config = serde_json::json!({
+        "list": "article.job",
+        "fields": { "title": "h2 a" },
+        "detail": { "max_jobs": 5 }
+    });
+    let portal = portals::create(
+        &db.pool,
+        detail_portal("https://example.com/careers", config),
+    )
+    .await
+    .expect("create portal");
+
+    let detail = r#"
+    <html><head><script type="application/ld+json">
+    {"@type":"JobPosting","title":"engineer","description":"<p>JSON-LD text.</p>"}
+    </script></head></html>
+    "#;
+    let source = Arc::new(
+        MockFetchSource::with_html(Ok(vec![sample_job("engineer")]))
+            .pages([Ok(detail.to_string())]),
+    );
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.details_enriched, 1);
+    assert_eq!(stored_texts(&db.pool).await, vec!["<p>JSON-LD text.</p>"]);
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_failed_detail_fetch_keeps_the_list_row() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal("https://example.com/careers", detail_config(5)),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(
+        MockFetchSource::with_html(Ok(vec![sample_job("engineer")]))
+            .pages([Err(AtsError::Timeout("slow".into()))]),
+    );
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("the portal fetch still succeeds");
+
+    assert_eq!(outcome.jobs_fetched, 1);
+    assert_eq!(outcome.details_attempted, 1);
+    assert_eq!(outcome.details_enriched, 0);
+    assert_eq!(
+        stored_texts(&db.pool).await,
+        vec!["test"],
+        "sample_job's list-level text is kept"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn max_jobs_caps_detail_requests() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal("https://example.com/careers", detail_config(2)),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(
+        MockFetchSource::with_html(Ok(vec![sample_job("a"), sample_job("b"), sample_job("c")]))
+            .pages([
+                Ok(detail_html("A")),
+                Ok(detail_html("B")),
+                Ok(detail_html("C")),
+            ]),
+    );
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.jobs_fetched, 3, "every list row is still stored");
+    assert_eq!(outcome.details_attempted, 2);
+    assert_eq!(source.page_calls().len(), 2, "the cap bounds requests");
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn cancellation_stops_before_the_first_detail_fetch() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal("https://example.com/careers", detail_config(5)),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(
+        MockFetchSource::with_html(Ok(vec![sample_job("engineer")]))
+            .pages([Ok(detail_html("Full description."))]),
+    );
+    let cancel = AtomicBool::new(true);
+
+    let outcome =
+        fetch_portal_cancellable(&db.pool, portal.id, source.as_ref(), None, Some(&cancel))
+            .await
+            .expect("fetch");
+
+    assert!(source.page_calls().is_empty(), "cancelled before enriching");
+    assert_eq!(outcome.details_attempted, 0);
+    assert_eq!(outcome.jobs_fetched, 1, "the list rows are still stored");
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn enrichment_is_idempotent() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal("https://example.com/careers", detail_config(5)),
+    )
+    .await
+    .expect("create portal");
+
+    let job = sample_job("engineer");
+    let source = Arc::new(
+        MockFetchSource::sequence_html(vec![Ok(vec![job.clone()]), Ok(vec![job])]).pages([
+            Ok(detail_html("Full description.")),
+            Ok(detail_html("Full description.")),
+        ]),
+    );
+
+    fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("first fetch");
+    fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("second fetch");
+
+    let jobs = job_descriptions::list_recent(&db.pool, 10)
+        .await
+        .expect("list jobs");
+    assert_eq!(jobs.len(), 1, "the second fetch must update, not duplicate");
+    assert_eq!(jobs[0].raw_text, "Full description.");
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_detail_only_config_enriches_an_ats_board() {
+    let db = common::TestDb::new_raw().await;
+    let config = serde_json::json!({ "detail": { "max_jobs": 1 } });
+    let portal = portals::create(
+        &db.pool,
+        detail_portal("https://boards.greenhouse.io/acme/jobs/1", config),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(
+        MockFetchSource::with_ats(Ok(vec![sample_job("engineer")])).pages([Ok(
+            r#"<html><head><script type="application/ld+json">
+        {"@type":"JobPosting","title":"engineer","description":"From the detail page."}
+        </script></head></html>"#
+                .to_string(),
+        )]),
+    );
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.tier, FetchTier::Tier1aAts);
+    assert_eq!(outcome.details_enriched, 1);
+    assert_eq!(
+        stored_texts(&db.pool).await,
+        vec!["From the detail page."],
+        "an ATS board can opt into descriptions with a detail-only config"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn no_detail_config_means_no_detail_requests() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(&db.pool, static_portal("https://example.com/careers"))
+        .await
+        .expect("create portal");
+
+    let source = Arc::new(MockFetchSource::with_html(Ok(vec![sample_job("engineer")])));
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.details_attempted, 0);
+    assert!(source.page_calls().is_empty());
 
     db.close().await;
 }

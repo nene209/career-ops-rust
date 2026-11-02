@@ -187,9 +187,11 @@ assuming every row is visible.
 
 The page is **server-rendered** (Rails + Stimulus), but it carries no
 `JobPosting` JSON-LD, so the default extraction fails. It does not need
-JavaScript: a selector config extracts the cards as-is, and the pagination block
-follows the site's `rel=next` link. Verified on 2026-10-25 — 90 jobs from 3 pages
-of 30, Tier 1b, no sidecar:
+JavaScript: a selector config extracts the cards as-is, the pagination block
+follows the site's `rel=next` link, and the detail block enriches the first
+postings from their own pages (those pages *do* carry `JobPosting` JSON-LD, so no
+selector is needed there). Verified on 2026-10-25 — 90 jobs from 3 pages of 30,
+Tier 1b, no sidecar:
 
 ```bash
 CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
@@ -206,7 +208,8 @@ CAREER_OPS_LIVE_SCRAPER_CONFIG='{
     "next": "a[rel=next]",
     "url_template": "https://careers.withwaymo.com/jobs/search?page={page}",
     "max_pages": 3
-  }
+  },
+  "detail": { "max_jobs": 2 }
 }' \
   cargo test -p career-ops-app --features keychain -- --ignored live_fetch
 ```
@@ -215,24 +218,30 @@ Either pagination mechanism works; `next` is used when the link exists and
 `url_template` is the fallback. `max_pages` includes the first page (default 5,
 ceiling 20). Omitting the block keeps the single-page behaviour.
 
+`detail` fetches each posting page and replaces the card teaser with the full
+description: JSON-LD first, then `detail.fields.description` if configured.
+`max_jobs` defaults to 40 and is capped at 200; every detail fetch consumes one
+request, so keep it small on sites that challenge automated traffic. Omitting
+`detail` means no enrichment.
+
+A **detail-only** config (`{"detail": {"max_jobs": 1}}`) is valid and is how an
+ATS board — which already has full list data — opts into refreshing descriptions.
+Verified on Lever: `Fetched 85 jobs; 1 of 1 description.`
+
 `crates/core/tests/ats_adapters.rs::selectors_extract_a_server_rendered_vendor_card`
 pins the same selector shape against a fixture, so a change to the extractor
 fails a test instead of silently fetching zero jobs.
 
-What this config still does not give you:
-
-- **Full descriptions.** `raw_text` becomes the two-sentence card summary, not
-  the job description. Evaluating such a job needs the detail page, which is
-  Phase 2.2 Workstream 2.
-
 **If the fetch suddenly fails with `Broken { cause: "other" }` after working:**
 Waymo's AWS WAF answers repeated automated fetches with `202` and an empty body.
-The app already spaces requests to the same host (400 ms minimum plus up to
-400 ms of jitter, see README "Request pacing"), which helps but does not make a
-quota disappear. Check with
+This can affect the list route, the detail route, or both — a 90-job list fetch
+can succeed while the very next detail fetch is challenged. The app spaces
+requests to the same host (400 ms minimum plus up to 400 ms of jitter, see
+README "Request pacing"), which helps but does not make a quota disappear. Check
+with
 `curl -sS -o /dev/null -w '%{http_code} %{size_download}\n' https://careers.withwaymo.com/jobs/search`
-— a `202 0` means "challenged", not "pagination broken". Wait a few minutes
-before retrying; do not raise `max_pages` to get around it.
+— a `202 0` means "challenged", not "extraction broken". Wait a few minutes
+before retrying; do not raise `max_pages` or `max_jobs` to get around it.
 
 The config is enterable in the app: **Add portal** / **Edit** → *Scraper config
 (JSON, optional)*. It is stored in `portals.scraper_config` and re-validated on

@@ -31,12 +31,15 @@ use super::super::ats::NormalizedJob;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SelectorConfig {
-    /// Selector for each job card in the list. One `NormalizedJob` is
-    /// produced per matched element.
-    pub list: String,
+    /// Selector for each job card in the list. Absent for a *detail-only*
+    /// config, which is how an ATS portal gets description enrichment without
+    /// pretending to have list selectors.
+    #[serde(default)]
+    pub list: Option<String>,
 
-    /// Per-card field selectors.
-    pub fields: FieldSelectors,
+    /// Per-card field selectors. Absent for a detail-only config.
+    #[serde(default)]
+    pub fields: Option<FieldSelectors>,
 
     /// Attribute name that holds the job URL. Defaults to `"href"`.
     #[serde(default = "default_url_attribute")]
@@ -46,6 +49,11 @@ pub struct SelectorConfig {
     /// fetched once, which is the Phase 2 behaviour.
     #[serde(default)]
     pub pagination: Option<PaginationConfig>,
+
+    /// How to enrich each job with its detail page. Absent means the stored
+    /// jobs keep whatever text the list page carried.
+    #[serde(default)]
+    pub detail: Option<super::detail::DetailConfig>,
 }
 
 /// Follow-up pages for a selector-configured portal.
@@ -134,11 +142,13 @@ pub fn extract(
     config: &SelectorConfig,
 ) -> Option<Vec<NormalizedJob>> {
     let document = Html::parse_document(html);
-    let list_sel = Selector::parse(&config.list).ok()?;
+    let list = config.list.as_deref()?;
+    let fields = config.fields.as_ref()?;
+    let list_sel = Selector::parse(list).ok()?;
 
     let mut jobs = Vec::new();
     for card in document.select(&list_sel) {
-        let Some(title) = select_text(&card, &config.fields.title) else {
+        let Some(title) = select_text(&card, &fields.title) else {
             continue;
         };
         if title.is_empty() {
@@ -147,8 +157,8 @@ pub fn extract(
 
         let Some(href) = select_job_url(
             &card,
-            &config.fields.title,
-            config.fields.url.as_deref(),
+            &fields.title,
+            fields.url.as_deref(),
             &config.url_attribute,
         ) else {
             continue;
@@ -166,25 +176,21 @@ pub fn extract(
             external_id,
             title,
             company: company_name.to_string(),
-            location: config
-                .fields
+            location: fields
                 .location
                 .as_deref()
                 .and_then(|s| select_text(&card, s)),
-            department: config
-                .fields
+            department: fields
                 .department
                 .as_deref()
                 .and_then(|s| select_text(&card, s)),
-            employment_type: config
-                .fields
+            employment_type: fields
                 .employment_type
                 .as_deref()
                 .and_then(|s| select_text(&card, s)),
             workplace_type: None,
             source_url: job_url,
-            raw_text: config
-                .fields
+            raw_text: fields
                 .description
                 .as_deref()
                 .and_then(|s| select_text(&card, s))
