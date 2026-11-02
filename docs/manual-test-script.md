@@ -182,20 +182,52 @@ That run on 2026-10-25 stored 500 unique jobs across the four portals — exactl
 the Pipeline page size — so the test also asserts the page bound rather than
 assuming every row is visible.
 
-Why Waymo's URL is not in the default list:
+### Making Waymo's search page work
 
-- Its search page is rendered by JS controllers and the static HTML carries no
-  `JobPosting` JSON-LD. Tier 1b therefore fails and the fetch escalates to Tier
-  2. On a machine without `vendor/obscura` the test fails with
-  `Broken { cause: "other" }`; that is the expected outcome there, not a
-  regression. With the sidecar present, success depends on the rendered DOM
-  containing JSON-LD.
-- A career page with neither JSON-LD nor a portal `scraper_config` cannot be
-  fetched by either tier. The selector path exists in the core extractor, but
-  the Phase 2.1 portal form does not expose a `scraper_config` field.
-- This checks the fetch, storage, portals health, and Pipeline contents. The UI
-  feedback while a fetch is in flight (spinner, per-portal progress, cancel
-  button) is still section 4's job.
+The page is **server-rendered** (Rails + Stimulus), but it carries no
+`JobPosting` JSON-LD, so the default extraction fails. It does not need
+JavaScript: a selector config extracts the cards as-is. Verified on 2026-10-25 —
+30 jobs, Tier 1b, no sidecar:
+
+```bash
+CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
+CAREER_OPS_LIVE_SCRAPER_CONFIG='{
+  "list": "article.job-search-results-card-col",
+  "fields": {
+    "title": "h3.job-search-results-card-title a",
+    "location": "li.job-component-location span",
+    "department": "li.job-component-department span",
+    "employment_type": "li.job-component-employment-type span",
+    "description": "p.job-search-results-summary"
+  }
+}' \
+  cargo test -p career-ops-app --features keychain -- --ignored live_fetch
+```
+
+`crates/core/tests/ats_adapters.rs::selectors_extract_a_server_rendered_vendor_card`
+pins the same selector shape against a fixture, so a change to the extractor
+fails a test instead of silently fetching zero jobs.
+
+What this config still does not give you:
+
+- **Pagination.** The page holds 30 cards; the site paginates to 13 pages
+  (`?page=2` … `?page=13`), and the extractor follows no links. One fetch yields
+  the first page.
+- **Full descriptions.** `raw_text` becomes the two-sentence card summary, not
+  the job description. Evaluating such a job needs the detail page, which is not
+  fetched yet.
+- **A UI for the config.** The portal form exposes company, URL, and render mode
+  only. Until it gains a `scraper_config` field, this config can only be set
+  through the live test or directly in the database.
+
+A page with neither JSON-LD nor a selector config still fails on both tiers
+(`Parse: no jobs found in HTML`), because Tier 2 reuses the same extraction on
+the rendered DOM. The site also serves an AWS WAF challenge script, so automated
+fetches may hit a challenge; a real browser (Tier 2) is more likely to pass it.
+
+This check covers the fetch, storage, portal health, and Pipeline contents. The
+UI feedback while a fetch is in flight (spinner, per-portal progress, cancel
+button) is still section 4's job.
 
 ## 9. Sign-off
 

@@ -150,15 +150,22 @@ indistinguishable from a bug, and a test that reads its fixtures from the user'
 sdatabase is neither deterministic nor safe. If a starter kit is ever wanted, it
 belongs to onboarding with explicit consent, not to a seed step.
 
-That run also produced a finding worth carrying into Phase 3: Waymo's careers
-search page is a JS-driven search form whose static HTML contains no
-`JobPosting` JSON-LD. Tier 1b fails on it and escalates to Tier 2, which reuses
-the *same* JSON-LD/selector extraction on the rendered DOM. So a general career
-page with neither JSON-LD nor a `scraper_config` cannot be fetched by either
-tier — and the Phase 2.1 portal form does not expose `scraper_config`, so the
-selector path is currently unreachable from the UI. Phase 3 should either
-expose that field or add a real extraction strategy for such pages; the current
-error (`Parse: no jobs found in HTML`) is accurate but not actionable for a user.
+That run also produced a finding worth carrying into Phase 3. Waymo's careers
+search page has no `JobPosting` JSON-LD, so the default extraction fails and the
+fetch escalates to Tier 2 — which reuses the *same* JSON-LD/selector extraction
+on the rendered DOM. The page is nevertheless server-rendered: its cards are in
+the static HTML. Supplying a selector `scraper_config` makes it work on Tier 1b
+with no sidecar at all (verified 2026-10-25: 30 jobs).
+
+So the real gap is not extraction capability but **configuration surface**.
+`portals.scraper_config` exists, the router parses it, and the selector engine is
+tested; the Phase 2.1 portal form does not expose a field for it, so the only
+way to configure a non-JSON-LD page is the live test or direct database access.
+Two further limits apply even with a config: the extractor follows no pagination
+(Waymo paginates 13 pages of 30), and `raw_text` becomes the card summary rather
+than the job description, which is thin input for Phase 3's evaluation. Exposing
+the field is a small UI change; detail-page fetching and pagination are a
+separate, consciously scheduled item.
 
 ### F4 — Criterion 4 named a screen that does not exist (documentation drift)
 

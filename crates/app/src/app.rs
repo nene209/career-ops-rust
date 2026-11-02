@@ -1922,6 +1922,17 @@ mod tests {
         }
     }
 
+    /// Optional `scraper_config` for every portal in the run, as raw JSON.
+    ///
+    /// Pages that expose no JSON-LD `JobPosting` need a selector config. Set it
+    /// with `CAREER_OPS_LIVE_SCRAPER_CONFIG`; see `docs/manual-test-script.md`
+    /// §8 for the Waymo config.
+    fn live_scraper_config() -> Option<String> {
+        std::env::var("CAREER_OPS_LIVE_SCRAPER_CONFIG")
+            .ok()
+            .filter(|raw| !raw.trim().is_empty())
+    }
+
     /// The portal name for a live URL: host plus first path segment, so the
     /// per-board assertion output says which board produced which jobs.
     fn live_portal_name(url: &str) -> String {
@@ -1956,6 +1967,7 @@ mod tests {
         career_ops_test_support::install();
 
         let urls = live_portal_urls();
+        let scraper_config = live_scraper_config();
         assert!(!urls.is_empty(), "CAREER_OPS_LIVE_PORTALS produced no URLs");
         let dir = tempfile::tempdir().expect("tempdir");
 
@@ -1995,7 +2007,7 @@ mod tests {
                 company_name: live_portal_name(url),
                 url: url.clone(),
                 render_mode: "static".into(),
-                scraper_config: None,
+                scraper_config: scraper_config.clone(),
             }));
             wait_until(&mut app, &ctx, |app| {
                 app.portals.rows.len() == index + 1 && app.portals_task.is_none()

@@ -495,6 +495,71 @@ fn selectors_extract_happy_path() {
     assert!(jobs[1].department.is_none());
 }
 
+/// A server-rendered vendor card page with no JSON-LD — the shape Waymo's
+/// careers search emits. It is the case manual-test-script §8 describes: the
+/// data is already in the static HTML, so a `scraper_config` is all it needs.
+const VENDOR_CARD_FIXTURE: &str = r#"
+<html><body>
+<article class="col-12 job-search-results-card-col" aria-labelledby="link_job_title_1_0_0">
+  <div class="card job-search-results-card"><div class="card-body">
+    <h3 class="card-title job-search-results-card-title">
+      <a id="link_job_title_1_0_0" href="/jobs/2027-summer-intern-bs-depot-automation">2027 Summer Intern, BS, Depot Automation</a>
+    </h3>
+    <ul>
+      <li class="job-component-icon-and-text job-component-location">
+        <i class="fas fa-location-arrow"></i><span> San Francisco, California </span>
+      </li>
+      <li class="job-component-icon-and-text job-component-department">
+        <i class="fas fa-user-friends"></i><span> Systems Engineering </span>
+      </li>
+      <li class="job-component-icon-and-text job-component-employment-type">
+        <i class="far fa-clock"></i><span> Intern </span>
+      </li>
+    </ul>
+    <p class="card-text job-search-results-summary">Waymo is an autonomous driving technology company.</p>
+  </div></div>
+</article>
+</body></html>
+"#;
+
+/// A card page with all five fields selector-driven. This is the config given
+/// for Waymo in `docs/manual-test-script.md`; keeping it here means a change to
+/// the selector engine fails a test instead of silently fetching zero jobs.
+#[test]
+fn selectors_extract_a_server_rendered_vendor_card() {
+    let url = Url::parse("https://careers.example.com/jobs/search").unwrap();
+    let config: SelectorConfig = serde_json::from_value(serde_json::json!({
+        "list": "article.job-search-results-card-col",
+        "fields": {
+            "title": "h3.job-search-results-card-title a",
+            "location": "li.job-component-location span",
+            "department": "li.job-component-department span",
+            "employment_type": "li.job-component-employment-type span",
+            "description": "p.job-search-results-summary"
+        }
+    }))
+    .expect("valid config");
+
+    let jobs = selectors::extract(VENDOR_CARD_FIXTURE, &url, "Example", &config).expect("extract");
+
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].title, "2027 Summer Intern, BS, Depot Automation");
+    assert_eq!(
+        jobs[0].location.as_deref(),
+        Some("San Francisco, California")
+    );
+    assert_eq!(jobs[0].department.as_deref(), Some("Systems Engineering"));
+    assert_eq!(jobs[0].employment_type.as_deref(), Some("Intern"));
+    assert_eq!(
+        jobs[0].raw_text,
+        "Waymo is an autonomous driving technology company."
+    );
+    assert_eq!(
+        jobs[0].source_url.as_str(),
+        "https://careers.example.com/jobs/2027-summer-intern-bs-depot-automation"
+    );
+}
+
 #[test]
 fn selectors_resolve_relative_urls_against_source() {
     let url = Url::parse("https://example.com/careers").unwrap();
