@@ -1,7 +1,7 @@
 # Phase 2.2: Acquisition Completeness — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.7), §12
-**Status:** In progress — Workstreams 1, 1b, 2, and 3 implemented (2026-11-02)
+**Status:** In progress — Workstreams 1, 1b, 2, 3, and 4 implemented (2026-11-02)
 **Last updated:** 2026-11-02
 **Duration:** 4–6 days (two workstreams deliver usable scraping; the rest is quality)
 **Depends on:** Phase 2 (acquisition) and Phase 2.1 (UI shell)
@@ -17,6 +17,7 @@
 | v0.3 | Workstream 1b implemented before WS2: per-host request pacing (400 ms minimum + up to 400 ms jitter) inside `core::acquisition::http`, so pagination, adapter paging, batch runs, and the detail fetches WS2 adds are all spaced without per-caller code. Env overrides and README documentation added. |
 | v0.4 | Workstream 2 implemented: `detail` config on `SelectorConfig`, JSON-LD-then-selector extraction, bounded and cancellable enrichment between list extraction and storage, 200 KB truncation, and `details_attempted`/`details_enriched` on `FetchOutcome` plus a one-line result message in the app. Live verification hit Waymo's WAF on the detail route (`202`/empty body), recorded as an operational limit rather than a code failure. |
 | v0.5 | Workstream 3 implemented: `smartrecruiters::normalize` emits a stable per-posting URL (`https://jobs.smartrecruiters.com/{slug}/{id}`) and department/employment type from the list item; the adapter exposes `detail_url`/`detail_from_body` so the router's existing bounded enrichment pass reads `jobAd.sections` from the posting API and `compose_description` skips empty sections. Live against Ubisoft2: 206 unique postings, 2 of 2 descriptions, longest 6,031 bytes. |
+| v0.6 | Workstream 4 implemented: **Test config** in the add/edit modal runs the draft URL and config through the router's real routing and extraction with no database handle, reporting page-1 counts, up to three titles with resolved URLs, and the first description length. Bounded to one list page and three detail requests regardless of the config; invalid JSON is classified as `InvalidRequest` instead of being silently ignored. |
 
 ---
 
@@ -423,6 +424,23 @@ they are not persisted — a storage concern for a later phase, not a parsing on
 | An invalid config or a bad URL shows the classified error | `egui_kittest` |
 | Preview performs one page and three details at most | Core test with a counting mock |
 | Preview never writes to the database | App test: row count unchanged |
+
+**Implementation note (2026-11-02).** `router::preview` takes no `SqlitePool`,
+so "never writes" is a property of the signature rather than a promise held by
+tests. It shares `decide_initial_route`, `fetch_static_jobs` (through
+`FetchSource`), `extract_from_html`, and `job_detail` with the real fetch; only
+the bounds differ. The pagination block is stripped for the list call, and the
+detail cap is 3 independently of `detail.max_jobs`.
+
+Two things are deliberately reported rather than hidden. A Tier 1a preview
+fetches the whole board, because the adapter owns pagination, so the panel says
+"the adapter paginates internally" instead of inventing a page count. And a
+`pagination` block with neither `next` nor `url_template` reports one page,
+matching `fetch_pages`, rather than its unused default of five.
+
+A preview result is tied to the inputs it was run with: editing the URL, render
+mode, or config clears the panel on the next frame. Without that, a saved
+config could be judged against a report for a different one.
 
 ---
 

@@ -7,8 +7,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use sqlx::SqlitePool;
+use url::Url;
 
 use super::health::PortalHealth;
+use crate::acquisition::error::FailureCause;
 use crate::acquisition::router::{self, FetchError, FetchOutcome, FetchSource};
 use crate::backend::BrowserBackend;
 use crate::error::{CoreError, Result};
@@ -57,6 +59,35 @@ pub async fn fetch_one(
         .await?
         .ok_or_else(|| CoreError::Internal("portal vanished during fetch"))?;
     Ok(FetchReport { portal, outcome })
+}
+
+/// Preview a draft portal configuration without writing anything.
+///
+/// This is the "Test config" button's core path. It takes no pool: a preview
+/// cannot store rows, and the URL is validated here so a typo is classified as
+/// `InvalidRequest` instead of surfacing as a transport failure.
+pub async fn preview_config(
+    url: &str,
+    company_name: &str,
+    render_mode: &str,
+    scraper_config: Option<&str>,
+    source: &dyn FetchSource,
+    browser: Option<&dyn BrowserBackend>,
+) -> std::result::Result<router::PreviewReport, FetchError> {
+    let parsed = Url::parse(url.trim()).map_err(|error| FetchError {
+        cause: FailureCause::InvalidRequest,
+        detail: format!("portal url is invalid: {error}"),
+    })?;
+
+    router::preview(
+        &parsed,
+        company_name,
+        render_mode,
+        scraper_config,
+        source,
+        browser,
+    )
+    .await
 }
 
 /// One portal's result within a batch.

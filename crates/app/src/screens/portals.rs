@@ -59,6 +59,21 @@ impl PortalsView {
             _ => {}
         }
     }
+
+    /// The add/edit form, whichever kind of modal is open.
+    pub fn form_mut(&mut self) -> Option<&mut PortalForm> {
+        match &mut self.modal {
+            Some(PortalModal::Add(form)) | Some(PortalModal::Edit { form, .. }) => Some(form),
+            _ => None,
+        }
+    }
+
+    pub fn form(&self) -> Option<&PortalForm> {
+        match &self.modal {
+            Some(PortalModal::Add(form)) | Some(PortalModal::Edit { form, .. }) => Some(form),
+            _ => None,
+        }
+    }
 }
 
 pub enum PortalModal {
@@ -108,6 +123,8 @@ pub struct PortalForm {
     /// boards and for pages that expose JSON-LD `JobPosting`.
     pub scraper_config: String,
     pub error: Option<String>,
+    /// The result of the last "Test config" run for this form.
+    pub preview: PreviewState,
 }
 
 impl Default for PortalForm {
@@ -118,6 +135,7 @@ impl Default for PortalForm {
             render_mode: RenderModeChoice::Static,
             scraper_config: String::new(),
             error: None,
+            preview: PreviewState::default(),
         }
     }
 }
@@ -130,6 +148,7 @@ impl PortalForm {
             render_mode: RenderModeChoice::from_str(&row.render_mode),
             scraper_config: row.scraper_config.clone().unwrap_or_default(),
             error: None,
+            preview: PreviewState::default(),
         }
     }
 
@@ -142,6 +161,18 @@ impl PortalForm {
     pub fn valid_scraper_config(&self) -> bool {
         let raw = self.scraper_config.trim();
         raw.is_empty() || serde_json::from_str::<serde_json::Value>(raw).is_ok()
+    }
+
+    /// The inputs a preview result belongs to.
+    ///
+    /// Compared before rendering so an edited form never shows a report for
+    /// the previous URL or config.
+    pub fn preview_inputs(&self) -> PreviewInputs {
+        PreviewInputs {
+            url: self.url.trim().to_string(),
+            render_mode: self.render_mode.as_str().to_string(),
+            scraper_config: self.scraper_config.trim().to_string(),
+        }
     }
 
     pub fn data(&self) -> PortalFormData {
@@ -171,6 +202,44 @@ pub struct PortalFormData {
     pub url: String,
     pub render_mode: String,
     pub scraper_config: Option<String>,
+}
+
+/// The form inputs a preview result describes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewInputs {
+    pub url: String,
+    pub render_mode: String,
+    pub scraper_config: String,
+}
+
+/// The last "Test config" run for the open form.
+#[derive(Debug, Clone, Default)]
+pub struct PreviewState {
+    pub busy: bool,
+    pub result: Option<ConfigPreview>,
+    pub error: Option<String>,
+    /// `None` until a run finishes; a mismatch with the current form clears the
+    /// result during rendering.
+    pub for_inputs: Option<PreviewInputs>,
+}
+
+/// A preview as the form renders it.
+#[derive(Debug, Clone)]
+pub struct ConfigPreview {
+    pub jobs_found: usize,
+    /// `0` means the board's adapter paginates internally, so the preview does
+    /// not report a page count.
+    pub pages_planned: usize,
+    pub tier: String,
+    pub sample: Vec<PreviewSample>,
+    pub first_description_bytes: Option<usize>,
+    pub details_attempted: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreviewSample {
+    pub title: String,
+    pub url: String,
 }
 
 #[derive(Default)]
@@ -223,6 +292,8 @@ pub enum PortalsAction {
         company: String,
         body: String,
     },
+    /// Fetch the draft URL + config without saving, and report what it finds.
+    TestConfig(PortalFormData),
     ShowInPipeline,
 }
 
@@ -577,6 +648,42 @@ fn portal_form_modal(
                 );
             }
 
+            // A report describes the inputs it was run with. Editing the URL,
+            // mode, or config invalidates it rather than showing a stale claim.
+            if !form.preview.busy
+                && form
+                    .preview
+                    .for_inputs
+                    .as_ref()
+                    .is_some_and(|inputs| *inputs != form.preview_inputs())
+            {
+                form.preview.result = None;
+                form.preview.error = None;
+                form.preview.for_inputs = None;
+            }
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let can_test =
+                    valid_http_url(&form.url) && form.valid_scraper_config() && !state.busy;
+                if ui
+                    .add_enabled(can_test, Button::new("Test config"))
+                    .clicked()
+                {
+                    *action = Some(PortalsAction::TestConfig(form.data()));
+                }
+                if form.preview.busy {
+                    LoadingSpinner::show(ui);
+                }
+            });
+
+            if let Some(error) = &form.preview.error {
+                ui.colored_label(Color32::from_rgb(0xc0, 0x39, 0x2b), error.as_str());
+            }
+            if let Some(preview) = &form.preview.result {
+                preview_panel(ui, preview);
+            }
+
             if let Some(error) = &form.error {
                 ui.colored_label(Color32::from_rgb(0xc0, 0x39, 0x2b), error.as_str());
             }
@@ -602,6 +709,58 @@ fn portal_form_modal(
                 }
             });
         });
+}
+
+/// Render the findings of a "Test config" run.
+///
+/// The wording keeps page 1 and the configured page count separate, because the
+/// preview only fetches the first page.
+fn preview_panel(ui: &mut Ui, preview: &ConfigPreview) {
+    ui.group(|ui| {
+        let summary = if preview.pages_planned == 0 {
+            format!(
+                "Found {} jobs on the board (the adapter paginates internally).",
+                preview.jobs_found
+            )
+        } else if preview.pages_planned > 1 {
+            format!(
+                "Found {} jobs on page 1; the saved config follows up to {} pages.",
+                preview.jobs_found, preview.pages_planned
+            )
+        } else {
+            format!("Found {} jobs on page 1.", preview.jobs_found)
+        };
+        ui.label(RichText::new(summary).strong());
+        ui.label(
+            RichText::new(format!("Tier: {}", preview.tier))
+                .weak()
+                .small(),
+        );
+
+        for sample in &preview.sample {
+            ui.label(format!("- {} - {}", sample.title, sample.url));
+        }
+
+        match (preview.details_attempted, preview.first_description_bytes) {
+            (0, _) => {
+                ui.label(
+                    RichText::new("No detail enrichment configured.")
+                        .weak()
+                        .small(),
+                );
+            }
+            (_, Some(bytes)) => {
+                ui.label(format!("First description: {bytes} bytes."));
+            }
+            (_, None) => {
+                ui.label(
+                    RichText::new("Details were fetched, but no description text was found.")
+                        .weak()
+                        .small(),
+                );
+            }
+        }
+    });
 }
 
 fn delete_modal(

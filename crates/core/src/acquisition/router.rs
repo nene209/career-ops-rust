@@ -520,3 +520,178 @@ async fn store_jobs(
     );
     Ok(count)
 }
+
+// ---------------------------------------------------------------------
+// Preview ("Test config")
+// ---------------------------------------------------------------------
+
+/// Titles a preview reports.
+pub const PREVIEW_SAMPLE_SIZE: usize = 3;
+
+/// Detail requests a preview may make, independent of `detail.max_jobs`.
+/// The config may ask for 40; a preview stops at three.
+pub const PREVIEW_MAX_DETAILS: usize = 3;
+
+/// One job as the preview shows it.
+#[derive(Debug, Clone)]
+pub struct PreviewJob {
+    pub title: String,
+    pub source_url: Url,
+}
+
+/// What a "Test config" run found.
+#[derive(Debug, Clone)]
+pub struct PreviewReport {
+    pub tier: FetchTier,
+    pub jobs_found: usize,
+    /// Pages the saved config would follow, including the first. `0` for an
+    /// ATS board, whose adapter paginates internally and is not previewed
+    /// page by page.
+    pub pages_planned: usize,
+    pub sample: Vec<PreviewJob>,
+    /// Length of the first description the preview could extract.
+    pub first_description_bytes: Option<usize>,
+    /// Detail requests actually made (at most `PREVIEW_MAX_DETAILS`).
+    pub details_attempted: usize,
+}
+
+/// Fetch a draft portal configuration without storing anything.
+///
+/// Deliberately shares the router's real decisions: the same tier routing, the
+/// same extraction, and the same detail helpers. The differences are bounds,
+/// not behaviour — one list page, three details, and no database write — which
+/// is what makes the preview trustworthy. It takes no pool, so it cannot write
+/// even by accident.
+pub async fn preview(
+    url: &Url,
+    company_name: &str,
+    render_mode: &str,
+    scraper_config: Option<&str>,
+    source: &dyn FetchSource,
+    browser: Option<&dyn BrowserBackend>,
+) -> std::result::Result<PreviewReport, FetchError> {
+    // Unlike a real fetch, an unparsable config is an error here: the whole
+    // point of the button is to tell the user that before they save it.
+    let config = match scraper_config.map(str::trim).filter(|raw| !raw.is_empty()) {
+        None => None,
+        Some(raw) => Some(
+            serde_json::from_str::<SelectorConfig>(raw).map_err(|error| FetchError {
+                cause: FailureCause::InvalidRequest,
+                detail: format!("scraper config is not valid JSON: {error}"),
+            })?,
+        ),
+    };
+
+    let adapters = ats::adapters();
+    let route = decide_initial_route(render_mode, url, &adapters);
+    let mut ats_source: Option<(&dyn AtsAdapter, String)> = None;
+
+    let (jobs, tier, pages_planned) = match route {
+        InitialRoute::Tier2 => {
+            let Some(backend) = browser else {
+                return Err(FetchError {
+                    cause: FailureCause::JsRequired,
+                    detail: "browser mode needs the rendering backend, which is not available"
+                        .into(),
+                });
+            };
+            let page = backend
+                .fetch_rendered(url, RenderOpts::default())
+                .await
+                .map_err(|error| FetchError::internal(format!("tier 2 fetch failed: {error}")))?;
+            let jobs = html::extract_from_html(&page.html, url, company_name, config.as_ref())
+                .map_err(|error| FetchError::from_ats(error, "Tier 2"))?;
+            (jobs, FetchTier::Tier2Obscura, 1)
+        }
+        InitialRoute::Tier1a { adapter_name, slug } => {
+            let adapter: &dyn AtsAdapter = adapters
+                .iter()
+                .find(|candidate| candidate.name() == adapter_name)
+                .map(|candidate| candidate.as_ref())
+                .expect("adapter registry is stable");
+            let jobs = source
+                .fetch_ats(adapter, &slug, company_name)
+                .await
+                .map_err(|error| FetchError::from_ats(error, "Tier 1a"))?;
+            ats_source = Some((adapter, slug));
+            (jobs, FetchTier::Tier1aAts, 0)
+        }
+        InitialRoute::Tier1b => {
+            // One page, whatever `pagination.max_pages` says. The real fetch
+            // still follows the config; the preview reports how many pages it
+            // would follow without fetching them.
+            let single_page = config.as_ref().map(|config| SelectorConfig {
+                pagination: None,
+                ..config.clone()
+            });
+            let jobs = source
+                .fetch_html(url, company_name, single_page.as_ref())
+                .await
+                .map_err(|error| FetchError::from_ats(error, "Tier 1b"))?;
+            let pages = config
+                .as_ref()
+                .and_then(|config| config.pagination.as_ref())
+                .map(|pagination| {
+                    // A block with no mechanism fetches one page, exactly as
+                    // `fetch_pages` does; reporting its default limit would lie.
+                    if pagination.next.is_none() && pagination.url_template.is_none() {
+                        1
+                    } else {
+                        pagination.page_limit()
+                    }
+                })
+                .unwrap_or(1);
+            (jobs, FetchTier::Tier1bHtml, pages)
+        }
+    };
+
+    let sample = jobs
+        .iter()
+        .take(PREVIEW_SAMPLE_SIZE)
+        .map(|job| PreviewJob {
+            title: job.title.clone(),
+            source_url: job.source_url.clone(),
+        })
+        .collect();
+
+    let enrichment = ats_source.is_some()
+        || config
+            .as_ref()
+            .is_some_and(|config| config.detail.is_some());
+    let mut first_description_bytes = None;
+    let mut details_attempted = 0;
+
+    if enrichment {
+        let preview_detail = DetailConfig {
+            fields: config
+                .as_ref()
+                .and_then(|config| config.detail.as_ref())
+                .and_then(|detail| detail.fields.clone()),
+            max_jobs: Some(PREVIEW_MAX_DETAILS),
+        };
+        let ats = ats_source
+            .as_ref()
+            .map(|(adapter, slug)| (*adapter, slug.as_str()));
+
+        // Stop at the first description: the report needs one length, and each
+        // request is real network traffic.
+        for job in jobs.iter().take(PREVIEW_MAX_DETAILS) {
+            details_attempted += 1;
+            if let Some(found) = job_detail(source, ats, job, &preview_detail).await {
+                if !found.text.trim().is_empty() {
+                    first_description_bytes = Some(found.text.len());
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(PreviewReport {
+        tier,
+        jobs_found: jobs.len(),
+        pages_planned,
+        sample,
+        first_description_bytes,
+        details_attempted,
+    })
+}

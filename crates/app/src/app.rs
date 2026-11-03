@@ -32,9 +32,12 @@ use std::sync::Arc;
 
 use career_ops_core::acquisition::http;
 use career_ops_core::acquisition::manual;
-use career_ops_core::acquisition::router::{FetchOutcome, FetchSource, HttpFetchSource};
+use career_ops_core::acquisition::router::{
+    FetchError, FetchOutcome, FetchSource, HttpFetchSource, PreviewReport,
+};
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
 use career_ops_core::model::{ApplicationStatus, FetchTier, JobDescription};
+use career_ops_core::portals::health::suggested_action;
 use career_ops_core::portals::service::{self, BatchEntry, BatchReport, PortalWithHealth};
 use career_ops_core::repo::applications as application_repo;
 use career_ops_core::repo::job_descriptions as job_repo;
@@ -49,8 +52,8 @@ use crate::screens;
 use crate::screens::lock::{LockAction, LockView, RESET_PHRASE};
 use crate::screens::pipeline::{PipelineAction, PipelineRenderState, PipelineView};
 use crate::screens::portals::{
-    ManualSuccess, PortalForm, PortalFormData, PortalModal, PortalsAction, PortalsRenderState,
-    PortalsView,
+    ConfigPreview, ManualSuccess, PortalForm, PortalFormData, PortalModal, PortalsAction,
+    PortalsRenderState, PortalsView, PreviewInputs, PreviewSample,
 };
 use crate::state::{AppState, Screen};
 use crate::view_models::pipeline::PipelineViewModel;
@@ -85,6 +88,12 @@ enum PortalsTask {
     Fetch(AsyncTask<CoreResult<service::FetchReport>>),
     Batch(AsyncTask<CoreResult<BatchReport>>),
     Manual(AsyncTask<CoreResult<ManualOutcome>>),
+    Preview {
+        task: AsyncTask<std::result::Result<PreviewReport, FetchError>>,
+        /// The form inputs this run describes; the view compares them so an
+        /// edited form cannot show a stale report.
+        inputs: PreviewInputs,
+    },
 }
 
 enum PortalsPoll {
@@ -92,6 +101,10 @@ enum PortalsPoll {
     Fetch(CoreResult<service::FetchReport>),
     Batch(CoreResult<BatchReport>),
     Manual(CoreResult<ManualOutcome>),
+    Preview(
+        std::result::Result<PreviewReport, FetchError>,
+        PreviewInputs,
+    ),
     Cancelled,
 }
 
@@ -317,6 +330,7 @@ impl CareerOpsApp {
                 company,
                 body,
             } => self.start_manual_text(title, company, body),
+            PortalsAction::TestConfig(data) => self.start_config_preview(data),
             PortalsAction::ShowInPipeline => {
                 self.portals_view.modal = None;
                 self.navigation.navigate_to(MainScreen::Pipeline);
@@ -714,6 +728,42 @@ impl CareerOpsApp {
         self.portals_task = Some(PortalsTask::Manual(task));
     }
 
+    fn start_config_preview(&mut self, data: PortalFormData) {
+        if !self.begin_portals_task() {
+            return;
+        }
+
+        let inputs = PreviewInputs {
+            url: data.url.trim().to_string(),
+            render_mode: data.render_mode.clone(),
+            scraper_config: data.scraper_config.clone().unwrap_or_default(),
+        };
+
+        if let Some(form) = self.portals_view.form_mut() {
+            form.preview.busy = true;
+            form.preview.result = None;
+            form.preview.error = None;
+            form.preview.for_inputs = None;
+        }
+
+        let source = Arc::clone(&self.fetch_source);
+        let browser = Arc::clone(&self.browser);
+        let company_name = data.company_name.clone();
+        let task = self.spawn(async move {
+            service::preview_config(
+                &data.url,
+                &company_name,
+                &data.render_mode,
+                data.scraper_config.as_deref(),
+                source.as_ref(),
+                Some(browser.as_ref()),
+            )
+            .await
+        });
+
+        self.portals_task = Some(PortalsTask::Preview { task, inputs });
+    }
+
     fn start_manual_text(&mut self, title: String, company: String, body: String) {
         if !self.begin_portals_task() {
             return;
@@ -794,6 +844,20 @@ impl CareerOpsApp {
                 TaskPoll::Ready(result) => {
                     finished = true;
                     Some(PortalsPoll::Manual(result))
+                }
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    None
+                }
+                TaskPoll::Cancelled => {
+                    finished = true;
+                    Some(PortalsPoll::Cancelled)
+                }
+            },
+            PortalsTask::Preview { task, inputs } => match task.try_recv() {
+                TaskPoll::Ready(result) => {
+                    finished = true;
+                    Some(PortalsPoll::Preview(result, inputs.clone()))
                 }
                 TaskPoll::Pending => {
                     ctx.request_repaint_after(std::time::Duration::from_millis(50));
@@ -933,8 +997,27 @@ impl CareerOpsApp {
                     }
                 }
             },
+            PortalsPoll::Preview(result, inputs) => {
+                if let Some(form) = self.portals_view.form_mut() {
+                    form.preview.busy = false;
+                    form.preview.for_inputs = Some(inputs);
+                    match result {
+                        Ok(report) => {
+                            form.preview.error = None;
+                            form.preview.result = Some(config_preview(report));
+                        }
+                        Err(error) => {
+                            form.preview.result = None;
+                            form.preview.error = Some(preview_error_message(&error));
+                        }
+                    }
+                }
+            }
             PortalsPoll::Cancelled => {
                 self.fetching_portal = None;
+                if let Some(form) = self.portals_view.form_mut() {
+                    form.preview.busy = false;
+                }
                 if let Some(batch) = &mut self.portals.batch {
                     batch.in_flight = None;
                     batch.cancelled = true;
@@ -1128,6 +1211,33 @@ fn count_with_noun(count: usize, noun: &str) -> String {
     } else {
         format!("{count} {noun}s")
     }
+}
+
+/// Convert a core preview report into the form's render shape.
+fn config_preview(report: PreviewReport) -> ConfigPreview {
+    ConfigPreview {
+        jobs_found: report.jobs_found,
+        pages_planned: report.pages_planned,
+        tier: report.tier.as_str().to_string(),
+        sample: report
+            .sample
+            .into_iter()
+            .map(|job| PreviewSample {
+                title: job.title,
+                url: job.source_url.to_string(),
+            })
+            .collect(),
+        first_description_bytes: report.first_description_bytes,
+        details_attempted: report.details_attempted,
+    }
+}
+
+/// The form's error line for a failed preview.
+///
+/// The detail says what broke; the suggested action is the same text the
+/// Portals list shows for a failed portal, so the two never disagree.
+fn preview_error_message(error: &FetchError) -> String {
+    format!("{} {}", error.detail, suggested_action(error.cause))
 }
 
 impl eframe::App for CareerOpsApp {
@@ -2024,6 +2134,115 @@ mod tests {
             app.pipeline.rows[0].raw_text,
             "Full description from the detail page."
         );
+    }
+
+    /// "Test config" through the app: one list page, at most three details,
+    /// and nothing written to the database. The second half asserts that an
+    /// unparsable config is reported as a classified error instead of silently
+    /// previewing without it.
+    #[test]
+    fn config_preview_reports_and_never_writes() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::default());
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source.clone());
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        let config = r#"{
+          "list": "article.job",
+          "fields": { "title": "h2" },
+          "pagination": { "next": "a[rel=next]", "max_pages": 5 },
+          "detail": { "fields": { "description": ".job-description" }, "max_jobs": 40 }
+        }"#;
+
+        app.handle_portals_action(PortalsAction::OpenAdd);
+        app.handle_portals_action(PortalsAction::TestConfig(PortalFormData {
+            company_name: "Acme".into(),
+            url: "https://example.com/careers".into(),
+            render_mode: "static".into(),
+            scraper_config: Some(config.into()),
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals_view
+                .form()
+                .is_some_and(|form| !form.preview.busy && form.preview.result.is_some())
+        });
+
+        let form = app.portals_view.form().expect("the add form is open");
+        let preview = form.preview.result.as_ref().expect("preview result");
+        assert_eq!(preview.jobs_found, 1);
+        assert_eq!(preview.pages_planned, 5, "reported, not fetched");
+        assert_eq!(preview.sample.len(), 1);
+        assert_eq!(preview.sample[0].url, "https://example.com/careers");
+        assert_eq!(
+            preview.first_description_bytes,
+            Some("Full description from the detail page.".len())
+        );
+        assert_eq!(source.calls().len(), 1, "one list page");
+        assert_eq!(source.page_calls().len(), 1, "one detail request");
+
+        let pool = app.pool().expect("pool");
+        let stored = app
+            .runtime()
+            .block_on(job_repo::list_recent(&pool, 10))
+            .expect("list jobs");
+        assert!(
+            stored.is_empty(),
+            "a preview must not write to the database"
+        );
+
+        // Invalid JSON: the preview must classify it, not silently drop it the
+        // way a real fetch does.
+        app.handle_portals_action(PortalsAction::TestConfig(PortalFormData {
+            company_name: "Acme".into(),
+            url: "https://example.com/careers".into(),
+            render_mode: "static".into(),
+            scraper_config: Some(r#"{"list": 5}"#.into()),
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals_view
+                .form()
+                .is_some_and(|form| !form.preview.busy && form.preview.error.is_some())
+        });
+
+        let form = app.portals_view.form().expect("the add form is open");
+        let error = form.preview.error.as_deref().expect("preview error");
+        assert!(
+            error.contains("scraper config is not valid JSON"),
+            "{error}"
+        );
+        assert!(
+            error.contains("The portal configuration is invalid"),
+            "the classified action must match the Portals list: {error}"
+        );
+        assert!(form.preview.result.is_none());
     }
 
     /// Boards verified against this code on 2026-10-25, one per supported ATS.

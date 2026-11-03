@@ -11,9 +11,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use career_ops_core::acquisition::ats;
-use career_ops_core::acquisition::error::AtsError;
+use career_ops_core::acquisition::error::{AtsError, FailureCause};
 use career_ops_core::acquisition::router::{
-    decide_initial_route, fetch_portal, fetch_portal_cancellable, InitialRoute,
+    decide_initial_route, fetch_portal, fetch_portal_cancellable, preview, InitialRoute,
 };
 use career_ops_core::backend::{MockBrowserBackend, RenderedPage};
 use career_ops_core::model::FetchTier;
@@ -719,4 +719,191 @@ async fn the_detail_cap_bounds_smartrecruiters_requests() {
     assert_eq!(source.page_calls().len(), 2, "the cap bounds requests");
 
     db.close().await;
+}
+
+// -----------------------------------------------------------------
+// Preview ("Test config")
+// -----------------------------------------------------------------
+
+fn preview_config(max_pages: usize) -> String {
+    serde_json::json!({
+        "list": "article.job",
+        "fields": { "title": "h2 a" },
+        "pagination": { "next": "a[rel=next]", "max_pages": max_pages },
+        "detail": {
+            "fields": { "description": ".job-description" },
+            "max_jobs": 40
+        }
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn preview_reports_page_one_counts_and_samples() {
+    let url = Url::parse("https://example.com/careers").expect("url");
+    let source = MockFetchSource::with_html(Ok(vec![
+        sample_job("a"),
+        sample_job("b"),
+        sample_job("c"),
+        sample_job("d"),
+    ]))
+    .pages([Ok(detail_html("Full description."))]);
+
+    let report = preview(
+        &url,
+        "Acme",
+        "static",
+        Some(&preview_config(5)),
+        &source,
+        None,
+    )
+    .await
+    .expect("preview");
+
+    assert_eq!(report.tier, FetchTier::Tier1bHtml);
+    assert_eq!(report.jobs_found, 4);
+    assert_eq!(report.pages_planned, 5, "reported, not fetched");
+    assert_eq!(report.sample.len(), 3, "three titles at most");
+    assert_eq!(report.sample[0].title, "a");
+    assert_eq!(
+        report.first_description_bytes,
+        Some("Full description.".len())
+    );
+    assert_eq!(
+        report.details_attempted, 1,
+        "stops at the first description"
+    );
+    assert_eq!(
+        source.html_calls(),
+        vec![url.to_string()],
+        "one list page regardless of max_pages"
+    );
+    assert_eq!(source.page_calls().len(), 1);
+}
+
+#[tokio::test]
+async fn preview_makes_at_most_three_detail_requests() {
+    let url = Url::parse("https://example.com/careers").expect("url");
+    let source = MockFetchSource::with_html(Ok(vec![
+        sample_job("a"),
+        sample_job("b"),
+        sample_job("c"),
+        sample_job("d"),
+        sample_job("e"),
+    ]))
+    .pages([
+        Err(AtsError::Timeout("slow".into())),
+        Err(AtsError::Timeout("slow".into())),
+        Err(AtsError::Timeout("slow".into())),
+        Err(AtsError::Timeout("slow".into())),
+    ]);
+
+    let report = preview(
+        &url,
+        "Acme",
+        "static",
+        Some(&preview_config(1)),
+        &source,
+        None,
+    )
+    .await
+    .expect("preview");
+
+    assert_eq!(report.jobs_found, 5);
+    assert_eq!(report.details_attempted, 3, "the preview cap wins");
+    assert_eq!(source.page_calls().len(), 3);
+    assert!(report.first_description_bytes.is_none());
+}
+
+#[tokio::test]
+async fn preview_reports_one_page_when_pagination_has_no_mechanism() {
+    let url = Url::parse("https://example.com/careers").expect("url");
+    let config = serde_json::json!({
+        "list": "article.job",
+        "fields": { "title": "h2 a" },
+        "pagination": { "max_pages": 10 }
+    })
+    .to_string();
+    let source = MockFetchSource::with_html(Ok(vec![sample_job("a")]));
+
+    let report = preview(&url, "Acme", "static", Some(&config), &source, None)
+        .await
+        .expect("preview");
+
+    assert_eq!(
+        report.pages_planned, 1,
+        "no next link and no template means a single page, whatever max_pages says"
+    );
+}
+
+#[tokio::test]
+async fn preview_without_a_detail_config_fetches_no_details() {
+    let url = Url::parse("https://example.com/careers").expect("url");
+    let config =
+        serde_json::json!({ "list": "article.job", "fields": { "title": "h2 a" } }).to_string();
+    let source = MockFetchSource::with_html(Ok(vec![sample_job("a")]));
+
+    let report = preview(&url, "Acme", "static", Some(&config), &source, None)
+        .await
+        .expect("preview");
+
+    assert_eq!(report.details_attempted, 0);
+    assert!(source.page_calls().is_empty());
+}
+
+#[tokio::test]
+async fn preview_rejects_an_invalid_config_before_fetching() {
+    let url = Url::parse("https://example.com/careers").expect("url");
+    let source = MockFetchSource::with_html(Ok(vec![sample_job("a")]));
+
+    let error = preview(
+        &url,
+        "Acme",
+        "static",
+        Some(r#"{"list": 5}"#),
+        &source,
+        None,
+    )
+    .await
+    .expect_err("invalid config");
+
+    assert_eq!(error.cause, FailureCause::InvalidRequest);
+    assert!(error.detail.contains("not valid JSON"), "{}", error.detail);
+    assert!(
+        source.html_calls().is_empty(),
+        "no request for a bad config"
+    );
+}
+
+#[tokio::test]
+async fn preview_an_ats_board_uses_the_adapter_and_its_detail_endpoint() {
+    let url = Url::parse("https://jobs.smartrecruiters.com/Ubisoft2").expect("url");
+    let config = serde_json::json!({ "detail": { "max_jobs": 40 } }).to_string();
+    let source = MockFetchSource::with_ats(Ok(vec![smartrecruiters_job(
+        "Technical Art Director",
+        "744000159231819",
+    )]))
+    .pages([Ok(SMART_DETAIL.to_string())]);
+
+    let report = preview(&url, "Ubisoft", "static", Some(&config), &source, None)
+        .await
+        .expect("preview");
+
+    assert_eq!(report.tier, FetchTier::Tier1aAts);
+    assert_eq!(report.jobs_found, 1);
+    assert_eq!(report.pages_planned, 0, "the adapter owns pagination");
+    assert_eq!(
+        source.ats_calls(),
+        vec![("smartrecruiters".to_string(), "Ubisoft2".to_string())]
+    );
+    assert_eq!(
+        source.page_calls(),
+        vec![
+            "https://api.smartrecruiters.com/v1/companies/Ubisoft2/postings/744000159231819"
+                .to_string()
+        ]
+    );
+    assert!(report
+        .first_description_bytes
+        .is_some_and(|bytes| bytes > 0));
 }

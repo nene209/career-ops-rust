@@ -5,8 +5,9 @@
 //! controls, gates, and action intents.
 
 use career_ops_app::screens::portals::{
-    self, ManualEntryView, ManualTab, PortalForm, PortalModal, PortalsAction, PortalsRenderState,
-    PortalsView, RenderModeChoice,
+    self, ConfigPreview, ManualEntryView, ManualTab, PortalForm, PortalFormData, PortalModal,
+    PortalsAction, PortalsRenderState, PortalsView, PreviewInputs, PreviewSample, PreviewState,
+    RenderModeChoice,
 };
 use career_ops_app::view_models::portals::{
     BatchProgress, HealthBadge, PortalRow, PortalsViewModel, SidecarStatus,
@@ -146,6 +147,7 @@ fn add_form_requires_a_valid_http_url() {
             render_mode: RenderModeChoice::Static,
             scraper_config: String::new(),
             error: None,
+            ..Default::default()
         })),
     };
 
@@ -162,6 +164,7 @@ fn add_form_requires_a_valid_http_url() {
         render_mode: RenderModeChoice::Static,
         scraper_config: String::new(),
         error: None,
+        ..Default::default()
     }));
     harness.run();
 
@@ -179,6 +182,7 @@ fn scraper_config_is_optional_and_validated_as_json() {
             render_mode: RenderModeChoice::Static,
             scraper_config: "not json".into(),
             error: None,
+            ..Default::default()
         })),
     };
 
@@ -198,6 +202,7 @@ fn scraper_config_is_optional_and_validated_as_json() {
         render_mode: RenderModeChoice::Static,
         scraper_config: r#"{"list":"article.job"}"#.into(),
         error: None,
+        ..Default::default()
     }));
     harness.run();
 
@@ -207,6 +212,175 @@ fn scraper_config_is_optional_and_validated_as_json() {
             .is_none(),
         "valid JSON must clear the hint"
     );
+}
+
+#[test]
+fn test_config_renders_counts_titles_and_description_length() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            scraper_config: r#"{"list":"article.job","fields":{"title":"h2"}}"#.into(),
+            preview: PreviewState {
+                busy: false,
+                result: Some(ConfigPreview {
+                    jobs_found: 3,
+                    pages_planned: 5,
+                    tier: "tier1b:html".into(),
+                    sample: vec![
+                        PreviewSample {
+                            title: "Engineer".into(),
+                            url: "https://example.com/jobs/1".into(),
+                        },
+                        PreviewSample {
+                            title: "Designer".into(),
+                            url: "https://example.com/jobs/2".into(),
+                        },
+                    ],
+                    first_description_bytes: Some(2048),
+                    details_attempted: 1,
+                }),
+                error: None,
+                for_inputs: None,
+            },
+            ..Default::default()
+        })),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let _summary =
+        harness.get_by_label("Found 3 jobs on page 1; the saved config follows up to 5 pages.");
+    let _tier = harness.get_by_label("Tier: tier1b:html");
+    let _first = harness.get_by_label("- Engineer - https://example.com/jobs/1");
+    let _description = harness.get_by_label("First description: 2048 bytes.");
+}
+
+#[test]
+fn test_config_report_is_cleared_when_the_inputs_change() {
+    let view_model = PortalsViewModel::default();
+    let form = PortalForm {
+        company_name: "Acme".into(),
+        url: "https://example.com/jobs".into(),
+        preview: PreviewState {
+            busy: false,
+            result: Some(ConfigPreview {
+                jobs_found: 2,
+                pages_planned: 1,
+                tier: "tier1b:html".into(),
+                sample: Vec::new(),
+                first_description_bytes: None,
+                details_attempted: 0,
+            }),
+            error: None,
+            for_inputs: Some(PreviewInputs {
+                url: "https://example.com/jobs".into(),
+                render_mode: "static".into(),
+                scraper_config: String::new(),
+            }),
+        },
+        ..Default::default()
+    };
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(form)),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+    let _summary = harness.get_by_label("Found 2 jobs on page 1.");
+
+    harness.state_mut().view.form_mut().expect("form").url = "https://example.com/other".into();
+    harness.run();
+
+    assert!(
+        harness.query_by_label("Found 2 jobs on page 1.").is_none(),
+        "a report about the old URL must not survive an edit"
+    );
+}
+
+#[test]
+fn test_config_renders_a_classified_error() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            preview: PreviewState {
+                busy: false,
+                result: None,
+                error: Some(
+                    "Tier 1b: js_required The page structure may have changed. Check the portal \
+                     URL, or configure scraper selectors."
+                        .into(),
+                ),
+                for_inputs: None,
+            },
+            ..Default::default()
+        })),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let _error = harness.get_by_label(
+        "Tier 1b: js_required The page structure may have changed. Check the portal \
+         URL, or configure scraper selectors.",
+    );
+}
+
+#[test]
+fn test_config_button_is_gated_and_emits_the_action() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            ..Default::default()
+        })),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let button = harness.get_by_role_and_label(Role::Button, "Test config");
+    assert!(!button.accesskit_node().is_disabled());
+
+    harness
+        .state_mut()
+        .view
+        .form_mut()
+        .expect("form")
+        .scraper_config = "not json".into();
+    harness.run();
+    let button = harness.get_by_role_and_label(Role::Button, "Test config");
+    assert!(
+        button.accesskit_node().is_disabled(),
+        "invalid JSON must not be sent to the network"
+    );
+
+    harness
+        .state_mut()
+        .view
+        .form_mut()
+        .expect("form")
+        .scraper_config = r#"{"list":"article.job"}"#.into();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Test config")
+        .click();
+    harness.run();
+
+    assert!(harness
+        .state()
+        .actions
+        .contains(&PortalsAction::TestConfig(PortalFormData {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            render_mode: "static".into(),
+            scraper_config: Some(r#"{"list":"article.job"}"#.into()),
+        })));
 }
 
 #[test]
