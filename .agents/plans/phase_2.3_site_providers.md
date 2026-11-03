@@ -2,7 +2,7 @@
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.8), §12
 **Status:** Draft — not started
-**Last updated:** 2026-10-25
+**Last updated:** 2026-11-03
 **Duration:** 4–6 days
 **Depends on:** Phase 2.2 (pagination and detail enrichment freeze the selector-config schema)
 
@@ -13,6 +13,7 @@
 | Version | Change |
 | :--- | :--- |
 | v0.1 | Initial plan. Written after probing `https://jobs.nvidia.com/careers`, which is an Eightfold site: its content is served by two JSON endpoints and it cannot be fetched by either extraction tier today, with or without a selector config. That turned "a list of known configs" into "known sites with providers", because the second site the user wants is not a config at all. |
+| v0.2 | Provider scope clarified after review: a **provider is an engine** (`selectors`, `eightfold`), while a **known site is an embedded profile** that names an engine and carries its payload. Waymo is therefore a first-class known site backed by the selectors engine, not a new provider variant; NVIDIA is the same structure backed by Eightfold. The registry moves from a JSON file to typed `KnownSite` constants in `known_sites.rs`, so both sites share one validation, prefill, fixture, live-test, and documentation path. |
 
 ---
 
@@ -26,6 +27,11 @@ different questions:
 2. **What about sites that are not HTML at all?** A growing number of career
    sites are a shell around a JSON API. A selector config cannot help them, at
    either tier, because there is no job markup to select.
+
+The plan separates **providers** (fetch-and-parse engines) from **known sites**
+(embedded profiles that name an engine). That difference is what keeps a growing
+registry from turning into a growing codebase, and it is the structure every new
+site and engine follows.
 
 ### Evidence: NVIDIA
 
@@ -53,8 +59,9 @@ many employers.
 1. A **provider** concept inside the existing `scraper_config` JSON: `selectors`
    (default, the Phase 2.2 behaviour) or `eightfold`.
 2. An **Eightfold provider**: list, pagination, and per-posting description.
-3. A **known-site registry**: embedded data keyed by host, with a name, a
-   provider, the config, a verification date, and notes.
+3. A **known-site registry**: embedded, typed `KnownSite` constants keyed by
+   host, each with a name, a provider, the config, a verification date, and
+   notes.
 4. **Lookup and prefill** in the portal form, with the user's edits always
    winning.
 5. A **curation rule**: a site enters the registry only after a live
@@ -77,6 +84,38 @@ many employers.
 
 ## Design decisions
 
+### A provider is an engine; a known site is a profile
+
+These are two concepts and the plan keeps them separate:
+
+- **Provider** — the fetch-and-parse engine. `selectors` (HTML + CSS, the Phase
+  2.2 engine) and `eightfold` (JSON API) are the two this phase knows. A provider
+  knows nothing about a specific company.
+- **Known site** — an embedded profile for one careers site. It names a provider
+  and carries the payload that provider needs (a selector config, or an Eightfold
+  domain), plus the verification date and notes.
+
+Waymo is a known site whose provider is `selectors`; NVIDIA is a known site whose
+provider is `eightfold`. Both are first-class: typed constant, embedded payload,
+fixture test, live test, docs row.
+
+**Waymo does not get `provider: "waymo"`.** There is no Waymo-specific fetch or
+parse step — it is the selector engine plus a config. A provider variant per
+company would grow the enum with every site, encourage a copy of the selector
+engine per company, and make the engine boundary meaningless (P2.3-R5). The
+question to ask before adding a provider is "does this need code that the
+existing engines cannot express?", not "is this a new company?".
+
+### Adding a site or a provider
+
+One checklist, two entry points:
+
+1. **An existing engine can fetch it** (Waymo). Add a `KnownSite` constant with
+   the embedded config, a fixture for its payload, a live test, and a docs row.
+2. **No engine can** (NVIDIA). Add a provider module (endpoints, parsing,
+   fixtures), then the `KnownSite` constant. The provider is reusable across
+   every site that runs on it; the site constant is not code.
+
 ### The provider lives inside `scraper_config`
 
 No migration. `portals.scraper_config` is already JSON, the router already
@@ -94,24 +133,65 @@ keeps working:
 A `provider` column would be cleaner SQL and a worse migration for a value that
 is meaningless without the JSON beside it.
 
-### Registry entries are minimal and verifiable
+### Registry entries are typed Rust
 
-```json
-{
-  "host": "careers.withwaymo.com",
-  "name": "Waymo",
-  "provider": "selectors",
-  "path_prefix": "/jobs/search",
-  "verified_at": "2026-10-25",
-  "config": { "list": "article.job-search-results-card-col", "fields": { "title": "h3.job-search-results-card-title a" }, "pagination": { "url_template": "https://careers.withwaymo.com/jobs/search?page={page}", "max_pages": 5 }, "detail": { "fields": { "description": ".job-description" } } }
+`crates/core/src/acquisition/known_sites.rs` holds typed constants rather than a
+JSON file. One code address per site, an exhaustive provider enum, and no
+separate data file that can drift from the enum:
+
+```rust
+pub struct KnownSite {
+    pub host: &'static str,
+    /// Optional path prefix when one host serves several boards.
+    pub path_prefix: Option<&'static str>,
+    pub name: &'static str,
+    pub provider: Provider,
+    /// The full `scraper_config` offered to the user, `provider` included.
+    pub config: &'static str,
+    /// ISO date of the last passing live run. `None` until one passes.
+    pub verified_at: Option<&'static str>,
+    pub notes: &'static str,
+}
+
+pub const WAYMO: KnownSite = KnownSite {
+    host: "careers.withwaymo.com",
+    path_prefix: Some("/jobs/search"),
+    name: "Waymo",
+    provider: Provider::Selectors,
+    config: WAYMO_CONFIG,
+    verified_at: Some("2026-11-03"),
+    notes: "AWS WAF intermittently answers 202 with an empty body; the live test probes and skips.",
+};
+
+pub const NVIDIA: KnownSite = KnownSite {
+    host: "jobs.nvidia.com",
+    path_prefix: Some("/careers"),
+    name: "NVIDIA",
+    provider: Provider::Eightfold,
+    config: r#"{"provider":"eightfold","domain":"nvidia.com"}"#,
+    verified_at: None, // set by the WS4 live run
+    notes: "Client-rendered Eightfold site; content comes from /api/pcsx/*.",
+};
+
+pub fn all() -> &'static [KnownSite] {
+    &[WAYMO, NVIDIA]
 }
 ```
 
 - Keyed by `host`, with an optional `path_prefix` so a host can serve several
   boards (`shopify.com/careers` vs `shopify.com/university`) without a wildcard
   language.
-- `verified_at` is the date the live test last passed, not the date it was
-  written. An entry without a passing live test does not ship.
+- `WAYMO_CONFIG` is the Phase 2.2 selector config embedded as a JSON string with
+  `"provider":"selectors"`. It stays a string so the form can prefill exactly
+  the text the user may edit, and so the config has one representation.
+- `verified_at` is `Some` only after a passing live run, never the date the entry
+  was written. The registry test validates the date format when present; WS4's
+  exit check requires both shipped entries to be `Some`.
+- The `config` string is the single source of truth. A test parses every entry
+  and asserts that the `provider` inside the JSON matches the typed field, so
+  the two cannot disagree.
+- A site with no engine yet (NVIDIA before WS2) stays in the file with
+  `verified_at: None`; it can be previewed but not presented as verified.
 
 ---
 
@@ -122,14 +202,17 @@ is meaningless without the JSON beside it.
 
 ### Deliverables
 
-1. `Provider` enum in `core::acquisition::html` (or a new
-   `core::acquisition::config` module): `Selectors` (default) and `Eightfold`,
-   deserialised from `scraper_config.provider`.
+1. `Provider` enum in a new `core::acquisition::config` module (shared by the
+   config parser, the router, and the registry): `Selectors` (default) and
+   `Eightfold`, deserialised from `scraper_config.provider`.
 2. The router dispatches on the provider instead of assuming selectors. The
    existing `SelectorConfig` becomes the `Selectors` payload unchanged, so Phase
    2.2's tests keep passing without edits.
 3. An unknown `provider` value is a classified config error, surfaced to the
    user the same way an invalid URL is: fix the config, don't retry.
+4. `Selectors` is site-agnostic: Waymo is `Provider::Selectors` with an embedded
+   config, not a provider variant of its own. `Provider::Eightfold` exists
+   because its fetch and parse shape is different, not because its company is.
 
 ### Acceptance criteria
 
@@ -139,6 +222,7 @@ is meaningless without the JSON beside it.
 | `provider: "eightfold"` reaches the Eightfold path | Router unit test |
 | Unknown provider is a clear config error | Unit test on deserialisation |
 | `provider` survives add → edit → fetch | App integration test |
+| Waymo's registry entry dispatches to `Selectors` | Registry/dispatch test |
 
 ---
 
@@ -199,30 +283,35 @@ is meaningless without the JSON beside it.
 
 ### Deliverables
 
-1. `crates/core/src/acquisition/known_sites.json` embedded with `include_str!`,
-   deserialised once at startup, with a lookup by host + optional path prefix.
-   Embedded rather than seeded into the database: it is app content, not user
-   data, and a bad entry must be fixable by a release, not by a migration.
-2. Lookup in the portal form: typing a URL that matches an entry shows
-   "Known site: NVIDIA (Eightfold) — verified 2026-10-25" and, **only when the
-   provider/config fields are empty**, prefills them. A "Use known config"
-   button appears when the fields differ from the entry; the user's edits are
-   never overwritten automatically.
+1. `crates/core/src/acquisition/known_sites.rs` with typed `KnownSite`
+   constants and `all()`, embedded in the binary (not seeded into the database):
+   it is app content, not user data, and a bad entry must be fixable by a
+   release, not by a migration. The `Provider` enum comes from
+   `core::acquisition::config` (WS1).
+2. Lookup by host + optional path prefix, and prefill in the portal form: typing
+   a URL that matches an entry shows "Known site: NVIDIA (Eightfold) — verified
+   <date>" and, **only when the provider/config fields are empty**, prefills
+   them. A "Use known config" button appears when the fields differ from the
+   entry; the user's edits are never overwritten automatically.
 3. A provider selector in the form (Selectors / Eightfold) for sites the
    registry does not know, with the domain field shown for Eightfold.
 4. The existing scraper-config field remains the escape hatch for `selectors`,
    so "known" is a convenience, not a gate.
+5. **One shape for every site.** Waymo (`Selectors`) and NVIDIA (`Eightfold`)
+   must traverse the same validation, prefill, fixture, live-test, and docs path.
+   A site-specific branch in the fetch path is a design error.
 
 ### Acceptance criteria
 
 | Criterion | Verification |
 | :--- | :--- |
-| `known_sites.json` parses and every entry is valid for its provider | Unit test over the registry (all-or-nothing) |
+| Every entry parses, and its JSON `provider` matches its typed `provider` | Unit test over `all()` |
 | Lookup matches host and path prefix | Unit test (hit, miss, prefix mismatch) |
 | Prefill happens only when the fields are empty | `egui_kittest` |
 | Editing after prefill is preserved | `egui_kittest` |
 | "Use known config" replaces a divergent config | `egui_kittest` |
 | A manually chosen provider works for an unknown host | App integration test |
+| Waymo and NVIDIA take the same path | Registry test: both produce a valid `scraper_config` and prefill identically |
 
 ---
 
@@ -234,15 +323,19 @@ is meaningless without the JSON beside it.
 ### Deliverables
 
 1. `live_fetch_reaches_the_pipeline` gains a registry mode: with
-   `CAREER_OPS_LIVE_REGISTRY=1`, it iterates every registry entry, configures a
-   portal from it, fetches, and asserts at least one stored job with non-empty
-   text. That is what "known" means: a test passes.
+   `CAREER_OPS_LIVE_REGISTRY=1`, it iterates `known_sites::all()`, configures a
+   portal from each entry, fetches, and asserts at least one stored job with
+   non-empty text. That is what "known" means: a test passes. A WAF challenge is
+   probed the same way as the Waymo live test and reported as a **skip for that
+   entry**, not a failure; a served page that yields no text fails.
 2. `docs/known-sites.md`: host, name, provider, verified date, caps, notes
    (including blocks and rate limits observed).
 3. Rules in that document: an entry ships only with a passing live run; a
    failing entry is fixed or removed in the same commit that bumps the release.
-4. Initial entries: Waymo (selectors, Phase 2.2's config) and NVIDIA
-   (Eightfold).
+   The onboarding checklist is the one in "Adding a site or a provider" above.
+4. Initial entries: Waymo (`Selectors`, Phase 2.2's config) and NVIDIA
+   (`Eightfold`). Both are `KnownSite` constants. `verified_at` is committed by
+   hand after a passing registry run, not generated: a skip leaves it `None`.
 
 ---
 
@@ -265,7 +358,7 @@ is meaningless without the JSON beside it.
 | P2.3-R2 | **2681 postings invites a crawl.** Ten per request; a full walk is 269 requests. | High | `max_pages` default 5 (50 jobs), detail capped at 40. No "fetch everything" button. |
 | P2.3-R3 | **Registry rot.** Sites change; an entry silently yields zero jobs. | Medium | `verified_at` + live iteration; zero-job results are reported as an extraction failure, not success. |
 | P2.3-R4 | **Prefill surprises.** Auto-filling a config the user did not ask for. | Low | Prefill only into empty fields, show the source and date, never overwrite edits. |
-| P2.3-R5 | **Provider sprawl.** Every new vendor becomes a PR-shaped special case. | Medium | This phase adds exactly one provider. The registry gives a place for configs; a second provider needs its own justification and fixtures. |
+| P2.3-R5 | **Provider sprawl.** Every new company becomes a provider. | Medium | Providers are engines; known sites are constants. This phase adds exactly one engine (Eightfold) and two site profiles (Waymo, NVIDIA). A second engine needs its own justification and fixtures. |
 | P2.3-R6 | **ToS/robots ambiguity for JSON APIs.** | Medium | Same posture as Phase 2.2 Q-8: report blocks, never evade; document the user's responsibility. |
 
 ---
@@ -278,12 +371,15 @@ is meaningless without the JSON beside it.
    descriptions from `position_details`, up to the configured caps.
 3. Re-fetching NVIDIA is idempotent, even if a slug changes.
 4. The registry contains Waymo and NVIDIA, each with a passing live run and a
-   `verified_at` date.
-5. Typing a known host in the portal form offers the config/provider without
+   `verified_at: Some(date)`.
+5. Waymo and NVIDIA are both `KnownSite` constants with a provider, embedded
+   config, fixture test, live test, and docs row. Waymo names `Selectors`;
+   neither site has site-specific code in the fetch path.
+6. Typing a known host in the portal form offers the config/provider without
    overwriting what the user typed.
-6. An unknown host can still be configured manually (selectors or Eightfold).
-7. `docs/known-sites.md` documents the entries and the curation rule.
-8. Phase 2.3 retrospective recorded.
+7. An unknown host can still be configured manually (selectors or Eightfold).
+8. `docs/known-sites.md` documents the entries and the curation rule.
+9. Phase 2.3 retrospective recorded.
 
 ---
 
@@ -291,7 +387,7 @@ is meaningless without the JSON beside it.
 
 | ID | Question | Needed by |
 | :--- | :--- | :--- |
-| Q-12 | **Should the registry be updatable without a release** (seeded table or a signed remote list)? Embedded is simpler and offline-safe; a remote list is a supply-chain surface. | Before WS3 ships |
+| Q-12 | **Should the registry be updatable without a release** (seeded table or a signed remote list)? The Rust module is embedded and offline-safe; a remote list is a supply-chain surface. | Before WS3 ships |
 | Q-13 | **Should Eightfold be auto-detected** for unknown hosts? It would help users, but detection is a guess and Eightfold's markup is a vendor detail. | Phase 2.3 WS2 |
 | Q-14 | **Page size.** The API ignores `num` and returns 10; is that stable, and does `start` have a ceiling? Confirm with the live run before fixing defaults. | Phase 2.3 WS2/WS4 |
 | Q-15 | **Which provider next?** Workday is the most common for large employers; decide by measuring the user's actual targets, not by popularity. | After Phase 2.3 |
@@ -301,6 +397,7 @@ is meaningless without the JSON beside it.
 ## What Phase 2.3 Is Not
 
 - Not a generic JSON-extraction engine, and not a jq clone.
+- Not a provider per company. A provider is an engine; a known site is data.
 - Not auto-detection of every job platform.
 - Not a crawler: every fetch remains a user action on a configured portal.
 - Not a replacement for selector configs. Selectors remain the general answer for
