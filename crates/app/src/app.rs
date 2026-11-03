@@ -1801,9 +1801,12 @@ mod tests {
                 company_name: "Acme Updated".into(),
                 url: "https://example.com/jobs".into(),
                 render_mode: "browser".into(),
-                // The selector config must survive the write path and come back
-                // through the view model, not just through the modal.
-                scraper_config: Some(r#"{"list":"article.job"}"#.to_string()),
+                // The provider-bearing selector config must survive the write
+                // path and come back through the view model, not just through
+                // the modal.
+                scraper_config: Some(
+                    r#"{"provider":"selectors","list":"article.job"}"#.to_string(),
+                ),
             },
         });
         wait_until(&mut app, &ctx, |app| {
@@ -1820,6 +1823,7 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(stored_config).expect("stored config is JSON");
         assert_eq!(parsed["list"], "article.job");
+        assert_eq!(parsed["provider"], "selectors");
 
         app.handle_portals_action(PortalsAction::OpenManual);
         app.handle_portals_action(PortalsAction::ManualFromText {
@@ -2294,10 +2298,7 @@ mod tests {
 
         let form = app.portals_view.form().expect("the add form is open");
         let error = form.preview.error.as_deref().expect("preview error");
-        assert!(
-            error.contains("scraper config is not valid JSON"),
-            "{error}"
-        );
+        assert!(error.contains("selectors config is invalid"), "{error}");
         assert!(
             error.contains("The portal configuration is invalid"),
             "the classified action must match the Portals list: {error}"
@@ -2406,8 +2407,8 @@ mod tests {
     #[ignore = "hits the network; run with --ignored"]
     fn live_fetch_reaches_the_pipeline() {
         // Let `RUST_LOG=warn` reach the service layer when a live run fails.
-        // Without this the router's "ignoring an invalid scraper_config"
-        // warning is swallowed and the test only shows the final classification.
+        // Without this the router's config error is swallowed and the test only
+        // shows the final classification.
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .try_init();

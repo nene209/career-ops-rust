@@ -1,6 +1,7 @@
 // crates/core/tests/scraper_config_roundtrip.rs
 mod common;
 
+use career_ops_core::acquisition::config::{Provider, ScraperConfig};
 use career_ops_core::acquisition::html::selectors::SelectorConfig;
 use career_ops_core::repo::portals::{self, NewPortal, RenderMode};
 
@@ -42,6 +43,48 @@ async fn scraper_config_round_trips_as_selector_config() {
     assert_eq!(fields.location.as_deref(), Some(".location"));
     // Default field applied even though not present in the JSON
     assert_eq!(selector_config.url_attribute, "href");
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_provider_survives_storage_and_parses() {
+    let db = common::TestDb::new_raw().await;
+
+    let config = serde_json::json!({
+        "provider": "selectors",
+        "list": "article.job-card",
+        "fields": { "title": "h2.title" }
+    });
+
+    let portal = portals::create(
+        &db.pool,
+        NewPortal {
+            company_name: "Acme".into(),
+            url: "https://example.com/careers".into(),
+            render_mode: RenderMode::Static,
+            scraper_config: Some(config),
+        },
+    )
+    .await
+    .expect("create");
+
+    let fetched = portals::get(&db.pool, portal.id)
+        .await
+        .expect("get")
+        .expect("exists");
+    let raw = fetched.scraper_config.expect("config stored");
+
+    let parsed = ScraperConfig::parse(&raw).expect("stored config parses");
+    assert_eq!(parsed.provider(), Provider::Selectors);
+    assert_eq!(
+        parsed
+            .selectors()
+            .expect("selectors payload")
+            .list
+            .as_deref(),
+        Some("article.job-card")
+    );
 
     db.close().await;
 }

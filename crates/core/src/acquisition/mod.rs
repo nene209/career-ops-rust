@@ -11,11 +11,16 @@
 //! Tier 2 (headless browser via the Obscura sidecar) lives in
 //! `crate::backend` and is wired in by the router in a later workstream.
 //!
+//! `config` owns the `provider` discriminator inside `scraper_config`:
+//! `selectors` (the default) is the HTML engine above, `eightfold` is the
+//! JSON-API engine added in Phase 2.3.
+//!
 //! The router module — which reads `portals.render_mode`, dispatches to
 //! the appropriate tier, and records `fetch_tier` — is not part of the
 //! Week 2 deliverable. It lands in Week 3.
 
 pub mod ats;
+pub mod config;
 pub mod error;
 pub mod html;
 pub mod http;

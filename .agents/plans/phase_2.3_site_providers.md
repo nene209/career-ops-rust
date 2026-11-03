@@ -1,7 +1,7 @@
 # Phase 2.3: Site Providers and Known Sites — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.8), §12
-**Status:** Draft — not started
+**Status:** In progress — WS1 complete (provider model and dispatch); WS2–WS4 not started
 **Last updated:** 2026-11-03
 **Duration:** 4–6 days
 **Depends on:** Phase 2.2 (pagination and detail enrichment freeze the selector-config schema)
@@ -14,6 +14,7 @@
 | :--- | :--- |
 | v0.1 | Initial plan. Written after probing `https://jobs.nvidia.com/careers`, which is an Eightfold site: its content is served by two JSON endpoints and it cannot be fetched by either extraction tier today, with or without a selector config. That turned "a list of known configs" into "known sites with providers", because the second site the user wants is not a config at all. |
 | v0.2 | Provider scope clarified after review: a **provider is an engine** (`selectors`, `eightfold`), while a **known site is an embedded profile** that names an engine and carries its payload. Waymo is therefore a first-class known site backed by the selectors engine, not a new provider variant; NVIDIA is the same structure backed by Eightfold. The registry moves from a JSON file to typed `KnownSite` constants in `known_sites.rs`, so both sites share one validation, prefill, fixture, live-test, and documentation path. |
+| v0.3 | Workstream 1 implemented: `core::acquisition::config` owns the `Provider` discriminator and `ScraperConfig::parse`. A missing or null `provider` means `selectors`; an unknown provider is a clear config error. The router parses once, fails invalid configs as `InvalidRequest` (previously logged and ignored), and dispatches `eightfold` before any HTML fetch. `EightfoldConfig` carries the domain and reuses the Phase 2.2 `pagination`/`detail` caps; the Eightfold fetch itself is the WS2 placeholder. |
 
 ---
 
@@ -223,6 +224,21 @@ pub fn all() -> &'static [KnownSite] {
 | Unknown provider is a clear config error | Unit test on deserialisation |
 | `provider` survives add → edit → fetch | App integration test |
 | Waymo's registry entry dispatches to `Selectors` | Registry/dispatch test |
+
+**Implementation note (2026-11-03).** `core::acquisition::config` now owns the
+provider discriminator. `ScraperConfig::parse` reads `provider` (missing or null
+means `selectors`), then deserialises the same object into `SelectorConfig` or
+`EightfoldConfig`; `SelectorConfig` itself is unchanged, so every Phase 2.2 row
+and test still works. `EightfoldConfig` carries `domain` plus the existing
+`pagination` and `detail` blocks, so caps mean the same thing for every engine.
+
+The router parses the config once and fails an unusable config as
+`InvalidRequest` instead of logging and ignoring it. That is deliberate: a
+config the user wrote should not be silently dropped. The Eightfold arm is a
+WS1 placeholder — it returns "the eightfold provider is not available in this
+build" and never touches the selector path; WS2 replaces it with the fetch. The
+registry half of the last criterion lands in WS3; WS1 already proves that an
+explicit `provider: "selectors"` dispatches to the HTML path.
 
 ---
 

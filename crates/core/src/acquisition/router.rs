@@ -27,6 +27,7 @@ use sqlx::SqlitePool;
 use url::Url;
 
 use super::ats::{self, AtsAdapter, JobDetail, NormalizedJob};
+use super::config::ScraperConfig;
 use super::error::{AtsError, AtsResult, FailureCause};
 use super::html;
 use super::html::detail::DetailConfig;
@@ -294,10 +295,25 @@ pub async fn fetch_portal_inner(
     })?;
 
     let adapters = ats::adapters();
-    let route = decide_initial_route(&portal.render_mode, &url, &adapters);
     // Parsed once: the tier paths and the enrichment step all use the same
     // config, and a triplicate parse would let them disagree.
-    let config = parse_scraper_config(portal.scraper_config.as_deref());
+    let config = parse_scraper_config(portal.scraper_config.as_deref())?;
+
+    // A provider with its own fetch path bypasses tier routing. WS2 replaces
+    // this arm with the Eightfold fetch; returning here keeps the HTML path
+    // from running against a site whose content is not in the HTML.
+    if let Some(eightfold) = config.as_ref().and_then(ScraperConfig::eightfold) {
+        return Err(FetchError {
+            cause: FailureCause::InvalidRequest,
+            detail: format!(
+                "the eightfold provider is not available in this build (domain `{}`)",
+                eightfold.domain
+            ),
+        });
+    }
+
+    let selectors_config = config.as_ref().and_then(ScraperConfig::selectors);
+    let route = decide_initial_route(&portal.render_mode, &url, &adapters);
 
     // The adapter that produced the list, when the route was 1a. Enrichment
     // asks it where descriptions live; Tier 1b and Tier 2 have no adapter.
@@ -305,7 +321,7 @@ pub async fn fetch_portal_inner(
 
     let (jobs, tier, tier1_failure, page_report) = match route {
         InitialRoute::Tier2 => {
-            let jobs = fetch_tier2(&portal, &url, browser, config.as_ref()).await?;
+            let jobs = fetch_tier2(&portal, &url, browser, selectors_config).await?;
             (jobs, FetchTier::Tier2Obscura, None, None)
         }
         InitialRoute::Tier1a { adapter_name, slug } => {
@@ -322,7 +338,7 @@ pub async fn fetch_portal_inner(
                 Err(e) if e.escalatable() && browser.is_some() => {
                     let tier1 = FetchError::from_ats(e, "Tier 1a");
                     let failure = tier1.cause;
-                    match fetch_tier2(&portal, &url, browser, config.as_ref()).await {
+                    match fetch_tier2(&portal, &url, browser, selectors_config).await {
                         Ok(jobs) => (jobs, FetchTier::Tier2Obscura, Some(failure), None),
                         Err(tier2) => return Err(tier1.with_fallback(tier2)),
                     }
@@ -332,7 +348,7 @@ pub async fn fetch_portal_inner(
         }
         InitialRoute::Tier1b => {
             match source
-                .fetch_html(&url, &portal.company_name, config.as_ref())
+                .fetch_html(&url, &portal.company_name, selectors_config)
                 .await
             {
                 Ok(report) => (
@@ -344,7 +360,7 @@ pub async fn fetch_portal_inner(
                 Err(e) if e.escalatable() && browser.is_some() => {
                     let tier1 = FetchError::from_ats(e, "Tier 1b");
                     let failure = tier1.cause;
-                    match fetch_tier2(&portal, &url, browser, config.as_ref()).await {
+                    match fetch_tier2(&portal, &url, browser, selectors_config).await {
                         Ok(jobs) => (jobs, FetchTier::Tier2Obscura, Some(failure), None),
                         Err(tier2) => return Err(tier1.with_fallback(tier2)),
                     }
@@ -374,7 +390,7 @@ pub async fn fetch_portal_inner(
         ats_source
             .as_ref()
             .map(|(adapter, slug)| (*adapter, slug.as_str())),
-        config.as_ref().and_then(|config| config.detail.as_ref()),
+        config.as_ref().and_then(ScraperConfig::detail),
         cancel,
     )
     .await;
@@ -520,15 +536,19 @@ async fn fetch_tier2(
         .map_err(|e| FetchError::from_ats(e, "Tier 2"))
 }
 
-fn parse_scraper_config(raw: Option<&str>) -> Option<SelectorConfig> {
-    let raw = raw?;
-    match serde_json::from_str(raw) {
-        Ok(config) => Some(config),
-        Err(e) => {
-            tracing::warn!(error = %e, "portal scraper_config is invalid; ignoring");
-            None
-        }
-    }
+fn parse_scraper_config(
+    raw: Option<&str>,
+) -> std::result::Result<Option<ScraperConfig>, FetchError> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+
+    ScraperConfig::parse(raw)
+        .map(Some)
+        .map_err(|error| FetchError {
+            cause: FailureCause::InvalidRequest,
+            detail: error.to_string(),
+        })
 }
 
 async fn store_jobs(
@@ -612,14 +632,23 @@ pub async fn preview(
     // point of the button is to tell the user that before they save it.
     let config = match scraper_config.map(str::trim).filter(|raw| !raw.is_empty()) {
         None => None,
-        Some(raw) => Some(
-            serde_json::from_str::<SelectorConfig>(raw).map_err(|error| FetchError {
-                cause: FailureCause::InvalidRequest,
-                detail: format!("scraper config is not valid JSON: {error}"),
-            })?,
-        ),
+        Some(raw) => Some(ScraperConfig::parse(raw).map_err(|error| FetchError {
+            cause: FailureCause::InvalidRequest,
+            detail: error.to_string(),
+        })?),
     };
 
+    if let Some(eightfold) = config.as_ref().and_then(ScraperConfig::eightfold) {
+        return Err(FetchError {
+            cause: FailureCause::InvalidRequest,
+            detail: format!(
+                "the eightfold provider is not available in this build (domain `{}`)",
+                eightfold.domain
+            ),
+        });
+    }
+
+    let selectors_config = config.as_ref().and_then(ScraperConfig::selectors);
     let adapters = ats::adapters();
     let route = decide_initial_route(render_mode, url, &adapters);
     let mut ats_source: Option<(&dyn AtsAdapter, String)> = None;
@@ -637,7 +666,7 @@ pub async fn preview(
                 .fetch_rendered(url, RenderOpts::default())
                 .await
                 .map_err(|error| FetchError::internal(format!("tier 2 fetch failed: {error}")))?;
-            let jobs = html::extract_from_html(&page.html, url, company_name, config.as_ref())
+            let jobs = html::extract_from_html(&page.html, url, company_name, selectors_config)
                 .map_err(|error| FetchError::from_ats(error, "Tier 2"))?;
             (jobs, FetchTier::Tier2Obscura, 1)
         }
@@ -658,7 +687,7 @@ pub async fn preview(
             // One page, whatever `pagination.max_pages` says. The real fetch
             // still follows the config; the preview reports how many pages it
             // would follow without fetching them.
-            let single_page = config.as_ref().map(|config| SelectorConfig {
+            let single_page = selectors_config.map(|config| SelectorConfig {
                 pagination: None,
                 ..config.clone()
             });
@@ -667,8 +696,7 @@ pub async fn preview(
                 .await
                 .map_err(|error| FetchError::from_ats(error, "Tier 1b"))?
                 .jobs;
-            let pages = config
-                .as_ref()
+            let pages = selectors_config
                 .and_then(|config| config.pagination.as_ref())
                 .map(|pagination| {
                     // A block with no mechanism fetches one page, exactly as
@@ -696,7 +724,7 @@ pub async fn preview(
     let enrichment = ats_source.is_some()
         || config
             .as_ref()
-            .is_some_and(|config| config.detail.is_some());
+            .is_some_and(|config| config.detail().is_some());
     let mut first_description_bytes = None;
     let mut details_attempted = 0;
 
@@ -704,7 +732,7 @@ pub async fn preview(
         let preview_detail = DetailConfig {
             fields: config
                 .as_ref()
-                .and_then(|config| config.detail.as_ref())
+                .and_then(ScraperConfig::detail)
                 .and_then(|detail| detail.fields.clone()),
             max_jobs: Some(PREVIEW_MAX_DETAILS),
         };

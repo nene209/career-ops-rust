@@ -143,6 +143,107 @@ async fn static_portal_with_non_ats_url_records_tier1b() {
 }
 
 #[tokio::test]
+async fn an_explicit_selectors_provider_uses_the_html_path() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://example.com/careers",
+            serde_json::json!({
+                "provider": "selectors",
+                "list": "article.job",
+                "fields": { "title": "h2 a" }
+            }),
+        ),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(MockFetchSource::with_html(Ok(vec![sample_job("only")])));
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.tier, FetchTier::Tier1bHtml);
+    assert_eq!(source.html_calls().len(), 1);
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn an_eightfold_config_reaches_its_provider() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://jobs.nvidia.com/careers",
+            serde_json::json!({ "provider": "eightfold", "domain": "nvidia.com" }),
+        ),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(MockFetchSource::with_html(Ok(vec![sample_job(
+        "must-not-run",
+    )])));
+
+    // WS2 replaces this placeholder with the Eightfold fetch. Until then the
+    // point of the test is that dispatch happens before the selector path.
+    let error = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect_err("the eightfold path is a WS1 placeholder");
+
+    assert_eq!(error.cause, FailureCause::InvalidRequest);
+    assert!(error.detail.contains("eightfold"), "{}", error.detail);
+    assert!(
+        source.html_calls().is_empty(),
+        "the selector path must not run for an Eightfold config"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn an_invalid_config_fails_before_any_fetch() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://example.com/careers",
+            serde_json::json!({ "provider": "workday" }),
+        ),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(MockFetchSource::with_html(Ok(vec![sample_job(
+        "must-not-run",
+    )])));
+
+    let error = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect_err("unknown provider");
+
+    assert_eq!(error.cause, FailureCause::InvalidRequest);
+    assert!(
+        error.detail.contains("unknown provider `workday`"),
+        "{}",
+        error.detail
+    );
+    assert!(source.html_calls().is_empty());
+
+    let refreshed = portals::get(&db.pool, portal.id).await.unwrap().unwrap();
+    assert_eq!(
+        refreshed.last_failure_cause.as_deref(),
+        Some("invalid_request"),
+        "a config error is recorded, not guessed at"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
 async fn js_required_escalates_to_tier2() {
     let db = common::TestDb::new_raw().await;
     let portal = portals::create(&db.pool, static_portal("https://example.com/careers"))
@@ -913,11 +1014,58 @@ async fn preview_rejects_an_invalid_config_before_fetching() {
     .expect_err("invalid config");
 
     assert_eq!(error.cause, FailureCause::InvalidRequest);
-    assert!(error.detail.contains("not valid JSON"), "{}", error.detail);
+    assert!(
+        error.detail.contains("selectors config is invalid"),
+        "valid JSON with the wrong payload shape is still a config error: {}",
+        error.detail
+    );
     assert!(
         source.html_calls().is_empty(),
         "no request for a bad config"
     );
+}
+
+#[tokio::test]
+async fn preview_rejects_malformed_json_before_fetching() {
+    let url = Url::parse("https://example.com/careers").expect("url");
+    let source = MockFetchSource::with_html(Ok(vec![sample_job("a")]));
+
+    let error = preview(&url, "Acme", "static", Some("not json"), &source, None)
+        .await
+        .expect_err("malformed config");
+
+    assert_eq!(error.cause, FailureCause::InvalidRequest);
+    assert!(
+        error.detail.contains("scraper config is not valid JSON"),
+        "{}",
+        error.detail
+    );
+    assert!(source.html_calls().is_empty());
+}
+
+#[tokio::test]
+async fn preview_rejects_an_unknown_provider() {
+    let url = Url::parse("https://example.com/careers").expect("url");
+    let source = MockFetchSource::with_html(Ok(vec![sample_job("a")]));
+
+    let error = preview(
+        &url,
+        "Acme",
+        "static",
+        Some(r#"{"provider":"workday"}"#),
+        &source,
+        None,
+    )
+    .await
+    .expect_err("unknown provider");
+
+    assert_eq!(error.cause, FailureCause::InvalidRequest);
+    assert!(
+        error.detail.contains("unknown provider"),
+        "{}",
+        error.detail
+    );
+    assert!(source.html_calls().is_empty());
 }
 
 #[tokio::test]
