@@ -14,6 +14,7 @@ use self::selectors::{PaginationConfig, SelectorConfig};
 use super::ats::NormalizedJob;
 use super::error::{AtsError, AtsResult};
 use super::http;
+use super::report::{PageReport, PaginationStop};
 
 /// Fetch the configured pages of a URL and extract jobs from their static HTML.
 ///
@@ -37,49 +38,6 @@ use super::http;
 /// The `scraper_config` argument is already-parsed. The router parses
 /// `portals.scraper_config` once and passes the result through, so this
 /// function does not see raw JSON.
-/// Why the selector page loop stopped.
-///
-/// The first two are the expected endings. Everything else means a page the
-/// config asked for was not read, which the caller should surface: a partial
-/// list that reports itself as complete is worse than a classified failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaginationStop {
-    /// The site offered no further page, or pagination is not configured.
-    EndOfList,
-    /// The configured `max_pages` limit was reached.
-    LimitReached,
-    /// A later page could not be fetched.
-    FetchFailed,
-    /// A later page fetched but yielded no jobs.
-    ExtractionFailed,
-    /// A later page produced no jobs the earlier pages had not already given.
-    NoNewJobs,
-    /// The next-page URL was identical to the current one.
-    RepeatedUrl,
-}
-
-/// One selector fetch: the jobs, how many pages produced them, and why the loop
-/// stopped.
-#[derive(Debug, Clone)]
-pub struct PageReport {
-    pub jobs: Vec<NormalizedJob>,
-    /// Pages that produced jobs. A page that failed before extraction is not
-    /// counted, so `pages_fetched + 1` is the page that was not read.
-    pub pages_fetched: usize,
-    pub stop: PaginationStop,
-}
-
-impl PageReport {
-    /// A single page with no pagination.
-    pub fn single(jobs: Vec<NormalizedJob>) -> Self {
-        Self {
-            jobs,
-            pages_fetched: 1,
-            stop: PaginationStop::EndOfList,
-        }
-    }
-}
-
 pub async fn fetch_static_jobs(
     client: &Client,
     url: &Url,

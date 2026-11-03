@@ -1,7 +1,7 @@
 # Phase 2.3: Site Providers and Known Sites — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.8), §12
-**Status:** In progress — WS1 complete (provider model and dispatch); WS2–WS4 not started
+**Status:** In progress — WS1 and WS2 complete; WS3–WS4 not started
 **Last updated:** 2026-11-03
 **Duration:** 4–6 days
 **Depends on:** Phase 2.2 (pagination and detail enrichment freeze the selector-config schema)
@@ -15,6 +15,7 @@
 | v0.1 | Initial plan. Written after probing `https://jobs.nvidia.com/careers`, which is an Eightfold site: its content is served by two JSON endpoints and it cannot be fetched by either extraction tier today, with or without a selector config. That turned "a list of known configs" into "known sites with providers", because the second site the user wants is not a config at all. |
 | v0.2 | Provider scope clarified after review: a **provider is an engine** (`selectors`, `eightfold`), while a **known site is an embedded profile** that names an engine and carries its payload. Waymo is therefore a first-class known site backed by the selectors engine, not a new provider variant; NVIDIA is the same structure backed by Eightfold. The registry moves from a JSON file to typed `KnownSite` constants in `known_sites.rs`, so both sites share one validation, prefill, fixture, live-test, and documentation path. |
 | v0.3 | Workstream 1 implemented: `core::acquisition::config` owns the `Provider` discriminator and `ScraperConfig::parse`. A missing or null `provider` means `selectors`; an unknown provider is a clear config error. The router parses once, fails invalid configs as `InvalidRequest` (previously logged and ignored), and dispatches `eightfold` before any HTML fetch. `EightfoldConfig` carries the domain and reuses the Phase 2.2 `pagination`/`detail` caps; the Eightfold fetch itself is the WS2 placeholder. |
+| v0.4 | Workstream 2 implemented: the `eightfold` engine (list/detail parsing, paging by `start`, stable `eightfold:{domain}:{id}` ids, `PageReport` stop reasons), `FetchSource::fetch_eightfold`, router dispatch through a `DetailSource` that reuses the Phase 2.2 enrichment loop, and default-on enrichment for Eightfold because its list carries no text. Live NVIDIA: 20 jobs from 2 pages, 2 of 2 descriptions, longest 6,253 bytes. |
 
 ---
 
@@ -289,6 +290,38 @@ explicit `provider: "selectors"` dispatches to the HTML path.
 | Cancellation stops between postings | Core test with a pre-set flag |
 | Re-fetch is idempotent | Fetch twice, one row per position |
 | Live NVIDIA board stores jobs with text | Live test (§Phase 2.3 exit criteria) |
+
+**Implementation note (2026-11-03).** The engine lives in
+`core::acquisition::eightfold`: `parse_page`, `normalize`, `detail_url`,
+`detail_from_body`, and a paging loop behind a private `PageSource` seam (the
+same shape as the selector path). `FetchSource::fetch_eightfold` carries the
+host, domain, company name, and page cap; the router dispatches to it before
+`decide_initial_route`, then reuses the Phase 2.2 enrichment loop through a
+`DetailSource` enum (ATS adapter vs. Eightfold).
+
+Four decisions worth knowing:
+
+1. **Enrichment is default-on for Eightfold** (cap 40) because the list has no
+description at all; selectors stay opt-in through a `detail` block. The block
+only changes the cap.
+2. **`FetchTier::Tier1aAts`** is reused. Eightfold is a structured provider API,
+not a new tier; adding a tier variant would ripple through storage, UI labels,
+and the closed failure vocabulary for no user-visible gain.
+3. **`source_url` comes from the list's `positionUrl`**, resolved against the
+portal host. The detail's `publicUrl` duplicates it; using it would make the
+dedup key depend on whether enrichment ran.
+4. **Descriptions are stored as HTML**, matching SmartRecruiters and JSON-LD, and
+truncated at 200 KB. The plan said "HTML-to-text"; no adapter strips markup
+today, and a lone stripper would make Eightfold rows the odd ones out. Phase 3
+should treat `raw_text` as markup for every provider.
+
+Live verification 2026-11-03: NVIDIA returned 2,750 positions; two pages stored
+20 jobs, and 2 of 2 requested details produced text (longest 6,253 bytes). The
+core test took 1.9 s, the app path 5.5 s including startup.
+
+`PageReport`/`PaginationStop` moved from `html` to `acquisition::report` in the
+same step: two engines now share the report, so the type should not live inside
+one of them.
 
 ---
 

@@ -28,12 +28,12 @@ use url::Url;
 
 use super::ats::{self, AtsAdapter, JobDetail, NormalizedJob};
 use super::config::ScraperConfig;
+use super::eightfold;
 use super::error::{AtsError, AtsResult, FailureCause};
 use super::html;
 use super::html::detail::DetailConfig;
-use super::html::selectors::SelectorConfig;
-use super::html::PageReport;
-use super::html::PaginationStop;
+use super::html::selectors::{PaginationConfig, SelectorConfig};
+use super::report::{PageReport, PaginationStop};
 use crate::backend::{BrowserBackend, RenderOpts};
 use crate::error::Result;
 use crate::model::{FetchTier, Portal};
@@ -92,6 +92,19 @@ pub trait FetchSource: Send + Sync {
         config: Option<&SelectorConfig>,
     ) -> AtsResult<PageReport>;
 
+    /// Fetch a provider's list endpoint, paging up to `max_pages`.
+    ///
+    /// Separate from `fetch_ats` because the provider decides its own URL from
+    /// the portal host and domain, and because its page bound is configuration
+    /// rather than part of a board slug.
+    async fn fetch_eightfold(
+        &self,
+        host: &str,
+        domain: &str,
+        company_name: &str,
+        max_pages: usize,
+    ) -> AtsResult<PageReport>;
+
     /// Fetch one raw HTML document, such as a job's detail page.
     ///
     /// Separate from `fetch_html` because detail enrichment needs the document
@@ -129,6 +142,16 @@ impl FetchSource for HttpFetchSource {
         config: Option<&SelectorConfig>,
     ) -> AtsResult<PageReport> {
         html::fetch_static_jobs(&self.client, url, company_name, config).await
+    }
+
+    async fn fetch_eightfold(
+        &self,
+        host: &str,
+        domain: &str,
+        company_name: &str,
+        max_pages: usize,
+    ) -> AtsResult<PageReport> {
+        eightfold::fetch_jobs(&self.client, host, domain, company_name, max_pages).await
     }
 
     async fn fetch_page(&self, url: &Url) -> AtsResult<String> {
@@ -299,76 +322,92 @@ pub async fn fetch_portal_inner(
     // config, and a triplicate parse would let them disagree.
     let config = parse_scraper_config(portal.scraper_config.as_deref())?;
 
-    // A provider with its own fetch path bypasses tier routing. WS2 replaces
-    // this arm with the Eightfold fetch; returning here keeps the HTML path
-    // from running against a site whose content is not in the HTML.
-    if let Some(eightfold) = config.as_ref().and_then(ScraperConfig::eightfold) {
-        return Err(FetchError {
-            cause: FailureCause::InvalidRequest,
-            detail: format!(
-                "the eightfold provider is not available in this build (domain `{}`)",
-                eightfold.domain
-            ),
-        });
-    }
-
-    let selectors_config = config.as_ref().and_then(ScraperConfig::selectors);
-    let route = decide_initial_route(&portal.render_mode, &url, &adapters);
-
     // The adapter that produced the list, when the route was 1a. Enrichment
     // asks it where descriptions live; Tier 1b and Tier 2 have no adapter.
     let mut ats_source: Option<(&dyn AtsAdapter, String)> = None;
+    // Set when the Eightfold provider fetched the list; its detail endpoint is
+    // per position, addressed from the external id.
+    let mut eightfold_source: Option<(String, String)> = None;
 
-    let (jobs, tier, tier1_failure, page_report) = match route {
-        InitialRoute::Tier2 => {
-            let jobs = fetch_tier2(&portal, &url, browser, selectors_config).await?;
-            (jobs, FetchTier::Tier2Obscura, None, None)
-        }
-        InitialRoute::Tier1a { adapter_name, slug } => {
-            let adapter: &dyn AtsAdapter = adapters
-                .iter()
-                .find(|a| a.name() == adapter_name)
-                .map(|a| a.as_ref())
-                .expect("adapter registry is stable");
-            match source.fetch_ats(adapter, &slug, &portal.company_name).await {
-                Ok(jobs) => {
-                    ats_source = Some((adapter, slug));
-                    (jobs, FetchTier::Tier1aAts, None, None)
-                }
-                Err(e) if e.escalatable() && browser.is_some() => {
-                    let tier1 = FetchError::from_ats(e, "Tier 1a");
-                    let failure = tier1.cause;
-                    match fetch_tier2(&portal, &url, browser, selectors_config).await {
-                        Ok(jobs) => (jobs, FetchTier::Tier2Obscura, Some(failure), None),
-                        Err(tier2) => return Err(tier1.with_fallback(tier2)),
-                    }
-                }
-                Err(e) => return Err(FetchError::from_ats(e, "Tier 1a")),
-            }
-        }
-        InitialRoute::Tier1b => {
-            match source
-                .fetch_html(&url, &portal.company_name, selectors_config)
+    let (jobs, tier, tier1_failure, page_report) =
+        if let Some(eightfold) = config.as_ref().and_then(ScraperConfig::eightfold) {
+            let host = url.host_str().ok_or_else(|| FetchError {
+                cause: FailureCause::InvalidRequest,
+                detail: "an eightfold portal URL must have a host".into(),
+            })?;
+            let max_pages = eightfold
+                .pagination
+                .as_ref()
+                .map(PaginationConfig::page_limit)
+                .unwrap_or(PaginationConfig::DEFAULT_MAX_PAGES);
+
+            let report = source
+                .fetch_eightfold(host, &eightfold.domain, &portal.company_name, max_pages)
                 .await
-            {
-                Ok(report) => (
-                    report.jobs,
-                    FetchTier::Tier1bHtml,
-                    None,
-                    Some((report.pages_fetched, report.stop)),
-                ),
-                Err(e) if e.escalatable() && browser.is_some() => {
-                    let tier1 = FetchError::from_ats(e, "Tier 1b");
-                    let failure = tier1.cause;
-                    match fetch_tier2(&portal, &url, browser, selectors_config).await {
-                        Ok(jobs) => (jobs, FetchTier::Tier2Obscura, Some(failure), None),
-                        Err(tier2) => return Err(tier1.with_fallback(tier2)),
+                .map_err(|error| FetchError::from_ats(error, "Eightfold"))?;
+
+            eightfold_source = Some((host.to_string(), eightfold.domain.clone()));
+            (
+                report.jobs,
+                FetchTier::Tier1aAts,
+                None,
+                Some((report.pages_fetched, report.stop)),
+            )
+        } else {
+            let selectors_config = config.as_ref().and_then(ScraperConfig::selectors);
+            let route = decide_initial_route(&portal.render_mode, &url, &adapters);
+
+            match route {
+                InitialRoute::Tier2 => {
+                    let jobs = fetch_tier2(&portal, &url, browser, selectors_config).await?;
+                    (jobs, FetchTier::Tier2Obscura, None, None)
+                }
+                InitialRoute::Tier1a { adapter_name, slug } => {
+                    let adapter: &dyn AtsAdapter = adapters
+                        .iter()
+                        .find(|a| a.name() == adapter_name)
+                        .map(|a| a.as_ref())
+                        .expect("adapter registry is stable");
+                    match source.fetch_ats(adapter, &slug, &portal.company_name).await {
+                        Ok(jobs) => {
+                            ats_source = Some((adapter, slug));
+                            (jobs, FetchTier::Tier1aAts, None, None)
+                        }
+                        Err(e) if e.escalatable() && browser.is_some() => {
+                            let tier1 = FetchError::from_ats(e, "Tier 1a");
+                            let failure = tier1.cause;
+                            match fetch_tier2(&portal, &url, browser, selectors_config).await {
+                                Ok(jobs) => (jobs, FetchTier::Tier2Obscura, Some(failure), None),
+                                Err(tier2) => return Err(tier1.with_fallback(tier2)),
+                            }
+                        }
+                        Err(e) => return Err(FetchError::from_ats(e, "Tier 1a")),
                     }
                 }
-                Err(e) => return Err(FetchError::from_ats(e, "Tier 1b")),
+                InitialRoute::Tier1b => {
+                    match source
+                        .fetch_html(&url, &portal.company_name, selectors_config)
+                        .await
+                    {
+                        Ok(report) => (
+                            report.jobs,
+                            FetchTier::Tier1bHtml,
+                            None,
+                            Some((report.pages_fetched, report.stop)),
+                        ),
+                        Err(e) if e.escalatable() && browser.is_some() => {
+                            let tier1 = FetchError::from_ats(e, "Tier 1b");
+                            let failure = tier1.cause;
+                            match fetch_tier2(&portal, &url, browser, selectors_config).await {
+                                Ok(jobs) => (jobs, FetchTier::Tier2Obscura, Some(failure), None),
+                                Err(tier2) => return Err(tier1.with_fallback(tier2)),
+                            }
+                        }
+                        Err(e) => return Err(FetchError::from_ats(e, "Tier 1b")),
+                    }
+                }
             }
-        }
-    };
+        };
 
     let (pages_fetched, pagination_stopped) = match page_report {
         Some((pages, stop)) => (Some(pages), Some(stop)),
@@ -383,14 +422,34 @@ pub async fn fetch_portal_inner(
         );
     }
 
+    let detail_source = if let Some((host, domain)) = eightfold_source {
+        Some(DetailSource::Eightfold { host, domain })
+    } else {
+        ats_source
+            .as_ref()
+            .map(|(adapter, slug)| DetailSource::Ats {
+                adapter: *adapter,
+                slug: slug.clone(),
+            })
+    };
+
+    // A selector portal opts into descriptions with a `detail` block. An
+    // Eightfold board has no list description at all, so it enriches by default
+    // under the same Phase 2.2 cap.
+    let detail = match config.as_ref().and_then(ScraperConfig::detail) {
+        Some(detail) => Some(detail.clone()),
+        None if matches!(detail_source, Some(DetailSource::Eightfold { .. })) => {
+            Some(DetailConfig::default())
+        }
+        None => None,
+    };
+
     let mut jobs = jobs;
     let (details_attempted, details_enriched) = enrich_details(
         &mut jobs,
         source,
-        ats_source
-            .as_ref()
-            .map(|(adapter, slug)| (*adapter, slug.as_str())),
-        config.as_ref().and_then(ScraperConfig::detail),
+        detail_source.as_ref(),
+        detail.as_ref(),
         cancel,
     )
     .await;
@@ -419,6 +478,19 @@ pub async fn fetch_portal_inner(
     })
 }
 
+/// Where a posting's description comes from, for the boards that have their
+/// own endpoint. `None` means the generic job-page extraction.
+enum DetailSource<'a> {
+    Ats {
+        adapter: &'a dyn AtsAdapter,
+        slug: String,
+    },
+    Eightfold {
+        host: String,
+        domain: String,
+    },
+}
+
 /// Fill in descriptions, best effort.
 ///
 /// Bounded by `detail.max_jobs`, sequential, and checked for cancellation
@@ -429,7 +501,7 @@ pub async fn fetch_portal_inner(
 async fn enrich_details(
     jobs: &mut [NormalizedJob],
     source: &dyn FetchSource,
-    ats: Option<(&dyn AtsAdapter, &str)>,
+    detail_source: Option<&DetailSource<'_>>,
     detail: Option<&DetailConfig>,
     cancel: Option<&AtomicBool>,
 ) -> (usize, usize) {
@@ -447,7 +519,7 @@ async fn enrich_details(
         }
 
         attempted += 1;
-        let Some(found) = job_detail(source, ats, job, detail).await else {
+        let Some(found) = job_detail(source, detail_source, job, detail).await else {
             continue;
         };
 
@@ -471,12 +543,17 @@ async fn enrich_details(
 /// otherwise the job page itself.
 async fn job_detail(
     source: &dyn FetchSource,
-    ats: Option<(&dyn AtsAdapter, &str)>,
+    detail_source: Option<&DetailSource<'_>>,
     job: &NormalizedJob,
     detail: &DetailConfig,
 ) -> Option<JobDetail> {
-    if let Some((adapter, slug)) = ats {
-        if let Some(url) = adapter.detail_url(slug, job) {
+    if let Some(detail_source) = detail_source {
+        let url = match detail_source {
+            DetailSource::Ats { adapter, slug } => adapter.detail_url(slug, job),
+            DetailSource::Eightfold { host, domain } => eightfold::detail_url(host, domain, job),
+        };
+
+        if let Some(url) = url {
             let body = match source.fetch_page(&url).await {
                 Ok(body) => body,
                 Err(error) => {
@@ -484,7 +561,10 @@ async fn job_detail(
                     return None;
                 }
             };
-            return adapter.detail_from_body(&body);
+            return match detail_source {
+                DetailSource::Ats { adapter, .. } => adapter.detail_from_body(&body),
+                DetailSource::Eightfold { .. } => eightfold::detail_from_body(&body),
+            };
         }
     }
 
@@ -638,78 +718,116 @@ pub async fn preview(
         })?),
     };
 
-    if let Some(eightfold) = config.as_ref().and_then(ScraperConfig::eightfold) {
-        return Err(FetchError {
-            cause: FailureCause::InvalidRequest,
-            detail: format!(
-                "the eightfold provider is not available in this build (domain `{}`)",
-                eightfold.domain
-            ),
-        });
-    }
-
-    let selectors_config = config.as_ref().and_then(ScraperConfig::selectors);
     let adapters = ats::adapters();
-    let route = decide_initial_route(render_mode, url, &adapters);
     let mut ats_source: Option<(&dyn AtsAdapter, String)> = None;
+    let mut eightfold_source: Option<(String, String)> = None;
 
-    let (jobs, tier, pages_planned) = match route {
-        InitialRoute::Tier2 => {
-            let Some(backend) = browser else {
-                return Err(FetchError {
-                    cause: FailureCause::JsRequired,
-                    detail: "browser mode needs the rendering backend, which is not available"
-                        .into(),
+    let (jobs, tier, pages_planned) = if let Some(eightfold) =
+        config.as_ref().and_then(ScraperConfig::eightfold)
+    {
+        let host = url.host_str().ok_or_else(|| FetchError {
+            cause: FailureCause::InvalidRequest,
+            detail: "an eightfold portal URL must have a host".into(),
+        })?;
+        let planned = eightfold
+            .pagination
+            .as_ref()
+            .map(PaginationConfig::page_limit)
+            .unwrap_or(PaginationConfig::DEFAULT_MAX_PAGES);
+
+        // One page only, like the selector preview; the report names the
+        // pages the saved config would follow.
+        let report = source
+            .fetch_eightfold(host, &eightfold.domain, company_name, 1)
+            .await
+            .map_err(|error| FetchError::from_ats(error, "Eightfold"))?;
+
+        eightfold_source = Some((host.to_string(), eightfold.domain.clone()));
+        (report.jobs, FetchTier::Tier1aAts, planned)
+    } else {
+        let selectors_config = config.as_ref().and_then(ScraperConfig::selectors);
+        let route = decide_initial_route(render_mode, url, &adapters);
+        match route {
+            InitialRoute::Tier2 => {
+                let Some(backend) = browser else {
+                    return Err(FetchError {
+                        cause: FailureCause::JsRequired,
+                        detail: "browser mode needs the rendering backend, which is not available"
+                            .into(),
+                    });
+                };
+                let page = backend
+                    .fetch_rendered(url, RenderOpts::default())
+                    .await
+                    .map_err(|error| {
+                        FetchError::internal(format!("tier 2 fetch failed: {error}"))
+                    })?;
+                let jobs = html::extract_from_html(&page.html, url, company_name, selectors_config)
+                    .map_err(|error| FetchError::from_ats(error, "Tier 2"))?;
+                (jobs, FetchTier::Tier2Obscura, 1)
+            }
+            InitialRoute::Tier1a { adapter_name, slug } => {
+                let adapter: &dyn AtsAdapter = adapters
+                    .iter()
+                    .find(|candidate| candidate.name() == adapter_name)
+                    .map(|candidate| candidate.as_ref())
+                    .expect("adapter registry is stable");
+                let jobs = source
+                    .fetch_ats(adapter, &slug, company_name)
+                    .await
+                    .map_err(|error| FetchError::from_ats(error, "Tier 1a"))?;
+                ats_source = Some((adapter, slug));
+                (jobs, FetchTier::Tier1aAts, 0)
+            }
+            InitialRoute::Tier1b => {
+                // One page, whatever `pagination.max_pages` says. The real fetch
+                // still follows the config; the preview reports how many pages it
+                // would follow without fetching them.
+                let single_page = selectors_config.map(|config| SelectorConfig {
+                    pagination: None,
+                    ..config.clone()
                 });
-            };
-            let page = backend
-                .fetch_rendered(url, RenderOpts::default())
-                .await
-                .map_err(|error| FetchError::internal(format!("tier 2 fetch failed: {error}")))?;
-            let jobs = html::extract_from_html(&page.html, url, company_name, selectors_config)
-                .map_err(|error| FetchError::from_ats(error, "Tier 2"))?;
-            (jobs, FetchTier::Tier2Obscura, 1)
+                let jobs = source
+                    .fetch_html(url, company_name, single_page.as_ref())
+                    .await
+                    .map_err(|error| FetchError::from_ats(error, "Tier 1b"))?
+                    .jobs;
+                let pages = selectors_config
+                    .and_then(|config| config.pagination.as_ref())
+                    .map(|pagination| {
+                        // A block with no mechanism fetches one page, exactly as
+                        // `fetch_pages` does; reporting its default limit would lie.
+                        if pagination.next.is_none() && pagination.url_template.is_none() {
+                            1
+                        } else {
+                            pagination.page_limit()
+                        }
+                    })
+                    .unwrap_or(1);
+                (jobs, FetchTier::Tier1bHtml, pages)
+            }
         }
-        InitialRoute::Tier1a { adapter_name, slug } => {
-            let adapter: &dyn AtsAdapter = adapters
-                .iter()
-                .find(|candidate| candidate.name() == adapter_name)
-                .map(|candidate| candidate.as_ref())
-                .expect("adapter registry is stable");
-            let jobs = source
-                .fetch_ats(adapter, &slug, company_name)
-                .await
-                .map_err(|error| FetchError::from_ats(error, "Tier 1a"))?;
-            ats_source = Some((adapter, slug));
-            (jobs, FetchTier::Tier1aAts, 0)
+    };
+
+    let detail_source = if let Some((host, domain)) = eightfold_source {
+        Some(DetailSource::Eightfold { host, domain })
+    } else {
+        ats_source
+            .as_ref()
+            .map(|(adapter, slug)| DetailSource::Ats {
+                adapter: *adapter,
+                slug: slug.clone(),
+            })
+    };
+
+    // Eightfold's list has no description, so it enriches by default; selector
+    // portals stay opt-in through the `detail` block.
+    let detail = match config.as_ref().and_then(ScraperConfig::detail) {
+        Some(detail) => Some(detail.clone()),
+        None if matches!(detail_source, Some(DetailSource::Eightfold { .. })) => {
+            Some(DetailConfig::default())
         }
-        InitialRoute::Tier1b => {
-            // One page, whatever `pagination.max_pages` says. The real fetch
-            // still follows the config; the preview reports how many pages it
-            // would follow without fetching them.
-            let single_page = selectors_config.map(|config| SelectorConfig {
-                pagination: None,
-                ..config.clone()
-            });
-            let jobs = source
-                .fetch_html(url, company_name, single_page.as_ref())
-                .await
-                .map_err(|error| FetchError::from_ats(error, "Tier 1b"))?
-                .jobs;
-            let pages = selectors_config
-                .and_then(|config| config.pagination.as_ref())
-                .map(|pagination| {
-                    // A block with no mechanism fetches one page, exactly as
-                    // `fetch_pages` does; reporting its default limit would lie.
-                    if pagination.next.is_none() && pagination.url_template.is_none() {
-                        1
-                    } else {
-                        pagination.page_limit()
-                    }
-                })
-                .unwrap_or(1);
-            (jobs, FetchTier::Tier1bHtml, pages)
-        }
+        None => None,
     };
 
     let sample = jobs
@@ -721,10 +839,10 @@ pub async fn preview(
         })
         .collect();
 
-    let enrichment = ats_source.is_some()
-        || config
-            .as_ref()
-            .is_some_and(|config| config.detail().is_some());
+    // The saved fetch enriches only when a detail config exists (or by default
+    // for Eightfold, whose `detail` is filled above). The preview must agree:
+    // an ATS board without a `detail` block stores list text only.
+    let enrichment = detail.is_some();
     let mut first_description_bytes = None;
     let mut details_attempted = 0;
 
@@ -736,15 +854,14 @@ pub async fn preview(
                 .and_then(|detail| detail.fields.clone()),
             max_jobs: Some(PREVIEW_MAX_DETAILS),
         };
-        let ats = ats_source
-            .as_ref()
-            .map(|(adapter, slug)| (*adapter, slug.as_str()));
 
         // Stop at the first description: the report needs one length, and each
         // request is real network traffic.
         for job in jobs.iter().take(PREVIEW_MAX_DETAILS) {
             details_attempted += 1;
-            if let Some(found) = job_detail(source, ats, job, &preview_detail).await {
+            if let Some(found) =
+                job_detail(source, detail_source.as_ref(), job, &preview_detail).await
+            {
                 if !found.text.trim().is_empty() {
                     first_description_bytes = Some(found.text.len());
                     break;

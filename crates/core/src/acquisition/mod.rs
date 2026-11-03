@@ -21,8 +21,10 @@
 
 pub mod ats;
 pub mod config;
+pub mod eightfold;
 pub mod error;
 pub mod html;
 pub mod http;
 pub mod manual;
+pub mod report;
 pub mod router;

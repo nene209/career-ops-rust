@@ -36,6 +36,7 @@ use career_ops_core::acquisition::ats::{
     self, ashby::AshbyAdapter, greenhouse::GreenhouseAdapter, lever::LeverAdapter,
     smartrecruiters::SmartRecruitersAdapter, AtsAdapter,
 };
+use career_ops_core::acquisition::eightfold;
 use career_ops_core::acquisition::http;
 use url::Url;
 
@@ -216,6 +217,65 @@ async fn smartrecruiters_detail_live() {
     );
     eprintln!(
         "smartrecruiters detail: {} bytes for `{}`",
+        detail.text.len(),
+        job.title
+    );
+}
+
+/// The Eightfold engine end to end: list pages, then the position detail that
+/// supplies the description. NVIDIA is the reference site.
+#[tokio::test]
+async fn eightfold_live() {
+    if !live_enabled() {
+        eprintln!("skipping eightfold_live: RUN_LIVE_ATS_TESTS not set");
+        return;
+    }
+
+    let host = slug_or("LIVE_EIGHTFOLD_HOST", "jobs.nvidia.com");
+    let domain = slug_or("LIVE_EIGHTFOLD_DOMAIN", "nvidia.com");
+    let client = http::default_client().expect("http client");
+
+    let report = eightfold::fetch_jobs(&client, &host, &domain, "NVIDIA", 2)
+        .await
+        .expect("live eightfold list");
+    assert!(
+        !report.jobs.is_empty(),
+        "{host}/{domain} returned no positions — the board may have moved or the API shape changed"
+    );
+
+    for job in &report.jobs {
+        assert!(!job.title.trim().is_empty());
+        assert!(
+            job.external_id.starts_with(&format!("eightfold:{domain}:")),
+            "unstable external id: {}",
+            job.external_id
+        );
+        assert_eq!(job.source_url.host_str(), Some(host.as_str()));
+    }
+
+    let job = &report.jobs[0];
+    let url = eightfold::detail_url(&host, &domain, job).expect("detail url");
+    let response = http::get_with_retry(&client, url.as_str())
+        .await
+        .expect("detail request");
+    assert!(
+        response.status().is_success(),
+        "detail returned {}",
+        response.status()
+    );
+    let body = response.text().await.expect("detail body");
+    let detail = eightfold::detail_from_body(&body)
+        .unwrap_or_else(|| panic!("detail for `{}` did not parse", job.title));
+    assert!(
+        !detail.text.trim().is_empty(),
+        "detail for `{}` produced no description text; jobDescription may have changed",
+        job.title
+    );
+
+    eprintln!(
+        "eightfold {host}/{domain}: {} jobs in {} pages; detail {} bytes for `{}`",
+        report.jobs.len(),
+        report.pages_fetched,
         detail.text.len(),
         job.title
     );

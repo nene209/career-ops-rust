@@ -11,8 +11,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use career_ops_core::acquisition::ats;
+use career_ops_core::acquisition::ats::NormalizedJob;
 use career_ops_core::acquisition::error::{AtsError, FailureCause};
-use career_ops_core::acquisition::html::{PageReport, PaginationStop};
+use career_ops_core::acquisition::html::selectors::PaginationConfig;
+use career_ops_core::acquisition::report::{PageReport, PaginationStop};
 use career_ops_core::acquisition::router::{
     decide_initial_route, fetch_portal, fetch_portal_cancellable, preview, InitialRoute,
 };
@@ -172,7 +174,79 @@ async fn an_explicit_selectors_provider_uses_the_html_path() {
 }
 
 #[tokio::test]
-async fn an_eightfold_config_reaches_its_provider() {
+async fn an_eightfold_config_fetches_and_enriches() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://jobs.nvidia.com/careers",
+            serde_json::json!({
+                "provider": "eightfold",
+                "domain": "nvidia.com",
+                "pagination": { "max_pages": 2 },
+                "detail": { "max_jobs": 1 }
+            }),
+        ),
+    )
+    .await
+    .expect("create portal");
+
+    let report = PageReport {
+        jobs: vec![eightfold_job("GPU Architect", "42")],
+        pages_fetched: 2,
+        stop: PaginationStop::EndOfList,
+    };
+    let source = Arc::new(
+        MockFetchSource::with_eightfold(Ok(report)).pages([Ok(EIGHTFOLD_DETAIL.to_string())]),
+    );
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.tier, FetchTier::Tier1aAts);
+    assert_eq!(outcome.jobs_fetched, 1);
+    assert_eq!(outcome.pages_fetched, Some(2));
+    assert_eq!(outcome.pagination_stopped, Some(PaginationStop::EndOfList));
+    assert_eq!(outcome.details_attempted, 1);
+    assert_eq!(outcome.details_enriched, 1);
+
+    assert_eq!(
+        source.eightfold_calls(),
+        vec![(
+            "jobs.nvidia.com".to_string(),
+            "nvidia.com".to_string(),
+            "Acme".to_string(),
+            2,
+        )],
+        "the provider gets the host, domain, company, and configured page cap"
+    );
+    assert!(
+        source.html_calls().is_empty(),
+        "no selector fetch for Eightfold"
+    );
+    assert_eq!(
+        source.page_calls(),
+        vec![
+            "https://jobs.nvidia.com/api/pcsx/position_details?position_id=42&domain=nvidia.com&hl=en"
+                .to_string()
+        ]
+    );
+
+    assert_eq!(stored_texts(&db.pool).await, vec!["<p>Build GPUs.</p>"]);
+    let stored = job_descriptions::list_recent(&db.pool, 1)
+        .await
+        .expect("list jobs");
+    assert_eq!(
+        stored[0].source_url,
+        "https://jobs.nvidia.com/careers/job/42"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn an_eightfold_portal_enriches_by_default() {
     let db = common::TestDb::new_raw().await;
     let portal = portals::create(
         &db.pool,
@@ -184,25 +258,52 @@ async fn an_eightfold_config_reaches_its_provider() {
     .await
     .expect("create portal");
 
-    let source = Arc::new(MockFetchSource::with_html(Ok(vec![sample_job(
-        "must-not-run",
-    )])));
+    let report = PageReport {
+        jobs: vec![eightfold_job("Compiler Engineer", "7")],
+        pages_fetched: 1,
+        stop: PaginationStop::EndOfList,
+    };
+    let source = Arc::new(
+        MockFetchSource::with_eightfold(Ok(report)).pages([Ok(EIGHTFOLD_DETAIL.to_string())]),
+    );
 
-    // WS2 replaces this placeholder with the Eightfold fetch. Until then the
-    // point of the test is that dispatch happens before the selector path.
-    let error = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
         .await
-        .expect_err("the eightfold path is a WS1 placeholder");
+        .expect("fetch");
 
-    assert_eq!(error.cause, FailureCause::InvalidRequest);
-    assert!(error.detail.contains("eightfold"), "{}", error.detail);
-    assert!(
-        source.html_calls().is_empty(),
-        "the selector path must not run for an Eightfold config"
+    assert_eq!(
+        outcome.details_attempted, 1,
+        "an Eightfold board has no list description, so enrichment is default-on"
+    );
+    assert_eq!(outcome.details_enriched, 1);
+    assert_eq!(
+        source.eightfold_calls()[0].3,
+        career_ops_core::acquisition::html::selectors::PaginationConfig::DEFAULT_MAX_PAGES,
+        "the default page cap applies when the config omits pagination"
     );
 
     db.close().await;
 }
+
+fn eightfold_job(title: &str, id: &str) -> NormalizedJob {
+    let mut job = sample_job(title);
+    job.external_id = format!("eightfold:nvidia.com:{id}");
+    job.source_url =
+        Url::parse(&format!("https://jobs.nvidia.com/careers/job/{id}")).expect("job url");
+    job.raw_text = String::new();
+    job.department = None;
+    job.employment_type = None;
+    job
+}
+
+const EIGHTFOLD_DETAIL: &str = r#"{
+  "status": 200,
+  "data": {
+    "jobDescription": "<p>Build GPUs.</p>",
+    "department": "Hardware Engineering",
+    "efcustomTextTimeType": ["Full time"]
+  }
+}"#;
 
 #[tokio::test]
 async fn an_invalid_config_fails_before_any_fetch() {
@@ -980,6 +1081,59 @@ async fn preview_reports_one_page_when_pagination_has_no_mechanism() {
         report.pages_planned, 1,
         "no next link and no template means a single page, whatever max_pages says"
     );
+}
+
+#[tokio::test]
+async fn preview_an_eightfold_config_uses_the_provider() {
+    let url = Url::parse("https://jobs.nvidia.com/careers").expect("url");
+    let config = serde_json::json!({ "provider": "eightfold", "domain": "nvidia.com" }).to_string();
+    let report = PageReport {
+        jobs: vec![eightfold_job("GPU Architect", "42")],
+        pages_fetched: 1,
+        stop: PaginationStop::EndOfList,
+    };
+    let source =
+        MockFetchSource::with_eightfold(Ok(report)).pages([Ok(EIGHTFOLD_DETAIL.to_string())]);
+
+    let preview = preview(&url, "NVIDIA", "static", Some(&config), &source, None)
+        .await
+        .expect("preview");
+
+    assert_eq!(preview.tier, FetchTier::Tier1aAts);
+    assert_eq!(preview.jobs_found, 1);
+    assert_eq!(
+        preview.pages_planned,
+        PaginationConfig::DEFAULT_MAX_PAGES,
+        "the preview reports the saved config's page plan"
+    );
+    assert_eq!(preview.details_attempted, 1);
+    assert_eq!(
+        preview.first_description_bytes,
+        Some("<p>Build GPUs.</p>".len())
+    );
+    assert_eq!(
+        source.eightfold_calls()[0].3,
+        1,
+        "the preview fetches one list page"
+    );
+}
+
+#[tokio::test]
+async fn preview_an_ats_board_without_a_detail_config_fetches_nothing_extra() {
+    let url = Url::parse("https://boards.greenhouse.io/acme/jobs/1").expect("url");
+    let source = MockFetchSource::with_ats(Ok(vec![sample_job("engineer")]));
+
+    let report = preview(&url, "Acme", "static", None, &source, None)
+        .await
+        .expect("preview");
+
+    assert_eq!(report.jobs_found, 1);
+    assert_eq!(
+        report.details_attempted, 0,
+        "the saved fetch would not enrich without a detail block"
+    );
+    assert!(report.first_description_bytes.is_none());
+    assert!(source.page_calls().is_empty());
 }
 
 #[tokio::test]

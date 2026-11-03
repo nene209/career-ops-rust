@@ -108,7 +108,7 @@ use async_trait::async_trait;
 use career_ops_core::acquisition::ats::{AtsAdapter, NormalizedJob};
 use career_ops_core::acquisition::error::AtsError;
 use career_ops_core::acquisition::html::selectors::SelectorConfig;
-use career_ops_core::acquisition::html::PageReport;
+use career_ops_core::acquisition::report::PageReport;
 use career_ops_core::acquisition::router::FetchSource;
 use url::Url;
 
@@ -122,9 +122,11 @@ use url::Url;
 pub struct MockFetchSource {
     ats_calls: Mutex<Vec<(String, String)>>,
     html_calls: Mutex<Vec<String>>,
+    eightfold_calls: Mutex<Vec<(String, String, String, usize)>>,
     page_calls: Mutex<Vec<String>>,
     ats_queue: Mutex<VecDeque<Result<Vec<NormalizedJob>, AtsError>>>,
     html_queue: Mutex<VecDeque<Result<PageReport, AtsError>>>,
+    eightfold_queue: Mutex<VecDeque<Result<PageReport, AtsError>>>,
     page_queue: Mutex<VecDeque<Result<String, AtsError>>>,
 }
 
@@ -133,9 +135,11 @@ impl Default for MockFetchSource {
         Self {
             ats_calls: Mutex::new(Vec::new()),
             html_calls: Mutex::new(Vec::new()),
+            eightfold_calls: Mutex::new(Vec::new()),
             page_calls: Mutex::new(Vec::new()),
             ats_queue: Mutex::new(VecDeque::new()),
             html_queue: Mutex::new(VecDeque::new()),
+            eightfold_queue: Mutex::new(VecDeque::new()),
             page_queue: Mutex::new(VecDeque::new()),
         }
     }
@@ -157,6 +161,13 @@ impl MockFetchSource {
     pub fn with_html_report(result: Result<PageReport, AtsError>) -> Self {
         let mock = Self::default();
         mock.html_queue.lock().unwrap().push_back(result);
+        mock
+    }
+
+    /// A scripted Eightfold list fetch.
+    pub fn with_eightfold(result: Result<PageReport, AtsError>) -> Self {
+        let mock = Self::default();
+        mock.eightfold_queue.lock().unwrap().push_back(result);
         mock
     }
 
@@ -198,6 +209,11 @@ impl MockFetchSource {
     pub fn page_calls(&self) -> Vec<String> {
         self.page_calls.lock().unwrap().clone()
     }
+
+    /// `(host, domain, company_name, max_pages)` for every Eightfold fetch.
+    pub fn eightfold_calls(&self) -> Vec<(String, String, String, usize)> {
+        self.eightfold_calls.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -227,6 +243,26 @@ impl FetchSource for MockFetchSource {
     ) -> Result<PageReport, AtsError> {
         self.html_calls.lock().unwrap().push(url.to_string());
         self.html_queue
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(PageReport::single(Vec::new())))
+    }
+
+    async fn fetch_eightfold(
+        &self,
+        host: &str,
+        domain: &str,
+        company_name: &str,
+        max_pages: usize,
+    ) -> Result<PageReport, AtsError> {
+        self.eightfold_calls.lock().unwrap().push((
+            host.to_string(),
+            domain.to_string(),
+            company_name.to_string(),
+            max_pages,
+        ));
+        self.eightfold_queue
             .lock()
             .unwrap()
             .pop_front()

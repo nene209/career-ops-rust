@@ -109,6 +109,7 @@ otherwise.
 | 4.3 | Enter a company name and a real job-board URL, keep **Static (Tier 1)**, save. | The modal closes and the row appears with "Never fetched". |
 | 4.3b | For a career page with no JSON-LD (e.g. Waymo, §8), paste its selector config into **Scraper config (JSON, optional)** before saving. | Invalid JSON shows "Scraper config is not valid JSON." under the field. With valid JSON the portal saves, `Fetch` returns jobs, and the row becomes Healthy with tier HTML. |
 | 4.3b.1 | Give the config an unknown `provider` (for example `{"provider":"workday"}`) and fetch. | The form accepts valid JSON, but `Fetch` fails as a configuration error ("The portal configuration is invalid. Check the URL and scraper config.") with no jobs stored. A config with no `provider` still uses selectors. |
+| 4.3b.2 | For an Eightfold site such as NVIDIA, use `{"provider":"eightfold","domain":"nvidia.com"}`. 🌐 | The portal saves and `Fetch` stores positions from `/api/pcsx/search` with descriptions from `/api/pcsx/position_details`; no selector config is needed. The rows are recorded with the ATS tier, because Eightfold is a structured provider API. |
 | 4.3c | In the add/edit dialog, click **Test config** with the URL and config filled in. 🌐 | A panel reports "Found N jobs on page 1; the saved config follows up to M pages.", up to three titles with their resolved URLs, and the first description length (or "No detail enrichment configured."). Nothing is saved and the Pipeline count does not change. On an ATS board the panel says "the adapter paginates internally" instead of a page count. |
 | 4.3d | Edit the URL or config after a preview, or enter invalid JSON. | The previous report disappears when the inputs change; invalid JSON disables **Test config** so a bad config never reaches the network. |
 | 4.4 | Click **Fetch** on the row. 🌐 | The health badge is replaced by a spinner. Afterwards: "Healthy" and "just now", or "Broken" with a cause and a suggested action line. |
@@ -288,12 +289,36 @@ CAREER_OPS_LIVE_SCRAPER_CONFIG='{"detail":{"max_jobs":2}}' \
 Verified on 2026-11-02: 206 unique postings (294 raw, deduplicated across
 languages), `Fetched 206 jobs; 2 of 2 descriptions.`, longest description 6,031
 bytes. Keep the JSON in **single quotes**: unquoted, the shell strips the double
-quotes, the config fails to parse, and the fetch proceeds silently without
-descriptions.
+quotes, the config fails to parse, and the fetch fails as a configuration error
+instead of enriching.
 
 `crates/core/tests/ats_adapters.rs::selectors_extract_a_server_rendered_vendor_card`
 pins the same selector shape against a fixture, so a change to the extractor
 fails a test instead of silently fetching zero jobs.
+
+### NVIDIA (Eightfold)
+
+NVIDIA's careers page is an Eightfold shell: no job markup, no JSON-LD. It is
+fetched by the `eightfold` provider, not by selectors:
+
+```bash
+CAREER_OPS_LIVE_PORTALS=https://jobs.nvidia.com/careers \
+CAREER_OPS_LIVE_SCRAPER_CONFIG='{
+  "provider": "eightfold",
+  "domain": "nvidia.com",
+  "pagination": { "max_pages": 2 },
+  "detail": { "max_jobs": 2 }
+}' \
+  cargo test -p career-ops-app --features keychain -- --ignored live_fetch
+```
+
+Verified on 2026-11-03: 20 jobs from 2 pages,
+`Fetched 20 jobs from 2 pages; 2 of 2 descriptions.`, longest 6,253 bytes; 1.9 s
+for the core path, 5.5 s through the app including startup. The board reports
+~2,750 positions, so `max_pages` (default 5) is what keeps the fetch bounded.
+Eightfold descriptions are on by default — the `detail` block only lowers the
+cap. The same config can be typed into the portal form's JSON field until the
+provider selector lands in WS3.
 
 **If the fetch suddenly fails with `Broken { cause: "other" }` after working:**
 Waymo's AWS WAF answers repeated automated fetches with `202` and an empty body.

@@ -30,9 +30,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 
-use career_ops_core::acquisition::html::PaginationStop;
 use career_ops_core::acquisition::http;
 use career_ops_core::acquisition::manual;
+use career_ops_core::acquisition::report::PaginationStop;
 use career_ops_core::acquisition::router::{
     FetchError, FetchOutcome, FetchSource, HttpFetchSource, PreviewReport,
 };
@@ -1380,7 +1380,7 @@ mod tests {
     use career_ops_core::acquisition::ats::{AtsAdapter, NormalizedJob};
     use career_ops_core::acquisition::error::AtsResult;
     use career_ops_core::acquisition::html::selectors::SelectorConfig;
-    use career_ops_core::acquisition::html::PageReport;
+    use career_ops_core::acquisition::report::PageReport;
 
     /// Serializes the tests that create a vault. The test keychain uses one
     /// fixed service/account pair for the whole process, so two first-launch
@@ -1997,6 +1997,16 @@ mod tests {
                 raw_text: "Build things.".into(),
                 posted_at: None,
             }]))
+        }
+
+        async fn fetch_eightfold(
+            &self,
+            _host: &str,
+            _domain: &str,
+            _company_name: &str,
+            _max_pages: usize,
+        ) -> AtsResult<PageReport> {
+            Ok(PageReport::single(Vec::new()))
         }
 
         async fn fetch_page(&self, url: &url::Url) -> AtsResult<String> {
@@ -2626,6 +2636,43 @@ mod tests {
                     rows.len()
                 );
             }
+        }
+
+        // Eightfold's list has no description, so a portal using the provider
+        // must have produced text by default, and its URLs must be per position.
+        if let Some(portal) = app.portals.rows.iter().find(|row| {
+            let Some(raw) = row.scraper_config.as_deref() else {
+                return false;
+            };
+            let Ok(config) = serde_json::from_str::<serde_json::Value>(raw) else {
+                return false;
+            };
+            config.get("provider").and_then(|value| value.as_str()) == Some("eightfold")
+        }) {
+            let rows: Vec<_> = stored
+                .iter()
+                .filter(|job| job.company == portal.name)
+                .collect();
+            assert!(!rows.is_empty(), "Eightfold stored no jobs");
+            let described = rows
+                .iter()
+                .filter(|job| !job.raw_text.trim().is_empty())
+                .count();
+            assert!(
+                described > 0,
+                "Eightfold stored no description; the provider enriches by default"
+            );
+            for job in &rows {
+                assert!(
+                    job.source_url.starts_with("https://"),
+                    "Eightfold row is not an absolute posting URL: {}",
+                    job.source_url
+                );
+            }
+            eprintln!(
+                "live fetch: eightfold descriptions {described}/{} (all URLs per-posting)",
+                rows.len()
+            );
         }
 
         eprintln!(
