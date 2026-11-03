@@ -37,12 +37,55 @@ use super::http;
 /// The `scraper_config` argument is already-parsed. The router parses
 /// `portals.scraper_config` once and passes the result through, so this
 /// function does not see raw JSON.
+/// Why the selector page loop stopped.
+///
+/// The first two are the expected endings. Everything else means a page the
+/// config asked for was not read, which the caller should surface: a partial
+/// list that reports itself as complete is worse than a classified failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaginationStop {
+    /// The site offered no further page, or pagination is not configured.
+    EndOfList,
+    /// The configured `max_pages` limit was reached.
+    LimitReached,
+    /// A later page could not be fetched.
+    FetchFailed,
+    /// A later page fetched but yielded no jobs.
+    ExtractionFailed,
+    /// A later page produced no jobs the earlier pages had not already given.
+    NoNewJobs,
+    /// The next-page URL was identical to the current one.
+    RepeatedUrl,
+}
+
+/// One selector fetch: the jobs, how many pages produced them, and why the loop
+/// stopped.
+#[derive(Debug, Clone)]
+pub struct PageReport {
+    pub jobs: Vec<NormalizedJob>,
+    /// Pages that produced jobs. A page that failed before extraction is not
+    /// counted, so `pages_fetched + 1` is the page that was not read.
+    pub pages_fetched: usize,
+    pub stop: PaginationStop,
+}
+
+impl PageReport {
+    /// A single page with no pagination.
+    pub fn single(jobs: Vec<NormalizedJob>) -> Self {
+        Self {
+            jobs,
+            pages_fetched: 1,
+            stop: PaginationStop::EndOfList,
+        }
+    }
+}
+
 pub async fn fetch_static_jobs(
     client: &Client,
     url: &Url,
     company_name: &str,
     scraper_config: Option<&SelectorConfig>,
-) -> AtsResult<Vec<NormalizedJob>> {
+) -> AtsResult<PageReport> {
     let source = HttpPageSource { client };
     fetch_pages(&source, url, company_name, scraper_config).await
 }
@@ -101,13 +144,14 @@ async fn fetch_pages(
     first_url: &Url,
     company_name: &str,
     scraper_config: Option<&SelectorConfig>,
-) -> AtsResult<Vec<NormalizedJob>> {
+) -> AtsResult<PageReport> {
     let pagination = scraper_config.and_then(|config| config.pagination.as_ref());
     let max_pages = pagination.map_or(1, PaginationConfig::page_limit);
 
     let mut jobs: Vec<NormalizedJob> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut page_url = first_url.clone();
+    let mut pages_fetched = 0;
 
     for page in 1..=max_pages {
         let body = match source.fetch_page(&page_url).await {
@@ -115,7 +159,11 @@ async fn fetch_pages(
             Err(error) if page == 1 => return Err(error),
             Err(error) => {
                 warn!(page, %error, "pagination stopped: page fetch failed");
-                break;
+                return Ok(PageReport {
+                    jobs,
+                    pages_fetched,
+                    stop: PaginationStop::FetchFailed,
+                });
             }
         };
 
@@ -124,30 +172,57 @@ async fn fetch_pages(
             Err(error) if page == 1 => return Err(error),
             Err(error) => {
                 warn!(page, %error, "pagination stopped: page extraction failed");
-                break;
+                return Ok(PageReport {
+                    jobs,
+                    pages_fetched,
+                    stop: PaginationStop::ExtractionFailed,
+                });
             }
         };
 
+        pages_fetched += 1;
         let added = push_unique(&mut jobs, &mut seen, page_jobs);
         if added == 0 && page > 1 {
             // The site ignored the page parameter and served the same page,
             // or the next link points back at content we already have.
             warn!(page, "pagination stopped: the page produced no new jobs");
-            break;
+            return Ok(PageReport {
+                jobs,
+                pages_fetched,
+                stop: PaginationStop::NoNewJobs,
+            });
         }
 
-        let Some(pagination) = pagination else { break };
+        let Some(pagination) = pagination else {
+            return Ok(PageReport {
+                jobs,
+                pages_fetched,
+                stop: PaginationStop::EndOfList,
+            });
+        };
         let Some(next) = next_page_url(&page_url, &body, pagination, page + 1) else {
-            break;
+            return Ok(PageReport {
+                jobs,
+                pages_fetched,
+                stop: PaginationStop::EndOfList,
+            });
         };
         if next == page_url {
             warn!(page, "pagination stopped: the next page URL did not change");
-            break;
+            return Ok(PageReport {
+                jobs,
+                pages_fetched,
+                stop: PaginationStop::RepeatedUrl,
+            });
         }
         page_url = next;
     }
 
-    Ok(jobs)
+    Ok(PageReport {
+        jobs,
+        pages_fetched,
+        stop: PaginationStop::LimitReached,
+    })
 }
 
 /// Append jobs whose URL has not been seen yet; returns how many were added.
@@ -351,7 +426,7 @@ mod tests {
             ScriptedPages::new(vec![Ok(page(&[("A", "/jobs/a")], Some("/careers?page=2")))]);
         let config = config(None);
 
-        let jobs = fetch_pages(
+        let report = fetch_pages(
             &source,
             &url("https://example.com/careers"),
             "Acme",
@@ -359,9 +434,12 @@ mod tests {
         )
         .await
         .expect("fetch");
+        let jobs = report.jobs;
 
         assert_eq!(jobs.len(), 1);
         assert_eq!(source.calls(), vec!["https://example.com/careers"]);
+        assert_eq!(report.pages_fetched, 1);
+        assert_eq!(report.stop, PaginationStop::EndOfList);
     }
 
     #[tokio::test]
@@ -370,7 +448,7 @@ mod tests {
             ScriptedPages::new(vec![Ok(page(&[("A", "/jobs/a")], Some("/careers?page=2")))]);
         let config = config(Some(serde_json::json!({})));
 
-        let jobs = fetch_pages(
+        let report = fetch_pages(
             &source,
             &url("https://example.com/careers"),
             "Acme",
@@ -378,6 +456,7 @@ mod tests {
         )
         .await
         .expect("fetch");
+        let jobs = report.jobs;
 
         assert_eq!(jobs.len(), 1);
         assert_eq!(source.calls().len(), 1);
@@ -395,7 +474,7 @@ mod tests {
         ]);
         let config = config(Some(next_selector(None)));
 
-        let jobs = fetch_pages(
+        let report = fetch_pages(
             &source,
             &url("https://example.com/careers"),
             "Acme",
@@ -403,6 +482,7 @@ mod tests {
         )
         .await
         .expect("fetch");
+        let jobs = report.jobs;
 
         assert_eq!(jobs.len(), 3);
         assert_eq!(
@@ -414,6 +494,8 @@ mod tests {
             ],
             "relative and absolute next links both resolve"
         );
+        assert_eq!(report.pages_fetched, 3);
+        assert_eq!(report.stop, PaginationStop::EndOfList);
     }
 
     #[tokio::test]
@@ -428,7 +510,7 @@ mod tests {
             "max_pages": 3,
         })));
 
-        let jobs = fetch_pages(
+        let report = fetch_pages(
             &source,
             &url("https://example.com/careers"),
             "Acme",
@@ -436,6 +518,7 @@ mod tests {
         )
         .await
         .expect("fetch");
+        let jobs = report.jobs;
 
         assert_eq!(jobs.len(), 3);
         assert_eq!(
@@ -457,7 +540,7 @@ mod tests {
         ]);
         let config = config(Some(next_selector(Some(2))));
 
-        let jobs = fetch_pages(
+        let report = fetch_pages(
             &source,
             &url("https://example.com/careers"),
             "Acme",
@@ -465,9 +548,12 @@ mod tests {
         )
         .await
         .expect("fetch");
+        let jobs = report.jobs;
 
         assert_eq!(jobs.len(), 2);
         assert_eq!(source.calls().len(), 2);
+        assert_eq!(report.pages_fetched, 2);
+        assert_eq!(report.stop, PaginationStop::LimitReached);
     }
 
     #[tokio::test]
@@ -486,7 +572,7 @@ mod tests {
         let source = ScriptedPages::new(pages);
         let config = config(Some(next_selector(None)));
 
-        let jobs = fetch_pages(
+        let report = fetch_pages(
             &source,
             &url("https://example.com/careers"),
             "Acme",
@@ -494,6 +580,7 @@ mod tests {
         )
         .await
         .expect("fetch");
+        let jobs = report.jobs;
 
         assert_eq!(source.calls().len(), 5, "default limit is five pages");
         assert_eq!(jobs.len(), 5);
@@ -520,7 +607,7 @@ mod tests {
         let source = ScriptedPages::new(vec![Ok(first.clone()), Ok(first)]);
         let config = config(Some(next_selector(Some(5))));
 
-        let jobs = fetch_pages(
+        let report = fetch_pages(
             &source,
             &url("https://example.com/careers"),
             "Acme",
@@ -528,6 +615,7 @@ mod tests {
         )
         .await
         .expect("fetch");
+        let jobs = report.jobs;
 
         assert_eq!(jobs.len(), 1, "a repeated page must not duplicate jobs");
         assert_eq!(
@@ -535,6 +623,8 @@ mod tests {
             2,
             "the loop stops after the repeated page"
         );
+        assert_eq!(report.pages_fetched, 2);
+        assert_eq!(report.stop, PaginationStop::NoNewJobs);
     }
 
     #[tokio::test]
@@ -549,7 +639,7 @@ mod tests {
         ]);
         let config = config(Some(next_selector(Some(5))));
 
-        let jobs = fetch_pages(
+        let report = fetch_pages(
             &source,
             &url("https://example.com/careers"),
             "Acme",
@@ -557,6 +647,7 @@ mod tests {
         )
         .await
         .expect("fetch");
+        let jobs = report.jobs;
 
         let titles: Vec<&str> = jobs.iter().map(|job| job.title.as_str()).collect();
         assert_eq!(titles, vec!["A", "B"]);
@@ -571,7 +662,7 @@ mod tests {
         ]);
         let config = config(Some(next_selector(Some(5))));
 
-        let jobs = fetch_pages(
+        let report = fetch_pages(
             &source,
             &url("https://example.com/careers"),
             "Acme",
@@ -579,9 +670,12 @@ mod tests {
         )
         .await
         .expect("partial results are not an error");
+        let jobs = report.jobs;
 
         assert_eq!(jobs.len(), 1);
         assert_eq!(source.calls().len(), 2, "the loop stops at the failure");
+        assert_eq!(report.pages_fetched, 1);
+        assert_eq!(report.stop, PaginationStop::FetchFailed);
     }
 
     #[tokio::test]
@@ -609,7 +703,7 @@ mod tests {
         ]);
         let config = config(Some(next_selector(Some(5))));
 
-        let jobs = fetch_pages(
+        let report = fetch_pages(
             &source,
             &url("https://example.com/careers"),
             "Acme",
@@ -617,8 +711,11 @@ mod tests {
         )
         .await
         .expect("the first page is still good");
+        let jobs = report.jobs;
 
         assert_eq!(jobs.len(), 1);
+        assert_eq!(report.pages_fetched, 1);
+        assert_eq!(report.stop, PaginationStop::ExtractionFailed);
     }
 
     #[tokio::test]
@@ -632,7 +729,7 @@ mod tests {
             "max_pages": 5,
         })));
 
-        let jobs = fetch_pages(
+        let report = fetch_pages(
             &source,
             &url("https://example.com/careers"),
             "Acme",
@@ -640,6 +737,7 @@ mod tests {
         )
         .await
         .expect("fetch");
+        let jobs = report.jobs;
 
         assert_eq!(jobs.len(), 1);
         assert_eq!(
@@ -647,5 +745,6 @@ mod tests {
             1,
             "an unchanged next URL must stop before the redundant fetch"
         );
+        assert_eq!(report.stop, PaginationStop::RepeatedUrl);
     }
 }

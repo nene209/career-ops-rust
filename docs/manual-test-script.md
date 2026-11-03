@@ -219,11 +219,19 @@ Measurements:
 | :--- | :--- |
 | 2026-10-25 | 90 jobs from 3 pages of 30, Tier 1b, details WAF-challenged (`202`/0 bytes). |
 | 2026-11-03 | 60 jobs from 2 pages in 2.7 s; page 3 returned a WAF challenge, and the 2 detail requests were challenged too (`0 of 2 descriptions`, longest card text 252 bytes). A later retry stored 30 jobs and was challenged on page 2; the next retry was challenged on request 1 (`202`/0 bytes) and skipped. |
+| 2026-11-03 20:38 | **Full path:** 90 jobs from 3 pages in 7.0 s, 2 of 2 descriptions, longest 3,611 bytes. Result line: `Fetched 90 jobs from 3 pages; 2 of 2 descriptions.` |
 
 When the WAF is not challenging, the same run reports posting-level text and
-the longest description. Extraction from the real posting markup is covered
-offline by `the_real_waymo_detail_page_yields_its_description`, so a challenge
-does not leave the detail path untested.
+the longest description. That was verified on 2026-11-03 20:38: 90 jobs from 3
+pages, 2 of 2 descriptions, longest 3,611 bytes, 7.0 s. Extraction from the real
+posting markup is also covered offline by
+`the_real_waymo_detail_page_yields_its_description`, so a challenge does not
+leave the detail path untested.
+
+A selector fetch now names a page it could not read in the result line, for
+example `Fetched 60 jobs from 2 pages (page 3 could not be read); 0 of 2
+descriptions.` Hitting the configured `max_pages` cap is an expected ending and
+stays silent.
 
 The older generic check still works with the same config:
 

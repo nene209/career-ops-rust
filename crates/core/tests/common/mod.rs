@@ -108,6 +108,7 @@ use async_trait::async_trait;
 use career_ops_core::acquisition::ats::{AtsAdapter, NormalizedJob};
 use career_ops_core::acquisition::error::AtsError;
 use career_ops_core::acquisition::html::selectors::SelectorConfig;
+use career_ops_core::acquisition::html::PageReport;
 use career_ops_core::acquisition::router::FetchSource;
 use url::Url;
 
@@ -123,7 +124,7 @@ pub struct MockFetchSource {
     html_calls: Mutex<Vec<String>>,
     page_calls: Mutex<Vec<String>>,
     ats_queue: Mutex<VecDeque<Result<Vec<NormalizedJob>, AtsError>>>,
-    html_queue: Mutex<VecDeque<Result<Vec<NormalizedJob>, AtsError>>>,
+    html_queue: Mutex<VecDeque<Result<PageReport, AtsError>>>,
     page_queue: Mutex<VecDeque<Result<String, AtsError>>>,
 }
 
@@ -148,6 +149,12 @@ impl MockFetchSource {
     }
 
     pub fn with_html(result: Result<Vec<NormalizedJob>, AtsError>) -> Self {
+        Self::with_html_report(result.map(PageReport::single))
+    }
+
+    /// A scripted selector fetch with explicit page metadata, for tests about
+    /// partial pagination.
+    pub fn with_html_report(result: Result<PageReport, AtsError>) -> Self {
         let mock = Self::default();
         mock.html_queue.lock().unwrap().push_back(result);
         mock
@@ -165,7 +172,11 @@ impl MockFetchSource {
         results: impl IntoIterator<Item = Result<Vec<NormalizedJob>, AtsError>>,
     ) -> Self {
         let mock = Self::default();
-        mock.html_queue.lock().unwrap().extend(results);
+        mock.html_queue.lock().unwrap().extend(
+            results
+                .into_iter()
+                .map(|result| result.map(PageReport::single)),
+        );
         mock
     }
 
@@ -213,13 +224,13 @@ impl FetchSource for MockFetchSource {
         url: &Url,
         _company_name: &str,
         _config: Option<&SelectorConfig>,
-    ) -> Result<Vec<NormalizedJob>, AtsError> {
+    ) -> Result<PageReport, AtsError> {
         self.html_calls.lock().unwrap().push(url.to_string());
         self.html_queue
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or_else(|| Ok(vec![]))
+            .unwrap_or_else(|| Ok(PageReport::single(Vec::new())))
     }
 
     async fn fetch_page(&self, url: &Url) -> Result<String, AtsError> {

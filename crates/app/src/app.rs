@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 
+use career_ops_core::acquisition::html::PaginationStop;
 use career_ops_core::acquisition::http;
 use career_ops_core::acquisition::manual;
 use career_ops_core::acquisition::router::{
@@ -1191,17 +1192,44 @@ fn friendly_error(error: &CoreError) -> String {
 /// The one-line result shown after a single-portal fetch.
 ///
 /// Description counts appear only when the portal has a `detail` config, so a
-/// plain board keeps the shorter message.
+/// plain board keeps the shorter message. A selector fetch that stopped early
+/// names the page it could not read: a partial list must not look complete.
 fn fetch_summary(outcome: &FetchOutcome) -> String {
     let jobs = count_with_noun(outcome.jobs_fetched, "job");
+    let mut summary = match outcome.pages_fetched {
+        Some(pages) if pages > 1 => format!("Fetched {jobs} from {pages} pages"),
+        _ => format!("Fetched {jobs}"),
+    };
+
+    if let Some(note) = pagination_stop_note(outcome) {
+        summary.push_str(&format!(" ({note})"));
+    }
+
     if outcome.details_attempted == 0 {
-        format!("Fetched {jobs}.")
+        summary.push('.');
     } else {
-        format!(
-            "Fetched {jobs}; {} of {}.",
+        summary.push_str(&format!(
+            "; {} of {}.",
             outcome.details_enriched,
             count_with_noun(outcome.details_attempted, "description")
-        )
+        ));
+    }
+
+    summary
+}
+
+/// The parenthetical note for a selector fetch that stopped before the list
+/// ended. Expected endings (end of list, configured cap) say nothing.
+fn pagination_stop_note(outcome: &FetchOutcome) -> Option<String> {
+    let pages = outcome.pages_fetched?;
+    let next = pages + 1;
+    match outcome.pagination_stopped? {
+        PaginationStop::FetchFailed | PaginationStop::ExtractionFailed => {
+            Some(format!("page {next} could not be read"))
+        }
+        PaginationStop::NoNewJobs => Some(format!("page {next} returned no new jobs")),
+        PaginationStop::RepeatedUrl => Some("pagination pointed back at the same page".into()),
+        PaginationStop::EndOfList | PaginationStop::LimitReached => None,
     }
 }
 
@@ -1352,6 +1380,7 @@ mod tests {
     use career_ops_core::acquisition::ats::{AtsAdapter, NormalizedJob};
     use career_ops_core::acquisition::error::AtsResult;
     use career_ops_core::acquisition::html::selectors::SelectorConfig;
+    use career_ops_core::acquisition::html::PageReport;
 
     /// Serializes the tests that create a vault. The test keychain uses one
     /// fixed service/account pair for the whole process, so two first-launch
@@ -1950,9 +1979,9 @@ mod tests {
             url: &url::Url,
             _company_name: &str,
             _config: Option<&SelectorConfig>,
-        ) -> AtsResult<Vec<NormalizedJob>> {
+        ) -> AtsResult<PageReport> {
             self.calls.lock().unwrap().push(url.to_string());
-            Ok(vec![NormalizedJob {
+            Ok(PageReport::single(vec![NormalizedJob {
                 external_id: "job-1".into(),
                 title: "Engineer".into(),
                 company: "Acme".into(),
@@ -1963,7 +1992,7 @@ mod tests {
                 source_url: url.clone(),
                 raw_text: "Build things.".into(),
                 posted_at: None,
-            }])
+            }]))
         }
 
         async fn fetch_page(&self, url: &url::Url) -> AtsResult<String> {
@@ -2047,6 +2076,8 @@ mod tests {
         let with_details = FetchOutcome {
             jobs_fetched: 1,
             tier: FetchTier::Tier1bHtml,
+            pages_fetched: Some(1),
+            pagination_stopped: Some(PaginationStop::EndOfList),
             details_attempted: 1,
             details_enriched: 1,
         };
@@ -2055,9 +2086,38 @@ mod tests {
             "Fetched 1 job; 1 of 1 description."
         );
 
+        let multi_page = FetchOutcome {
+            jobs_fetched: 60,
+            tier: FetchTier::Tier1bHtml,
+            pages_fetched: Some(2),
+            pagination_stopped: Some(PaginationStop::ExtractionFailed),
+            details_attempted: 2,
+            details_enriched: 2,
+        };
+        assert_eq!(
+            fetch_summary(&multi_page),
+            "Fetched 60 jobs from 2 pages (page 3 could not be read); 2 of 2 descriptions."
+        );
+
+        let capped = FetchOutcome {
+            jobs_fetched: 150,
+            tier: FetchTier::Tier1bHtml,
+            pages_fetched: Some(5),
+            pagination_stopped: Some(PaginationStop::LimitReached),
+            details_attempted: 0,
+            details_enriched: 0,
+        };
+        assert_eq!(
+            fetch_summary(&capped),
+            "Fetched 150 jobs from 5 pages.",
+            "hitting the configured cap is an expected ending"
+        );
+
         let no_details = FetchOutcome {
             jobs_fetched: 3,
             tier: FetchTier::Tier1bHtml,
+            pages_fetched: Some(1),
+            pagination_stopped: Some(PaginationStop::EndOfList),
             details_attempted: 0,
             details_enriched: 0,
         };

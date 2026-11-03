@@ -1,7 +1,7 @@
 # Phase 2.2: Acquisition Completeness — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.8), §12
-**Status:** Complete, with criterion 8 partially verified: pagination was observed live and posting-level extraction is covered by a real-markup fixture, but the site's WAF blocked the live detail route. Retrospective: `.agents/plans/phase_2.2_retrospective.md`
+**Status:** Complete — all ten exit criteria met and verified live, including the final Waymo run (90 jobs from 3 pages with 2 of 2 descriptions). Retrospective: `.agents/plans/phase_2.2_retrospective.md`
 **Last updated:** 2026-11-03
 **Duration:** 4–6 days (two workstreams deliver usable scraping; the rest is quality)
 **Depends on:** Phase 2 (acquisition) and Phase 2.1 (UI shell)
@@ -19,6 +19,7 @@
 | v0.5 | Workstream 3 implemented: `smartrecruiters::normalize` emits a stable per-posting URL (`https://jobs.smartrecruiters.com/{slug}/{id}`) and department/employment type from the list item; the adapter exposes `detail_url`/`detail_from_body` so the router's existing bounded enrichment pass reads `jobAd.sections` from the posting API and `compose_description` skips empty sections. Live against Ubisoft2: 206 unique postings, 2 of 2 descriptions, longest 6,031 bytes. |
 | v0.6 | Workstream 4 implemented: **Test config** in the add/edit modal runs the draft URL and config through the router's real routing and extraction with no database handle, reporting page-1 counts, up to three titles with resolved URLs, and the first description length. Bounded to one list page and three detail requests regardless of the config; invalid JSON is classified as `InvalidRequest` instead of being silently ignored. |
 | v0.7 | Workstream 5 implemented: the live test now asserts SmartRecruiters per-posting URLs and descriptions (attaching a detail-only default so the default run covers WS3), a dedicated paginated/detailed variant covers Waymo and skips on a WAF challenge, and the manual script records per-site counts and timings. Retrospective written; caps confirmed by measurement; two findings (silent partial pagination, Tier 1 cause masked by Tier 2) recorded for follow-up. |
+| v0.8 | WS5 follow-up: both findings fixed. `fetch_pages` returns a `PageReport` (jobs, pages fetched, stop reason) that reaches `FetchOutcome` and the fetch message ("Fetched 60 jobs from 2 pages (page 3 could not be read)."). A Tier 2 failure no longer replaces the Tier 1 cause: the original cause is kept and the fallback's detail is appended, so an absent sidecar cannot mask a blocked page. A later live run completed criterion 8: 90 jobs from 3 pages, 2 of 2 descriptions, longest 3,611 bytes, 7.0 s. |
 
 ---
 
@@ -462,13 +463,15 @@ config could be judged against a report for a different one.
 
 **Outcome (2026-11-03).** Four ATS boards stored 467 unique jobs in about 6.4 s,
 including two SmartRecruiters detail requests and a re-fetch with no duplicates.
-Waymo stored 60 jobs from two pages in 2.7 s; page 3 and both detail requests were
-challenged, so criterion 8 is recorded as partial — the stop was a WAF condition,
-not an extraction regression, and the real detail markup remains covered offline.
-Caps were confirmed rather than changed (5 pages, 40 details). Two findings are
-recorded for follow-up: a later page failing leaves the portal Healthy with no
-visible partial state, and a Tier 1 cause is replaced by the Tier 2 error when
-both tiers fail. Full record: `.agents/plans/phase_2.2_retrospective.md`.
+Waymo's final run stored 90 jobs from three pages in 7.0 s with 2 of 2
+descriptions (longest 3,611 bytes), so criterion 8 is fully verified; earlier
+attempts were WAF-challenged and the test skipped them. Caps were confirmed
+rather than changed (5 pages, 40 details). The two findings from the pass — a
+later page failing left the portal Healthy with no visible partial state, and a
+Tier 1 cause was replaced by the Tier 2 error when both tiers failed — were fixed
+in the follow-up: a selector fetch now reports its page count and stop reason,
+and a failed fallback preserves the original cause. Full record:
+`.agents/plans/phase_2.2_retrospective.md`.
 
 ---
 

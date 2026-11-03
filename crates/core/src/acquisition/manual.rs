@@ -105,7 +105,8 @@ pub async fn add_job_from_url(
 
     // Tier 1b succeeded and found at least one job. Store the one
     // whose URL matches the pasted URL.
-    if let Ok(jobs) = &tier1b {
+    if let Ok(report) = &tier1b {
+        let jobs = &report.jobs;
         if !jobs.is_empty() {
             let target = pick_job_for_url(jobs, &url)
                 .unwrap_or_else(|| jobs.first().cloned().expect("non-empty checked"));

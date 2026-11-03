@@ -31,6 +31,8 @@ use super::error::{AtsError, AtsResult, FailureCause};
 use super::html;
 use super::html::detail::DetailConfig;
 use super::html::selectors::SelectorConfig;
+use super::html::PageReport;
+use super::html::PaginationStop;
 use crate::backend::{BrowserBackend, RenderOpts};
 use crate::error::Result;
 use crate::model::{FetchTier, Portal};
@@ -87,7 +89,7 @@ pub trait FetchSource: Send + Sync {
         url: &Url,
         company_name: &str,
         config: Option<&SelectorConfig>,
-    ) -> AtsResult<Vec<NormalizedJob>>;
+    ) -> AtsResult<PageReport>;
 
     /// Fetch one raw HTML document, such as a job's detail page.
     ///
@@ -124,7 +126,7 @@ impl FetchSource for HttpFetchSource {
         url: &Url,
         company_name: &str,
         config: Option<&SelectorConfig>,
-    ) -> AtsResult<Vec<NormalizedJob>> {
+    ) -> AtsResult<PageReport> {
         html::fetch_static_jobs(&self.client, url, company_name, config).await
     }
 
@@ -148,6 +150,11 @@ impl FetchSource for HttpFetchSource {
 pub struct FetchOutcome {
     pub jobs_fetched: usize,
     pub tier: FetchTier,
+    /// List pages fetched by the selector path. `None` when an adapter or the
+    /// rendering backend owns pagination.
+    pub pages_fetched: Option<usize>,
+    /// Why the selector loop stopped. `None` when no selector fetch ran.
+    pub pagination_stopped: Option<PaginationStop>,
     /// Detail pages fetched to fill in descriptions. Zero when the portal has
     /// no `detail` config.
     pub details_attempted: usize,
@@ -177,6 +184,19 @@ impl FetchError {
             cause: FailureCause::Other,
             detail: detail.into(),
         }
+    }
+
+    /// Keep the failure that caused the escalation and record what the fallback
+    /// said.
+    ///
+    /// A sidecar that is not running must not hide the page's own failure: the
+    /// user needs "the page was blocked", not "an unrecognized reason".
+    fn with_fallback(mut self, fallback: FetchError) -> Self {
+        self.detail = format!(
+            "{}; the browser fallback also failed: {}",
+            self.detail, fallback.detail
+        );
+        self
     }
 }
 
@@ -283,10 +303,10 @@ pub async fn fetch_portal_inner(
     // asks it where descriptions live; Tier 1b and Tier 2 have no adapter.
     let mut ats_source: Option<(&dyn AtsAdapter, String)> = None;
 
-    let (jobs, tier, tier1_failure) = match route {
+    let (jobs, tier, tier1_failure, page_report) = match route {
         InitialRoute::Tier2 => {
             let jobs = fetch_tier2(&portal, &url, browser, config.as_ref()).await?;
-            (jobs, FetchTier::Tier2Obscura, None)
+            (jobs, FetchTier::Tier2Obscura, None, None)
         }
         InitialRoute::Tier1a { adapter_name, slug } => {
             let adapter: &dyn AtsAdapter = adapters
@@ -297,12 +317,15 @@ pub async fn fetch_portal_inner(
             match source.fetch_ats(adapter, &slug, &portal.company_name).await {
                 Ok(jobs) => {
                     ats_source = Some((adapter, slug));
-                    (jobs, FetchTier::Tier1aAts, None)
+                    (jobs, FetchTier::Tier1aAts, None, None)
                 }
                 Err(e) if e.escalatable() && browser.is_some() => {
-                    let failure = e.cause();
-                    let jobs = fetch_tier2(&portal, &url, browser, config.as_ref()).await?;
-                    (jobs, FetchTier::Tier2Obscura, Some(failure))
+                    let tier1 = FetchError::from_ats(e, "Tier 1a");
+                    let failure = tier1.cause;
+                    match fetch_tier2(&portal, &url, browser, config.as_ref()).await {
+                        Ok(jobs) => (jobs, FetchTier::Tier2Obscura, Some(failure), None),
+                        Err(tier2) => return Err(tier1.with_fallback(tier2)),
+                    }
                 }
                 Err(e) => return Err(FetchError::from_ats(e, "Tier 1a")),
             }
@@ -312,15 +335,28 @@ pub async fn fetch_portal_inner(
                 .fetch_html(&url, &portal.company_name, config.as_ref())
                 .await
             {
-                Ok(jobs) => (jobs, FetchTier::Tier1bHtml, None),
+                Ok(report) => (
+                    report.jobs,
+                    FetchTier::Tier1bHtml,
+                    None,
+                    Some((report.pages_fetched, report.stop)),
+                ),
                 Err(e) if e.escalatable() && browser.is_some() => {
-                    let failure = e.cause();
-                    let jobs = fetch_tier2(&portal, &url, browser, config.as_ref()).await?;
-                    (jobs, FetchTier::Tier2Obscura, Some(failure))
+                    let tier1 = FetchError::from_ats(e, "Tier 1b");
+                    let failure = tier1.cause;
+                    match fetch_tier2(&portal, &url, browser, config.as_ref()).await {
+                        Ok(jobs) => (jobs, FetchTier::Tier2Obscura, Some(failure), None),
+                        Err(tier2) => return Err(tier1.with_fallback(tier2)),
+                    }
                 }
                 Err(e) => return Err(FetchError::from_ats(e, "Tier 1b")),
             }
         }
+    };
+
+    let (pages_fetched, pagination_stopped) = match page_report {
+        Some((pages, stop)) => (Some(pages), Some(stop)),
+        None => (None, None),
     };
 
     if let Some(cause) = tier1_failure {
@@ -360,6 +396,8 @@ pub async fn fetch_portal_inner(
     Ok(FetchOutcome {
         jobs_fetched: count,
         tier,
+        pages_fetched,
+        pagination_stopped,
         details_attempted,
         details_enriched,
     })
@@ -627,7 +665,8 @@ pub async fn preview(
             let jobs = source
                 .fetch_html(url, company_name, single_page.as_ref())
                 .await
-                .map_err(|error| FetchError::from_ats(error, "Tier 1b"))?;
+                .map_err(|error| FetchError::from_ats(error, "Tier 1b"))?
+                .jobs;
             let pages = config
                 .as_ref()
                 .and_then(|config| config.pagination.as_ref())

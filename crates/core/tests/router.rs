@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use career_ops_core::acquisition::ats;
 use career_ops_core::acquisition::error::{AtsError, FailureCause};
+use career_ops_core::acquisition::html::{PageReport, PaginationStop};
 use career_ops_core::acquisition::router::{
     decide_initial_route, fetch_portal, fetch_portal_cancellable, preview, InitialRoute,
 };
@@ -211,7 +212,7 @@ async fn browser_render_mode_goes_directly_to_tier2() {
 }
 
 #[tokio::test]
-async fn both_tiers_failing_returns_classified_error() {
+async fn both_tiers_failing_keeps_the_tier1_cause() {
     let db = common::TestDb::new_raw().await;
     let portal = portals::create(&db.pool, static_portal("https://example.com/careers"))
         .await
@@ -233,9 +234,14 @@ async fn both_tiers_failing_returns_classified_error() {
         .await
         .expect_err("both tiers should fail");
 
-    assert_eq!(
-        err.cause,
-        career_ops_core::acquisition::error::FailureCause::ParseError
+    // The Tier 2 failure is recorded, but it must not replace the Tier 1 cause:
+    // a sidecar that is not running says nothing about why the page failed.
+    assert_eq!(err.cause, FailureCause::Blocked);
+    assert!(err.detail.contains("Tier 1b"), "{}", err.detail);
+    assert!(
+        err.detail.contains("browser fallback also failed"),
+        "{}",
+        err.detail
     );
 
     db.close().await;
@@ -562,6 +568,45 @@ async fn a_detail_only_config_enriches_an_ats_board() {
         stored_texts(&db.pool).await,
         vec!["From the detail page."],
         "an ATS board can opt into descriptions with a detail-only config"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_partial_pagination_is_reported_in_the_outcome() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://example.com/careers",
+            serde_json::json!({
+                "list": "article.job",
+                "fields": { "title": "h2 a" },
+                "pagination": { "next": "a[rel=next]", "max_pages": 5 }
+            }),
+        ),
+    )
+    .await
+    .expect("create portal");
+
+    let report = PageReport {
+        jobs: vec![sample_job("a"), sample_job("b")],
+        pages_fetched: 2,
+        stop: PaginationStop::ExtractionFailed,
+    };
+    let source = Arc::new(MockFetchSource::with_html_report(Ok(report)));
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.jobs_fetched, 2);
+    assert_eq!(outcome.pages_fetched, Some(2));
+    assert_eq!(
+        outcome.pagination_stopped,
+        Some(PaginationStop::ExtractionFailed),
+        "a page that could not be read must not disappear from the outcome"
     );
 
     db.close().await;
