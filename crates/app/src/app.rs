@@ -2269,6 +2269,26 @@ mod tests {
         "https://jobs.smartrecruiters.com/Ubisoft2",
     ];
 
+    /// Waymo's search-page config, kept in sync with
+    /// `docs/manual-test-script.md` §8. The page is server-rendered but carries
+    /// no `JobPosting` JSON-LD, so it needs the card selectors and pagination.
+    const WAYMO_CONFIG: &str = r#"{
+      "list": "article.job-search-results-card-col",
+      "fields": {
+        "title": "h3.job-search-results-card-title a",
+        "location": "li.job-component-location span",
+        "department": "li.job-component-department span",
+        "employment_type": "li.job-component-employment-type span",
+        "description": "p.job-search-results-summary"
+      },
+      "pagination": {
+        "next": "a[rel=next]",
+        "url_template": "https://careers.withwaymo.com/jobs/search?page={page}",
+        "max_pages": 3
+      },
+      "detail": { "max_jobs": 2 }
+    }"#;
+
     /// The URLs for this run: `CAREER_OPS_LIVE_PORTALS` (comma-separated) or the
     /// default list.
     fn live_portal_urls() -> Vec<String> {
@@ -2287,7 +2307,8 @@ mod tests {
     ///
     /// Pages that expose no JSON-LD `JobPosting` need a selector config. Set it
     /// with `CAREER_OPS_LIVE_SCRAPER_CONFIG`; see `docs/manual-test-script.md`
-    /// §8 for the Waymo config.
+    /// §8 for the Waymo config. A SmartRecruiters board gets a detail-only
+    /// default when this is unset, because its list endpoint carries no text.
     fn live_scraper_config() -> Option<String> {
         std::env::var("CAREER_OPS_LIVE_SCRAPER_CONFIG")
             .ok()
@@ -2375,7 +2396,13 @@ mod tests {
                 company_name: live_portal_name(url),
                 url: url.clone(),
                 render_mode: "static".into(),
-                scraper_config: scraper_config.clone(),
+                scraper_config: scraper_config.clone().or_else(|| {
+                    // The SmartRecruiters list endpoint has no body, so without
+                    // a detail block the live check would never exercise the
+                    // description path. Two requests keep the default fast.
+                    url.contains("smartrecruiters.com")
+                        .then(|| r#"{"detail":{"max_jobs":2}}"#.to_string())
+                }),
             }));
             wait_until(&mut app, &ctx, |app| {
                 app.portals.rows.len() == index + 1 && app.portals_task.is_none()
@@ -2491,12 +2518,255 @@ mod tests {
 
         eprintln!("live fetch: longest description {longest} bytes");
 
+        // SmartRecruiters stores one row per posting, so every row must point
+        // at its own page; the detail block (explicit or the default above) must
+        // also produce text, which the list endpoint cannot supply.
+        let smart_detail_requested = app.portals.rows.iter().any(|row| {
+            row.url.contains("smartrecruiters.com")
+                && row
+                    .scraper_config
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .is_some_and(|config| config.get("detail").is_some())
+        });
+        if smart_detail_requested {
+            if let Some(portal) = app
+                .portals
+                .rows
+                .iter()
+                .find(|row| row.url.contains("smartrecruiters.com"))
+            {
+                let rows: Vec<_> = stored
+                    .iter()
+                    .filter(|job| job.company == portal.name)
+                    .collect();
+                assert!(!rows.is_empty(), "SmartRecruiters stored no jobs");
+                let described = rows
+                    .iter()
+                    .filter(|job| !job.raw_text.trim().is_empty())
+                    .count();
+                assert!(
+                    described > 0,
+                    "SmartRecruiters stored no description after a detail request"
+                );
+                for job in &rows {
+                    let posting_id = job.source_url.rsplit('/').next().unwrap_or_default();
+                    assert!(
+                        job.source_url
+                            .starts_with("https://jobs.smartrecruiters.com/")
+                            && !posting_id.is_empty()
+                            && posting_id.chars().all(|c| c.is_ascii_digit()),
+                        "SmartRecruiters row is not per-posting: {}",
+                        job.source_url
+                    );
+                }
+                eprintln!(
+                    "live fetch: smartrecruiters descriptions {described}/{} (all URLs per-posting)",
+                    rows.len()
+                );
+            }
+        }
+
         eprintln!(
             "live fetch: {} unique jobs stored across {} portals; Pipeline shows {} (first tier: {})",
             stored.len(),
             app.portals.rows.len(),
             app.pipeline.rows.len(),
             app.pipeline.rows[0].tier.label()
+        );
+    }
+
+    /// GET a URL through the production client. `Some((success, status, bytes))`
+    /// or `None` when the request itself failed. Used to tell a WAF challenge
+    /// from an extraction regression in the live tests.
+    fn live_probe(app: &CareerOpsApp, url: &str) -> Option<(bool, u16, usize)> {
+        let client = http::default_client().expect("http client");
+        app.runtime().block_on(async {
+            match http::get_with_retry(&client, url).await {
+                Ok(response) => {
+                    let status = response.status();
+                    let bytes = response.text().await.map(|body| body.len()).unwrap_or(0);
+                    Some((status.is_success(), status.as_u16(), bytes))
+                }
+                Err(error) => {
+                    eprintln!("live probe failed for {url}: {error}");
+                    None
+                }
+            }
+        })
+    }
+
+    /// A challenge or a transport failure is a site condition, not a code
+    /// failure. An empty body counts as a challenge because the WAF sometimes
+    /// answers `200` with nothing.
+    fn live_probe_challenged(probe: Option<(bool, u16, usize)>) -> bool {
+        match probe {
+            None => true,
+            Some((success, status, bytes)) => !success || status == 202 || bytes == 0,
+        }
+    }
+
+    #[test]
+    #[ignore = "hits the network; run with --ignored"]
+    fn live_fetch_with_pagination_and_details() {
+        // Same opt-in as the other live test: RUST_LOG=info shows the router's
+        // per-portal enrichment line.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let url = std::env::var("CAREER_OPS_LIVE_PAGED_PORTAL")
+            .unwrap_or_else(|_| "https://careers.withwaymo.com/jobs/search".to_string());
+        let config = std::env::var("CAREER_OPS_LIVE_SCRAPER_CONFIG")
+            .ok()
+            .filter(|raw| !raw.trim().is_empty())
+            .unwrap_or_else(|| WAYMO_CONFIG.to_string());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut app = CareerOpsApp::new(state, runtime);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        let name = live_portal_name(&url);
+
+        // Waymo's WAF answers repeated traffic with `202` and an empty body.
+        // That is a site condition, not a code failure: report it and stop,
+        // because a red live run cannot distinguish it from a regression.
+        // Other hosts are not probed.
+        if url.contains("careers.withwaymo.com") {
+            let probe = live_probe(&app, &url);
+            if live_probe_challenged(probe) {
+                eprintln!(
+                    "live pagination: skipped, Waymo is challenging automated requests \
+                     ({probe:?}). Retry later; see docs/manual-test-script.md §8."
+                );
+                return;
+            }
+        }
+
+        app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
+            company_name: name.clone(),
+            url: url.clone(),
+            render_mode: "static".into(),
+            scraper_config: Some(config.clone()),
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals.rows.len() == 1 && app.portals_task.is_none()
+        });
+
+        let started = Instant::now();
+        app.handle_portals_action(PortalsAction::FetchOne(app.portals.rows[0].id));
+        wait_until_within(&mut app, &ctx, Duration::from_secs(180), |app| {
+            app.portals_task.is_none()
+        });
+        let elapsed = started.elapsed();
+
+        let portal = &app.portals.rows[0];
+        assert_eq!(
+            portal.health,
+            HealthBadge::Healthy,
+            "{} was not fetched (hint: {:?}). A WAF challenge is a retry, not a code failure.",
+            portal.url,
+            portal.suggested_action
+        );
+        eprintln!("live pagination: {:?} in {elapsed:?}", app.portals_message);
+
+        let pool = app.pool().expect("pool");
+        let stored = app
+            .runtime()
+            .block_on(job_repo::list_recent(&pool, 10_000))
+            .expect("list stored jobs");
+        let jobs: Vec<_> = stored.iter().filter(|job| job.company == name).collect();
+
+        // One Waymo page is 30 cards. If only one page arrived, probe page 2:
+        // a served page with no extracted jobs is a pagination regression, a
+        // challenge is the documented WAF limit.
+        if jobs.len() <= 30 {
+            let page_two = serde_json::from_str::<serde_json::Value>(&config)
+                .ok()
+                .and_then(|config| {
+                    config
+                        .pointer("/pagination/url_template")
+                        .and_then(|value| value.as_str())
+                        .map(|template| template.replace("{page}", "2"))
+                });
+
+            match page_two {
+                Some(page_two) => {
+                    let probe = live_probe(&app, &page_two);
+                    if live_probe_challenged(probe) {
+                        eprintln!(
+                            "live pagination: skipped, page 2 is WAF-challenged ({probe:?}); \
+                             page 1 stored {} jobs",
+                            jobs.len()
+                        );
+                        return;
+                    }
+                    panic!(
+                        "pagination stored {} jobs although page 2 was served ({probe:?})",
+                        jobs.len()
+                    );
+                }
+                None => panic!(
+                    "pagination stored {} jobs; one page is 30 and the config has no url_template",
+                    jobs.len()
+                ),
+            }
+        }
+
+        let longest = jobs.iter().map(|job| job.raw_text.len()).max().unwrap_or(0);
+        let described = jobs.iter().filter(|job| job.raw_text.len() > 500).count();
+
+        if described >= 1 {
+            eprintln!(
+                "live pagination: {} jobs, {described} with a description, longest {longest} bytes, fetched in {elapsed:?}",
+                jobs.len()
+            );
+            return;
+        }
+
+        // No posting text. Either the WAF answered the detail request with a
+        // challenge (operational, documented in the manual script) or extraction
+        // broke. Probe one posting directly: a real document plus no extracted
+        // text is a code failure and must fail the test.
+        let probe_url = jobs[0].source_url.clone();
+        let probe = live_probe(&app, probe_url.as_str());
+        assert!(
+            live_probe_challenged(probe),
+            "the detail page was served ({probe:?}) but no description was extracted from \
+             {probe_url}"
+        );
+        eprintln!(
+            "live pagination: {} jobs, details WAF-challenged ({probe:?}), description \
+             assertion skipped, fetched in {elapsed:?}",
+            jobs.len()
         );
     }
 

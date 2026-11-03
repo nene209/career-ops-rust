@@ -1,8 +1,8 @@
 # Phase 2.2: Acquisition Completeness — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.7), §12
-**Status:** In progress — Workstreams 1, 1b, 2, 3, and 4 implemented (2026-11-02)
-**Last updated:** 2026-11-02
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.8), §12
+**Status:** Complete, with criterion 8 partially verified: pagination was observed live and posting-level extraction is covered by a real-markup fixture, but the site's WAF blocked the live detail route. Retrospective: `.agents/plans/phase_2.2_retrospective.md`
+**Last updated:** 2026-11-03
 **Duration:** 4–6 days (two workstreams deliver usable scraping; the rest is quality)
 **Depends on:** Phase 2 (acquisition) and Phase 2.1 (UI shell)
 
@@ -18,6 +18,7 @@
 | v0.4 | Workstream 2 implemented: `detail` config on `SelectorConfig`, JSON-LD-then-selector extraction, bounded and cancellable enrichment between list extraction and storage, 200 KB truncation, and `details_attempted`/`details_enriched` on `FetchOutcome` plus a one-line result message in the app. Live verification hit Waymo's WAF on the detail route (`202`/empty body), recorded as an operational limit rather than a code failure. |
 | v0.5 | Workstream 3 implemented: `smartrecruiters::normalize` emits a stable per-posting URL (`https://jobs.smartrecruiters.com/{slug}/{id}`) and department/employment type from the list item; the adapter exposes `detail_url`/`detail_from_body` so the router's existing bounded enrichment pass reads `jobAd.sections` from the posting API and `compose_description` skips empty sections. Live against Ubisoft2: 206 unique postings, 2 of 2 descriptions, longest 6,031 bytes. |
 | v0.6 | Workstream 4 implemented: **Test config** in the add/edit modal runs the draft URL and config through the router's real routing and extraction with no database handle, reporting page-1 counts, up to three titles with resolved URLs, and the first description length. Bounded to one list page and three detail requests regardless of the config; invalid JSON is classified as `InvalidRequest` instead of being silently ignored. |
+| v0.7 | Workstream 5 implemented: the live test now asserts SmartRecruiters per-posting URLs and descriptions (attaching a detail-only default so the default run covers WS3), a dedicated paginated/detailed variant covers Waymo and skips on a WAF challenge, and the manual script records per-site counts and timings. Retrospective written; caps confirmed by measurement; two findings (silent partial pagination, Tier 1 cause masked by Tier 2) recorded for follow-up. |
 
 ---
 
@@ -459,6 +460,16 @@ config could be judged against a report for a different one.
    sequential enrichment is fast enough, and whether Phase 3 should enrich
    lazily at evaluation time instead of eagerly at fetch time.
 
+**Outcome (2026-11-03).** Four ATS boards stored 467 unique jobs in about 6.4 s,
+including two SmartRecruiters detail requests and a re-fetch with no duplicates.
+Waymo stored 60 jobs from two pages in 2.7 s; page 3 and both detail requests were
+challenged, so criterion 8 is recorded as partial — the stop was a WAF condition,
+not an extraction regression, and the real detail markup remains covered offline.
+Caps were confirmed rather than changed (5 pages, 40 details). Two findings are
+recorded for follow-up: a later page failing leaves the portal Healthy with no
+visible partial state, and a Tier 1 cause is replaced by the Tier 2 error when
+both tiers fail. Full record: `.agents/plans/phase_2.2_retrospective.md`.
+
 ---
 
 ## Test Strategy
@@ -516,6 +527,20 @@ config could be judged against a report for a different one.
 | Q-9 | **Eager versus lazy enrichment.** Eager fills the pipeline for Phase 3 but costs N requests per fetch. Lazy (fetch text when the user opens or evaluates a job) is cheaper and fresher but needs a per-job action and an error path. Recommendation: eager and bounded now, revisit in Phase 3 when the detail view gains actions. | Phase 3 planning |
 | Q-10 | **Cap values.** `max_pages` 5 / `max_jobs` 40 are defaults from judgement, not measurement. Confirm with the live timings in WS5. | End of Phase 2.2 |
 | Q-11 | **Should detail text be re-fetched on demand later** (postings change)? No mechanism exists today; decide in Phase 3 alongside the Evaluate flow. | Phase 3 |
+
+**Resolutions (2026-11-03).**
+
+- **Q-8** — documented posture, no enforcement: the app fetches on a user action,
+  reports blocks, and never evades; the user is responsible for the sites they
+  configure.
+- **Q-9** — stay eager and bounded. Measured cost is about half a minute for the
+  default 40 details; lazy would make evaluation depend on a live request and
+  would leave the list unable to show what it has. Revisit when the detail view
+  gains an explicit refresh action.
+- **Q-10** — keep 5 pages / 40 details. One page costs 0.4–0.8 s of pacing plus
+  one response; 40 details cost roughly half a minute. The ceiling stays 200.
+- **Q-11** — still open. Recommended answer: a per-job "Refresh description"
+  action in Phase 3, not automatic refetching.
 
 ---
 

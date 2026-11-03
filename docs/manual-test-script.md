@@ -165,14 +165,22 @@ cargo test -p career-ops-app --features keychain -- --ignored live_fetch
 It creates its own portals in a throwaway vault and never reads or writes your
 data directory. The app does not ship example portals.
 
-Default list, one board per supported ATS (last verified 2026-10-25):
+Default list, one board per supported ATS (last verified 2026-11-03):
 
 | URL | Adapter | Jobs |
 | :--- | :--- | ---: |
-| `https://jobs.ashbyhq.com/linear` | Ashby | 34 |
-| `https://jobs.lever.co/spotify` | Lever | 90 |
-| `https://boards.greenhouse.io/figma` | Greenhouse | 139 |
-| `https://jobs.smartrecruiters.com/Ubisoft2` | SmartRecruiters | 237 |
+| `https://jobs.ashbyhq.com/linear` | Ashby | 31 |
+| `https://jobs.lever.co/spotify` | Lever | 84 |
+| `https://boards.greenhouse.io/figma` | Greenhouse | 144 |
+| `https://jobs.smartrecruiters.com/Ubisoft2` | SmartRecruiters | 208 |
+
+The counts move with the boards. SmartRecruiters is **deduplicated across
+languages**: its `totalFound` was ~294 on 2026-11-03 while 208 unique postings
+were stored. When no `CAREER_OPS_LIVE_SCRAPER_CONFIG` is set, the test attaches
+`{"detail":{"max_jobs":2}}` to a SmartRecruiters portal, because that adapter's
+list endpoint carries no body; the run therefore verifies descriptions and
+per-posting URLs by default (2026-11-03: `2/208 descriptions, all URLs
+per-posting`).
 
 Override the list (comma-separated) without editing the file:
 
@@ -181,9 +189,11 @@ CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
   cargo test -p career-ops-app --features keychain -- --ignored live_fetch
 ```
 
-That run on 2026-10-25 stored 500 unique jobs across the four portals — exactly
-the Pipeline page size — so the test also asserts the page bound rather than
-assuming every row is visible.
+That run on 2026-11-03 stored 467 unique jobs across the four portals (144
+Figma, 31 Linear, 84 Spotify, 208 Ubisoft) in about 6.4 s of fetching,
+including two SmartRecruiters detail requests. The batch re-fetches the first
+portal and the stored total stayed 467, so deduplication held. The test also
+asserts the Pipeline page bound rather than assuming every row is visible.
 
 ### Making Waymo's search page work
 
@@ -192,8 +202,30 @@ The page is **server-rendered** (Rails + Stimulus), but it carries no
 JavaScript: a selector config extracts the cards as-is, the pagination block
 follows the site's `rel=next` link, and the detail block enriches the first
 postings from their own pages (those pages *do* carry `JobPosting` JSON-LD, so no
-selector is needed there). Verified on 2026-10-25 — 90 jobs from 3 pages of 30,
-Tier 1b, no sidecar:
+selector is needed there).
+
+Run the dedicated variant. It probes the site first and **skips with a message
+when the WAF answers `202`**, because a challenge is a site condition rather
+than a code failure:
+
+```bash
+cargo test -p career-ops-app --features keychain -- --ignored \
+  live_fetch_with_pagination_and_details
+```
+
+Measurements:
+
+| Date | Result |
+| :--- | :--- |
+| 2026-10-25 | 90 jobs from 3 pages of 30, Tier 1b, details WAF-challenged (`202`/0 bytes). |
+| 2026-11-03 | 60 jobs from 2 pages in 2.7 s; page 3 returned a WAF challenge, and the 2 detail requests were challenged too (`0 of 2 descriptions`, longest card text 252 bytes). A later retry stored 30 jobs and was challenged on page 2; the next retry was challenged on request 1 (`202`/0 bytes) and skipped. |
+
+When the WAF is not challenging, the same run reports posting-level text and
+the longest description. Extraction from the real posting markup is covered
+offline by `the_real_waymo_detail_page_yields_its_description`, so a challenge
+does not leave the detail path untested.
+
+The older generic check still works with the same config:
 
 ```bash
 CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
