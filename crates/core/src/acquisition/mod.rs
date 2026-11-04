@@ -25,6 +25,7 @@ pub mod eightfold;
 pub mod error;
 pub mod html;
 pub mod http;
+pub mod known_sites;
 pub mod manual;
 pub mod report;
 pub mod router;

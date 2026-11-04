@@ -107,11 +107,13 @@ otherwise.
 | 4.1 | Select **Portals** in the sidebar. | Empty state "No portals configured yet" with **Add your first portal**; header shows "Sidecar: Not started". |
 | 4.2 | Click **Add portal** and enter `not a url` in the URL field. | "Enter a valid http(s) URL." appears under the field and **Save portal** is disabled. |
 | 4.3 | Enter a company name and a real job-board URL, keep **Static (Tier 1)**, save. | The modal closes and the row appears with "Never fetched". |
-| 4.3b | For a career page with no JSON-LD (e.g. Waymo, §8), paste its selector config into **Scraper config (JSON, optional)** before saving. | Invalid JSON shows "Scraper config is not valid JSON." under the field. With valid JSON the portal saves, `Fetch` returns jobs, and the row becomes Healthy with tier HTML. |
+| 4.3b | For a career page with no JSON-LD that the registry does not know, paste its selector config into **Scraper config (JSON, optional)** before saving. | Invalid JSON shows "Scraper config is not valid JSON." under the field and disables **Save portal**. With valid JSON the portal saves, `Fetch` returns jobs, and the row becomes Healthy with tier HTML. |
 | 4.3b.1 | Give the config an unknown `provider` (for example `{"provider":"workday"}`) and fetch. | The form accepts valid JSON, but `Fetch` fails as a configuration error ("The portal configuration is invalid. Check the URL and scraper config.") with no jobs stored. A config with no `provider` still uses selectors. |
-| 4.3b.2 | For an Eightfold site such as NVIDIA, use `{"provider":"eightfold","domain":"nvidia.com"}`. 🌐 | The portal saves and `Fetch` stores positions from `/api/pcsx/search` with descriptions from `/api/pcsx/position_details`; no selector config is needed. The rows are recorded with the ATS tier, because Eightfold is a structured provider API. |
+| 4.3b.2 | For Waymo, type `https://careers.withwaymo.com/jobs/search` in the URL field. | "Known site: Waymo (Selectors) - verified <date>" appears, the company name and the selector config are filled in, and **Save portal** enables. Editing the URL to something else and back does not overwrite an edit; **Use known config** restores the entry. |
+| 4.3b.3 | For NVIDIA, type `https://jobs.nvidia.com/careers` in the URL field. 🌐 | "Known site: NVIDIA (Eightfold) - verified <date>" appears, **Provider** shows Eightfold, the domain is `nvidia.com`, and the advanced-options field stays empty. `Fetch` stores positions from `/api/pcsx/search` with descriptions from `/api/pcsx/position_details`; no selector config is needed. The rows are recorded with the ATS tier, because Eightfold is a structured provider API. |
+| 4.3b.4 | For a site the registry does not know, change **Provider** to Eightfold, enter a domain, and clear it again. | "Domain cannot be empty." appears and **Save portal** and **Test config** are disabled until a domain is entered. |
 | 4.3c | In the add/edit dialog, click **Test config** with the URL and config filled in. 🌐 | A panel reports "Found N jobs on page 1; the saved config follows up to M pages.", up to three titles with their resolved URLs, and the first description length (or "No detail enrichment configured."). Nothing is saved and the Pipeline count does not change. On an ATS board the panel says "the adapter paginates internally" instead of a page count. |
-| 4.3d | Edit the URL or config after a preview, or enter invalid JSON. | The previous report disappears when the inputs change; invalid JSON disables **Test config** so a bad config never reaches the network. |
+| 4.3d | Edit the URL or config after a preview, or enter invalid JSON. | The previous report disappears when the inputs change; invalid JSON disables **Test config** and **Save portal** so a bad config never reaches the network or the database. |
 | 4.4 | Click **Fetch** on the row. 🌐 | The health badge is replaced by a spinner. Afterwards: "Healthy" and "just now", or "Broken" with a cause and a suggested action line. |
 | 4.5 | Click **Edit**, change the company name, save. | The row shows the new name; health is unchanged. |
 | 4.6 | Add a second portal configured for **Browser (Tier 2)**, then **Fetch all**. 🌐 | A progress bar counts `n / N`; each row resolves to Healthy or Broken; the sidecar badge ends as "Running" or "Stopped". |
@@ -317,8 +319,9 @@ Verified on 2026-11-03: 20 jobs from 2 pages,
 for the core path, 5.5 s through the app including startup. The board reports
 ~2,750 positions, so `max_pages` (default 5) is what keeps the fetch bounded.
 Eightfold descriptions are on by default — the `detail` block only lowers the
-cap. The same config can be typed into the portal form's JSON field until the
-provider selector lands in WS3.
+cap. The app's **Add portal** form takes the same information as fields: typing
+`https://jobs.nvidia.com/careers` prefills **Provider** = Eightfold and the
+domain, and stores `{"provider":"eightfold","domain":"nvidia.com"}`.
 
 **If the fetch suddenly fails with `Broken { cause: "other" }` after working:**
 Waymo's AWS WAF answers repeated automated fetches with `202` and an empty body.
@@ -331,9 +334,12 @@ with
 — a `202 0` means "challenged", not "extraction broken". Wait a few minutes
 before retrying; do not raise `max_pages` or `max_jobs` to get around it.
 
-The config is enterable in the app: **Add portal** / **Edit** → *Scraper config
-(JSON, optional)*. It is stored in `portals.scraper_config` and re-validated on
-save; empty means "no config".
+The config is enterable in the app: **Add portal** / **Edit** → *Provider* selects
+the engine. *Selectors* shows a JSON field for the selector config; *Eightfold*
+shows a domain field and an optional advanced-options field for the caps. The
+result is stored in `portals.scraper_config` as one JSON object and re-validated
+on save; empty selectors means "no config". A known host prefills these fields
+(see §4.3b.2 and §4.3b.3) and never overwrites a value you edited.
 
 A page with neither JSON-LD nor a selector config still fails on both tiers
 (`Parse: no jobs found in HTML`), because Tier 2 reuses the same extraction on

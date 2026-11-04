@@ -1,7 +1,7 @@
 # Phase 2.3: Site Providers and Known Sites — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.8), §12
-**Status:** In progress — WS1 and WS2 complete; WS3–WS4 not started
+**Status:** In progress — WS1–WS3 complete; WS4 not started
 **Last updated:** 2026-11-03
 **Duration:** 4–6 days
 **Depends on:** Phase 2.2 (pagination and detail enrichment freeze the selector-config schema)
@@ -16,6 +16,7 @@
 | v0.2 | Provider scope clarified after review: a **provider is an engine** (`selectors`, `eightfold`), while a **known site is an embedded profile** that names an engine and carries its payload. Waymo is therefore a first-class known site backed by the selectors engine, not a new provider variant; NVIDIA is the same structure backed by Eightfold. The registry moves from a JSON file to typed `KnownSite` constants in `known_sites.rs`, so both sites share one validation, prefill, fixture, live-test, and documentation path. |
 | v0.3 | Workstream 1 implemented: `core::acquisition::config` owns the `Provider` discriminator and `ScraperConfig::parse`. A missing or null `provider` means `selectors`; an unknown provider is a clear config error. The router parses once, fails invalid configs as `InvalidRequest` (previously logged and ignored), and dispatches `eightfold` before any HTML fetch. `EightfoldConfig` carries the domain and reuses the Phase 2.2 `pagination`/`detail` caps; the Eightfold fetch itself is the WS2 placeholder. |
 | v0.4 | Workstream 2 implemented: the `eightfold` engine (list/detail parsing, paging by `start`, stable `eightfold:{domain}:{id}` ids, `PageReport` stop reasons), `FetchSource::fetch_eightfold`, router dispatch through a `DetailSource` that reuses the Phase 2.2 enrichment loop, and default-on enrichment for Eightfold because its list carries no text. Live NVIDIA: 20 jobs from 2 pages, 2 of 2 descriptions, longest 6,253 bytes. |
+| v0.5 | Workstream 3 implemented: the typed registry (`known_sites::{WAYMO, NVIDIA, all, lookup}`), the provider combo and Eightfold fields in the portal form, prefill that runs once per site and only into empty provider fields, and an explicit **Use known config** button. Save and Test config now share one validity gate, which also makes invalid JSON block saving rather than failing later. |
 
 ---
 
@@ -362,6 +363,45 @@ one of them.
 | A manually chosen provider works for an unknown host | App integration test |
 | Waymo and NVIDIA take the same path | Registry test: both produce a valid `scraper_config` and prefill identically |
 
+**Implementation note (2026-11-03).** `core::acquisition::known_sites` holds
+`KnownSite { host, path_prefix, name, provider, config, verified_at, notes }`,
+the `WAYMO`/`NVIDIA` constants, `all()`, and `lookup(&Url)`. Lookup compares the
+host case-insensitively and requires the path prefix, so one host can serve
+several boards; the longest matching prefix wins.
+
+`PortalForm` gained `provider`, `domain`, `eightfold_config`, and `prefilled_for`.
+`data()` always produces one JSON object: selectors stores the field verbatim,
+and Eightfold merges the advanced JSON under the `provider`/`domain` that the
+fields own. That keeps one storage shape for both engines, which is what lets
+`ScraperConfig::parse` stay the only validator.
+
+Three decisions worth knowing:
+
+1. **Prefill is a render-time side effect, guarded by `prefilled_for`.** It runs
+   only while the provider fields are empty and only once per site, so it cannot
+   overwrite an edit and cannot resurrect itself after the user clears a field.
+   "Use known config" is the explicit, repeatable path and appears only while
+   the form differs from the entry.
+2. **Save and Test config share `provider_fields_valid()`.** This is stricter
+   than Phase 2.2, where invalid JSON was reported inline but still sent on save.
+   A config that cannot parse can never be correct, so it should not reach the
+   network or the database. `valid()` stays the URL/company gate.
+3. **A selectors config that names another provider is refused.** The form points
+   at the provider combo instead of silently dispatching elsewhere; the fetch
+   would classify it, but only after a save.
+
+Tests: the registry has seven unit tests (every entry parses and matches its
+typed provider, a present `verified_at` is a valid date, an unverified entry is
+labelled as such, lookup hit/miss/prefix, and one test per entry shape).
+`egui_kittest` covers the label and prefill for both entries, the no-overwrite
+rule, "Use known config", and the domain gate. Two app tests go through the
+real storage and router: a hand-chosen provider for a host the registry does not
+know, and every registry entry from form to stored row to fetch, proving the
+dispatch follows the stored config rather than a site-specific branch.
+
+Known-site labels are ASCII only (a hyphen, not an em dash) because
+`egui_kittest` queries the exact string.
+
 ---
 
 ## Workstream 4 — Curation workflow and live verification
@@ -436,9 +476,9 @@ one of them.
 
 | ID | Question | Needed by |
 | :--- | :--- | :--- |
-| Q-12 | **Should the registry be updatable without a release** (seeded table or a signed remote list)? The Rust module is embedded and offline-safe; a remote list is a supply-chain surface. | Before WS3 ships |
+| Q-12 | **Should the registry be updatable without a release** (seeded table or a signed remote list)? The Rust module is embedded and offline-safe; a remote list is a supply-chain surface. | Resolved for Phase 2.3: embedded (`known_sites.rs`), per v0.2. Revisit only if stale entries become a real support load. |
 | Q-13 | **Should Eightfold be auto-detected** for unknown hosts? It would help users, but detection is a guess and Eightfold's markup is a vendor detail. | Phase 2.3 WS2 |
-| Q-14 | **Page size.** The API ignores `num` and returns 10; is that stable, and does `start` have a ceiling? Confirm with the live run before fixing defaults. | Phase 2.3 WS2/WS4 |
+| Q-14 | **Page size.** The API ignores `num` and returns 10; is that stable, and does `start` have a ceiling? Confirm with the live run before fixing defaults. | Partly answered by the 2026-11-03 live run (10 per page, ~2,750 total); the `start` ceiling is untested and the defaults stay at `max_pages` ≤ 5. |
 | Q-15 | **Which provider next?** Workday is the most common for large employers; decide by measuring the user's actual targets, not by popularity. | After Phase 2.3 |
 
 ---

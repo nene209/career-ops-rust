@@ -1378,8 +1378,10 @@ mod tests {
     use crate::view_models::portals::{HealthBadge, PortalRow};
 
     use career_ops_core::acquisition::ats::{AtsAdapter, NormalizedJob};
+    use career_ops_core::acquisition::config::{Provider, ScraperConfig};
     use career_ops_core::acquisition::error::AtsResult;
     use career_ops_core::acquisition::html::selectors::SelectorConfig;
+    use career_ops_core::acquisition::known_sites;
     use career_ops_core::acquisition::report::PageReport;
 
     /// Serializes the tests that create a vault. The test keychain uses one
@@ -1955,15 +1957,30 @@ mod tests {
     struct StubFetchSource {
         calls: std::sync::Mutex<Vec<String>>,
         page_calls: std::sync::Mutex<Vec<String>>,
+        eightfold_calls: std::sync::Mutex<Vec<(String, String)>>,
+        eightfold_jobs: std::sync::Mutex<Vec<NormalizedJob>>,
     }
 
     impl StubFetchSource {
+        /// The jobs an Eightfold list request returns. Empty by default, so a
+        /// preview that hits the provider still works without configuring it.
+        fn with_eightfold_jobs(jobs: Vec<NormalizedJob>) -> Self {
+            Self {
+                eightfold_jobs: std::sync::Mutex::new(jobs),
+                ..Self::default()
+            }
+        }
+
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
         }
 
         fn page_calls(&self) -> Vec<String> {
             self.page_calls.lock().unwrap().clone()
+        }
+
+        fn eightfold_calls(&self) -> Vec<(String, String)> {
+            self.eightfold_calls.lock().unwrap().clone()
         }
     }
 
@@ -2001,12 +2018,18 @@ mod tests {
 
         async fn fetch_eightfold(
             &self,
-            _host: &str,
-            _domain: &str,
+            host: &str,
+            domain: &str,
             _company_name: &str,
             _max_pages: usize,
         ) -> AtsResult<PageReport> {
-            Ok(PageReport::single(Vec::new()))
+            self.eightfold_calls
+                .lock()
+                .unwrap()
+                .push((host.to_string(), domain.to_string()));
+            Ok(PageReport::single(
+                self.eightfold_jobs.lock().unwrap().clone(),
+            ))
         }
 
         async fn fetch_page(&self, url: &url::Url) -> AtsResult<String> {
@@ -2208,6 +2231,223 @@ mod tests {
             app.pipeline.rows[0].raw_text,
             "Full description from the detail page."
         );
+    }
+
+    /// A provider chosen by hand for a host the registry does not know.
+    ///
+    /// This is the escape hatch that makes known sites a convenience rather
+    /// than a gate: the form's output is stored verbatim, and the router
+    /// dispatches on the stored `provider`, not on the host.
+    #[test]
+    fn a_manually_chosen_provider_fetches_an_unknown_host() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::with_eightfold_jobs(vec![NormalizedJob {
+            external_id: "7".into(),
+            title: "GPU Engineer".into(),
+            company: "Acme".into(),
+            location: None,
+            department: None,
+            employment_type: None,
+            workplace_type: None,
+            source_url: url::Url::parse("https://careers.acme.example/job/7").expect("url"),
+            raw_text: "Build accelerators.".into(),
+            posted_at: None,
+        }]));
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source.clone());
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        // The form is the real path for a site the registry does not know.
+        let form = PortalForm {
+            company_name: "Acme".into(),
+            url: "https://careers.acme.example/jobs".into(),
+            provider: Provider::Eightfold,
+            domain: "acme.com".into(),
+            ..Default::default()
+        };
+        assert!(
+            known_sites::lookup(&url::Url::parse(&form.url).expect("url")).is_none(),
+            "the registry must not know this host, or the test proves nothing"
+        );
+
+        app.handle_portals_action(PortalsAction::CreatePortal(form.data()));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals.rows.len() == 1 && app.portals_task.is_none()
+        });
+
+        let stored = app.portals.rows[0]
+            .scraper_config
+            .as_deref()
+            .expect("stored config");
+        let parsed = ScraperConfig::parse(stored).expect("stored config parses");
+        assert_eq!(parsed.provider(), Provider::Eightfold);
+        assert_eq!(parsed.eightfold().expect("eightfold").domain, "acme.com");
+
+        let portal_id = app.portals.rows[0].id;
+        app.handle_portals_action(PortalsAction::FetchOne(portal_id));
+        wait_until(&mut app, &ctx, |app| app.portals_task.is_none());
+
+        assert_eq!(
+            source.eightfold_calls(),
+            vec![("careers.acme.example".to_string(), "acme.com".to_string())],
+            "the stored provider decides the engine"
+        );
+        assert!(
+            source.calls().is_empty(),
+            "an eightfold portal must not fetch HTML"
+        );
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+
+        assert_eq!(app.pipeline.rows.len(), 1);
+        assert_eq!(app.pipeline.rows[0].title, "GPU Engineer");
+        assert_eq!(app.pipeline.rows[0].raw_text, "Build accelerators.");
+    }
+
+    /// Every registry entry takes the same path: form -> stored JSON -> router.
+    ///
+    /// Waymo is a `selectors` profile and NVIDIA an `eightfold` one, so this
+    /// also proves the dispatch follows the stored config rather than the host:
+    /// both are created from a `KnownSite` and both fetch without a special
+    /// case in between.
+    #[test]
+    fn every_known_site_fetches_through_its_provider() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::with_eightfold_jobs(vec![NormalizedJob {
+            external_id: "42".into(),
+            title: "GPU Engineer".into(),
+            company: "NVIDIA".into(),
+            location: None,
+            department: None,
+            employment_type: None,
+            workplace_type: None,
+            source_url: url::Url::parse("https://jobs.nvidia.com/careers/job/42").expect("url"),
+            raw_text: "Design GPUs.".into(),
+            posted_at: None,
+        }]));
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source.clone());
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        let mut waymo_url = String::new();
+        for (index, site) in known_sites::all().iter().enumerate() {
+            let url = format!("https://{}{}", site.host, site.path_prefix.unwrap_or("/"));
+            if site.provider == Provider::Selectors {
+                waymo_url = url.clone();
+            }
+
+            // The same two calls the modal makes when it prefills an empty form.
+            let mut form = PortalForm {
+                url,
+                ..Default::default()
+            };
+            form.apply_known_site(site);
+
+            app.handle_portals_action(PortalsAction::CreatePortal(form.data()));
+            wait_until(&mut app, &ctx, |app| {
+                app.portals.rows.len() == index + 1 && app.portals_task.is_none()
+            });
+        }
+
+        // The list is sorted by name, not by creation, so match by name.
+        for site in known_sites::all() {
+            let row = app
+                .portals
+                .rows
+                .iter()
+                .find(|row| row.name == site.name)
+                .unwrap_or_else(|| panic!("{} row", site.name));
+            let stored = row.scraper_config.as_deref().expect("stored config");
+            let parsed = ScraperConfig::parse(stored).expect("stored config parses");
+            assert_eq!(parsed.provider(), site.provider, "{}", site.name);
+        }
+
+        let ids: Vec<i64> = app.portals.rows.iter().map(|row| row.id).collect();
+        for id in ids {
+            app.handle_portals_action(PortalsAction::FetchOne(id));
+            wait_until(&mut app, &ctx, |app| app.portals_task.is_none());
+        }
+
+        assert_eq!(
+            source.calls(),
+            vec![waymo_url],
+            "the selectors entry is the only HTML fetch"
+        );
+        assert_eq!(
+            source.eightfold_calls(),
+            vec![("jobs.nvidia.com".to_string(), "nvidia.com".to_string())]
+        );
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+
+        let titles: Vec<&str> = app
+            .pipeline
+            .rows
+            .iter()
+            .map(|row| row.title.as_str())
+            .collect();
+        assert!(titles.contains(&"Engineer"), "{titles:?}");
+        assert!(titles.contains(&"GPU Engineer"), "{titles:?}");
     }
 
     /// "Test config" through the app: one list page, at most three details,

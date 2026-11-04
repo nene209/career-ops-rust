@@ -12,6 +12,7 @@ use career_ops_app::screens::portals::{
 use career_ops_app::view_models::portals::{
     BatchProgress, HealthBadge, PortalRow, PortalsViewModel, SidecarStatus,
 };
+use career_ops_core::acquisition::config::{Provider, ScraperConfig};
 use egui::accesskit::Role;
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
@@ -191,10 +192,10 @@ fn scraper_config_is_optional_and_validated_as_json() {
 
     let _field = harness.get_by_label("Scraper config (JSON, optional)");
     let _hint = harness.get_by_label("Scraper config is not valid JSON.");
-    // Invalid JSON is reported inline; it does not silently disable saving,
-    // because the field is optional and the app re-validates on submit.
+    // Invalid JSON is reported inline and blocks saving, the same gate the URL
+    // field uses; the fetch would classify it anyway.
     let save = harness.get_by_role_and_label(Role::Button, "Save portal");
-    assert!(!save.accesskit_node().is_disabled());
+    assert!(save.accesskit_node().is_disabled());
 
     harness.state_mut().view.modal = Some(PortalModal::Add(PortalForm {
         company_name: "Acme".into(),
@@ -212,6 +213,8 @@ fn scraper_config_is_optional_and_validated_as_json() {
             .is_none(),
         "valid JSON must clear the hint"
     );
+    let save = harness.get_by_role_and_label(Role::Button, "Save portal");
+    assert!(!save.accesskit_node().is_disabled());
 }
 
 #[test]
@@ -506,6 +509,141 @@ fn manual_paste_requires_a_title_and_body() {
 
     let add = harness.get_by_role_and_label(Role::Button, "Add pasted job");
     assert!(!add.accesskit_node().is_disabled());
+}
+
+#[test]
+fn a_known_site_shows_its_label_and_prefills_an_empty_form() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            url: "https://jobs.nvidia.com/careers".into(),
+            ..Default::default()
+        })),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let _label = harness.get_by_label("Known site: NVIDIA (Eightfold) - verified 2026-11-03");
+    let _domain = harness.get_by_label("Eightfold domain");
+    let _advanced = harness.get_by_label("Advanced options (JSON, optional)");
+
+    let form = harness.state().view.form().expect("form");
+    assert_eq!(form.provider, Provider::Eightfold);
+    assert_eq!(form.domain, "nvidia.com");
+    assert_eq!(form.company_name, "NVIDIA", "the name is only a default");
+    assert!(form.scraper_config.is_empty());
+}
+
+#[test]
+fn a_selectors_known_site_takes_the_same_prefill_path() {
+    // Waymo and NVIDIA differ in provider, not in workflow: both render a
+    // known-site label and fill the fields that provider owns.
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            url: "https://careers.withwaymo.com/jobs/search".into(),
+            ..Default::default()
+        })),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let _label = harness.get_by_label("Known site: Waymo (Selectors) - verified 2026-11-03");
+    let _field = harness.get_by_label("Scraper config (JSON, optional)");
+
+    let form = harness.state().view.form().expect("form");
+    assert_eq!(form.provider, Provider::Selectors);
+    assert_eq!(form.company_name, "Waymo");
+    let parsed = ScraperConfig::parse(&form.scraper_config).expect("prefilled config parses");
+    assert!(parsed.selectors().is_some());
+}
+
+#[test]
+fn editing_after_prefill_is_preserved() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            url: "https://jobs.nvidia.com/careers".into(),
+            ..Default::default()
+        })),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    harness.state_mut().view.form_mut().expect("form").domain = "example.com".into();
+    harness.run();
+    harness.run();
+
+    assert_eq!(
+        harness.state().view.form().expect("form").domain,
+        "example.com",
+        "prefill runs once per site, so a later frame must not overwrite an edit"
+    );
+}
+
+#[test]
+fn use_known_config_replaces_a_divergent_config() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            company_name: "NVIDIA".into(),
+            url: "https://jobs.nvidia.com/careers".into(),
+            provider: Provider::Eightfold,
+            domain: "example.com".into(),
+            prefilled_for: Some("NVIDIA".into()),
+            ..Default::default()
+        })),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Use known config")
+        .click();
+    harness.run();
+
+    let form = harness.state().view.form().expect("form");
+    assert_eq!(form.domain, "nvidia.com");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Use known config")
+            .is_none(),
+        "the button disappears once the form matches the entry"
+    );
+}
+
+#[test]
+fn save_is_gated_on_an_eightfold_domain() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            company_name: "Acme".into(),
+            url: "https://acme.example/jobs".into(),
+            provider: Provider::Eightfold,
+            ..Default::default()
+        })),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let _hint = harness.get_by_label("Domain cannot be empty.");
+    let save = harness.get_by_role_and_label(Role::Button, "Save portal");
+    assert!(save.accesskit_node().is_disabled());
+
+    harness.state_mut().view.form_mut().expect("form").domain = "acme.com".into();
+    harness.run();
+
+    assert!(
+        harness.query_by_label("Domain cannot be empty.").is_none(),
+        "a domain clears the hint"
+    );
+    let save = harness.get_by_role_and_label(Role::Button, "Save portal");
+    assert!(!save.accesskit_node().is_disabled());
 }
 
 #[test]
