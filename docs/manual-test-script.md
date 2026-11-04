@@ -213,11 +213,14 @@ CAREER_OPS_LIVE_REGISTRY=1 \
 ```
 
 A WAF challenge skips that entry and says so; a served page that stores nothing
-fails. The final line names the verified and skipped entries. After a passing
-run, commit `verified_at` in `known_sites.rs` and update `docs/known-sites.md`;
-the rules are in that file. First full run (2026-11-03, no skips): Waymo 90 jobs
-from 3 pages with 2 of 2 descriptions in 3.7 s, NVIDIA 50 jobs from 5 pages with
-40 of 40 descriptions in 27.2 s.
+fails. The skip rules themselves (probe before fetch, no retry probe after a
+healthy fetch) are covered offline by `cargo test -p career-ops-app --lib --
+registry`, so this run is about the sites, not about the branching. The final line
+names the verified and skipped entries. After a passing run, commit
+`verified_at` in `known_sites.rs` and update `docs/known-sites.md`; the rules are
+in that file. First full run (2026-11-03, no skips): Waymo 90 jobs from 3 pages
+with 2 of 2 descriptions in 3.7 s, NVIDIA 50 jobs from 5 pages with 40 of 40
+descriptions in 27.2 s.
 
 ### Making Waymo's search page work
 

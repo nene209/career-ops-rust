@@ -2954,6 +2954,148 @@ mod tests {
         }
     }
 
+    /// What a registry run did with one entry.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RegistryStep {
+        /// The page did not answer usefully, so the entry was never fetched.
+        /// Carries the probe so the run can report the status and size.
+        SkipBeforeFetch(Option<(bool, u16, usize)>),
+        /// The entry fetched successfully; only storage can confirm the rest.
+        Verified,
+        /// The fetch failed and a retry probe was challenged: a site
+        /// condition, not a regression.
+        SkipAfterFetch(Option<(bool, u16, usize)>),
+        /// The page answered, yet the fetch failed. That is our problem.
+        Broken,
+    }
+
+    /// Drive one registry entry: probe, fetch only a served page, and re-probe
+    /// only to explain a failed fetch.
+    ///
+    /// Generic over the context so the sequencing is testable offline: the
+    /// live test passes the app, the tests below pass a call recorder. The
+    /// live test cannot run in CI, and the skip rules are the part most likely
+    /// to drift silently, so they are proven without a network.
+    fn registry_entry<C>(
+        ctx: &mut C,
+        probe: impl Fn(&mut C) -> Option<(bool, u16, usize)>,
+        fetch: impl FnOnce(&mut C) -> bool,
+    ) -> RegistryStep {
+        let first = probe(&mut *ctx);
+        if live_probe_challenged(first) {
+            return RegistryStep::SkipBeforeFetch(first);
+        }
+
+        if fetch(&mut *ctx) {
+            return RegistryStep::Verified;
+        }
+
+        let retry = probe(&mut *ctx);
+        if live_probe_challenged(retry) {
+            RegistryStep::SkipAfterFetch(retry)
+        } else {
+            RegistryStep::Broken
+        }
+    }
+
+    #[test]
+    fn a_challenged_registry_page_is_skipped_without_fetching() {
+        // Every shape of "not a usable page": transport failure, server error,
+        // the WAF's `202`, and a `200` with an empty body.
+        for probe in [
+            None,
+            Some((false, 503, 40)),
+            Some((true, 202, 0)),
+            Some((true, 200, 0)),
+        ] {
+            let mut calls: Vec<&str> = Vec::new();
+            let step = registry_entry(
+                &mut calls,
+                |_| probe,
+                |calls| {
+                    calls.push("fetch");
+                    true
+                },
+            );
+
+            assert_eq!(step, RegistryStep::SkipBeforeFetch(probe), "{probe:?}");
+            assert!(
+                calls.is_empty(),
+                "a challenged page must not be fetched: {probe:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_served_registry_page_is_fetched_once_and_not_probed_again() {
+        let mut calls: Vec<&str> = Vec::new();
+        let step = registry_entry(
+            &mut calls,
+            |calls| {
+                calls.push("probe");
+                Some((true, 200, 4_096))
+            },
+            |calls| {
+                calls.push("fetch");
+                true
+            },
+        );
+
+        assert_eq!(step, RegistryStep::Verified);
+        assert_eq!(
+            calls,
+            vec!["probe", "fetch"],
+            "a healthy fetch must not spend a second request on a probe"
+        );
+    }
+
+    #[test]
+    fn a_failed_registry_fetch_on_a_served_page_is_a_failure() {
+        let mut calls: Vec<&str> = Vec::new();
+        let step = registry_entry(
+            &mut calls,
+            |calls| {
+                calls.push("probe");
+                Some((true, 200, 4_096))
+            },
+            |calls| {
+                calls.push("fetch");
+                false
+            },
+        );
+
+        assert_eq!(
+            step,
+            RegistryStep::Broken,
+            "the page is served, so the failure is ours, not the site's"
+        );
+        assert_eq!(calls, vec!["probe", "fetch", "probe"]);
+    }
+
+    #[test]
+    fn a_failed_registry_fetch_on_a_challenged_retry_is_skipped() {
+        let mut calls: Vec<&str> = Vec::new();
+        let step = registry_entry(
+            &mut calls,
+            |calls| {
+                calls.push("probe");
+                // Served first, challenged when asked again.
+                if calls.len() == 1 {
+                    Some((true, 200, 4_096))
+                } else {
+                    Some((true, 202, 0))
+                }
+            },
+            |calls| {
+                calls.push("fetch");
+                false
+            },
+        );
+
+        assert_eq!(step, RegistryStep::SkipAfterFetch(Some((true, 202, 0))));
+        assert_eq!(calls, vec!["probe", "fetch", "probe"]);
+    }
+
     #[test]
     #[ignore = "hits the network; run with --ignored"]
     fn live_fetch_with_pagination_and_details() {
@@ -3191,75 +3333,85 @@ mod tests {
 
         for site in sites {
             let url = format!("https://{}{}", site.host, site.path_prefix.unwrap_or("/"));
-
-            // Probe first, like the Waymo live test: a challenge is a site
-            // condition, and spending a fetch on it only widens the block.
-            let probe = live_probe(&app, &url);
-            if live_probe_challenged(probe) {
-                eprintln!(
-                    "live registry: {} skipped, the page is challenged or unreachable ({probe:?})",
-                    site.name
-                );
-                skipped.push(site.name);
-                continue;
-            }
-
             let expected_rows = app.portals.rows.len() + 1;
-            app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
-                company_name: site.name.to_string(),
-                url: url.clone(),
-                render_mode: "static".into(),
-                scraper_config: Some(site.config.to_string()),
-            }));
-            wait_until_within(&mut app, &ctx, Duration::from_secs(30), |app| {
-                app.portals.rows.len() == expected_rows && app.portals_task.is_none()
-            });
+            let mut elapsed = Duration::ZERO;
 
-            let portal_id = app
-                .portals
-                .rows
-                .iter()
-                .find(|row| row.name == site.name)
-                .unwrap_or_else(|| panic!("{} was not created", site.name))
-                .id;
+            // The same sequencer the offline tests exercise: probe first, fetch
+            // only a served page, and re-probe only to explain a failure.
+            let step = registry_entry(
+                &mut app,
+                |app| live_probe(app, &url),
+                |app| {
+                    app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
+                        company_name: site.name.to_string(),
+                        url: url.clone(),
+                        render_mode: "static".into(),
+                        scraper_config: Some(site.config.to_string()),
+                    }));
+                    wait_until_within(app, &ctx, Duration::from_secs(30), |app| {
+                        app.portals.rows.len() == expected_rows && app.portals_task.is_none()
+                    });
 
-            let started = Instant::now();
-            app.handle_portals_action(PortalsAction::FetchOne(portal_id));
-            wait_until_within(&mut app, &ctx, Duration::from_secs(180), |app| {
-                app.portals_task.is_none()
-            });
-            let elapsed = started.elapsed();
+                    let portal_id = app
+                        .portals
+                        .rows
+                        .iter()
+                        .find(|row| row.name == site.name)
+                        .unwrap_or_else(|| panic!("{} was not created", site.name))
+                        .id;
 
-            let health = &app
-                .portals
-                .rows
-                .iter()
-                .find(|row| row.name == site.name)
-                .unwrap_or_else(|| panic!("{} row disappeared", site.name))
-                .health;
+                    let started = Instant::now();
+                    app.handle_portals_action(PortalsAction::FetchOne(portal_id));
+                    wait_until_within(app, &ctx, Duration::from_secs(180), |app| {
+                        app.portals_task.is_none()
+                    });
+                    elapsed = started.elapsed();
 
-            if *health != HealthBadge::Healthy {
-                // Served, but the fetch failed: that is a regression, not a
-                // challenge. Only a challenged retry is allowed to skip.
-                let retry = live_probe(&app, &url);
-                assert!(
-                    live_probe_challenged(retry),
-                    "{} was served ({retry:?}) but the fetch failed with {health:?}",
-                    site.name
-                );
-                eprintln!(
-                    "live registry: {} skipped, the fetch was challenged ({retry:?})",
-                    site.name
-                );
-                skipped.push(site.name);
-                continue;
-            }
-
-            eprintln!(
-                "live registry: {} healthy in {elapsed:?}: {:?}",
-                site.name, app.portals_message
+                    app.portals
+                        .rows
+                        .iter()
+                        .find(|row| row.name == site.name)
+                        .is_some_and(|row| row.health == HealthBadge::Healthy)
+                },
             );
-            verified.push(site.name);
+
+            match step {
+                RegistryStep::SkipBeforeFetch(probe) => {
+                    eprintln!(
+                        "live registry: {} skipped, the page is challenged or unreachable \
+                         ({probe:?})",
+                        site.name
+                    );
+                    skipped.push(site.name);
+                }
+                RegistryStep::SkipAfterFetch(probe) => {
+                    eprintln!(
+                        "live registry: {} skipped, the fetch was challenged ({probe:?})",
+                        site.name
+                    );
+                    skipped.push(site.name);
+                }
+                RegistryStep::Broken => {
+                    let hint = app
+                        .portals
+                        .rows
+                        .iter()
+                        .find(|row| row.name == site.name)
+                        .and_then(|row| row.suggested_action.clone());
+                    panic!(
+                        "{} was served but the fetch failed (hint: {hint:?}); a challenge is a \
+                         skip, this is a regression",
+                        site.name
+                    );
+                }
+                RegistryStep::Verified => {
+                    eprintln!(
+                        "live registry: {} healthy in {elapsed:?}: {:?}",
+                        site.name, app.portals_message
+                    );
+                    verified.push(site.name);
+                }
+            }
         }
 
         let pool = app.pool().expect("pool");

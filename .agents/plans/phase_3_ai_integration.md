@@ -1,8 +1,8 @@
 # Phase 3: AI Integration — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.5), §12
-**Status:** Draft — revised for v0.5 parent
-**Last updated:** 2026-10-17
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.8), §12
+**Status:** Draft — revised after Phase 2.3 (job text is markup, not prose)
+**Last updated:** 2026-11-03
 **Duration:** 3–4 weeks
 **Depends on:** Phase 2 completion (see Entry Conditions)
 
@@ -14,6 +14,7 @@
 | :--- | :--- |
 | v0.1 | Initial Phase 3 plan, written against parent plan v0.4. |
 | v0.2 | Updated for parent plan v0.5. Removed Phase 0-derived "fixture corpus" language from Entry Conditions; Phase 2 now produces its own fixtures and live job descriptions. Added Open Questions section (Q-5). Noted that the two-backend architecture change does not affect Phase 3. `rig` version note flagged for verification. No material change to workstreams, estimates, or exit criteria. |
+| v0.3 | Phase 2.3 closed, so the input shape is now known: every provider stores `job_descriptions.raw_text` as **HTML**, measured at 3.6–7.7 KB per posting live. Phase 3 no longer assumes prose. Workstream 3 gains a deterministic `core::text::plain_text` normalizer and an `input_chars` audit field; the plan states why stripping at acquisition was rejected; normalization gets fixtures, unit tests, an acceptance criterion, and an exit criterion. |
 
 ---
 
@@ -21,11 +22,20 @@
 
 Phase 3 makes the application **intelligent**. It replaces the original project's external AI CLI calls with an embedded LLM integration via `rig`, and it implements the two core value-producing flows: job evaluation and cover letter generation. It also delivers the prompt management system that makes the AI logic editable, versioned, and reproducible.
 
-The phase has three defining characteristics:
+The phase has four defining characteristics:
 
 1. **Embedded AI, not delegated.** The original tool shells out to an AI coding CLI. Phase 3 embeds the LLM calls directly, using `rig` as the provider abstraction. This removes an external dependency and gives the application control over streaming, error handling, and structured output.
 2. **Prompts are data, not code.** System prompts are seeded from embedded resources into SQLite on first launch and are read-only. User prompts are editable and versioned. Every evaluation report records the prompt version that produced it, so historical reports remain reproducible even after prompts change.
 3. **Untrusted input is treated as untrusted.** Job descriptions are fetched from the open web and fed to an LLM. This is a prompt injection surface, and Phase 3 must defend against it explicitly (see Workstream 6).
+4. **Job text is markup, not prose.** Every provider stores what the source
+   served: JSON-LD `description`, Eightfold's `jobDescription`, and
+   SmartRecruiters' composed sections are all HTML, and the live Phase 2.3 runs
+   measured 3.6 KB (Waymo) and 7.7 KB (NVIDIA) for a single posting. Phase 3
+   therefore normalizes job text to plain text in one deterministic place before
+   prompt assembly. Stripping at acquisition was rejected: the stored row is the
+   record of what the site said, the markup may be wanted later, and a re-fetch
+   is not guaranteed. Telling the model to ignore tags was rejected too: it is
+   unverifiable offline, wastes tokens on markup, and varies by model.
 
 **Phase 3 is unaffected by the v0.5 two-backend architecture.** It consumes `job_descriptions` rows, which have the same shape regardless of whether they were acquired by Tier 1 (HTTP/JSON) or Tier 2 (Obscura). It does not call a browser, and it does not depend on which backend produced the text.
 
@@ -37,13 +47,13 @@ Phase 3 begins after Phase 2 exit criteria are met. The following prior outputs 
 
 | Prior Output | How Phase 3 Uses It |
 | :--- | :--- |
-| `job_descriptions` table and repository | Source of job text for evaluation |
+| `job_descriptions` table and repository | Source of job text for evaluation. `raw_text` is **HTML** for every provider; Phase 3 normalizes it (Workstream 3). |
 | `cv_entries` and `profile` repositories | Source of candidate context for prompts |
 | `prompts` table and repository | Destination for seeded and user prompts |
 | `evaluation_reports` table | Destination for generated reports |
 | `cover_letters` table | Destination for generated cover letters |
 | `settings` table | Stores provider/model preferences (keys stay in OS keychain) |
-| GPUI shell with navigation | Host for Prompt Manager and Evaluation UI |
+| egui shell with navigation | Host for Prompt Manager and Evaluation UI |
 | Keystore (§7 of main plan) | Source of API keys |
 | Unlock flow | Gates access to API keys and job data |
 | Backend traits from Phase 1 | Not used in Phase 3; `PdfBackend` rendering arrives in Phase 4 |
@@ -54,6 +64,13 @@ Phase 3 begins after Phase 2 exit criteria are met. The following prior outputs 
 2. **Phase 2 is in flight or blocked.** Phase 3 can be developed against fixtures captured during Phase 2 (saved JSON and HTML responses). Evaluation and cover letter generation do not require live network access to the target portals.
 
 In both scenarios, Phase 3 owns the LLM integration end-to-end. It does not acquire job descriptions — that is Phase 2.
+
+**Phase 3 may assume the text contains markup, and must not assume it is prose.**
+A row is whatever the provider returned: Eightfold sends a full HTML description,
+JSON-LD sends HTML, SmartRecruiters sends composed HTML sections, and a manual
+paste may be plain text. The pipeline therefore treats normalization as a step
+with fixtures and tests, not as an instruction to the model. The Phase 2.3
+retrospective records the same conclusion under "What to carry into Phase 3".
 
 ---
 
@@ -76,6 +93,8 @@ In both scenarios, Phase 3 owns the LLM integration end-to-end. It does not acqu
 | `prompt_version` provenance on reports | Multi-modal prompts (images, audio) |
 | LLM evaluation tests via `rig::evals` | Continuous evaluation dashboards |
 | Prompt injection defense | Adversarial red-teaming |
+| Deterministic HTML-to-text normalization before prompting | Sending markup to the model, or stripping it at acquisition |
+| Recording the normalized input size on each report | Recording description-versus-teaser provenance on the job row (a Phase 2 follow-up) |
 
 ---
 
@@ -143,7 +162,7 @@ pub fn set_api_key(provider: Provider, key: &str) -> Result<()>;
 2. **`rig` splits into `rig-core` and `rig-agent`.** The root `rig` facade re-exports both. Depend only on `rig` unless there is a specific reason to reach lower.
 3. **API keys never touch the database.** They live in the OS keychain. The `settings` table stores only the *provider choice* and *model name*, never the key itself.
 4. **Provider differences are real.** Not every provider supports structured output identically. The capability registry must be authoritative, and the UI must warn when a selected model lacks a required capability.
-5. **Streaming requires a runtime bridge.** `rig`'s streaming traits return `Stream` types. GPUI uses a different async model. Use `gpui-tokio-bridge` or the equivalent to consume streams from the GPUI context without blocking the UI.
+5. **Streaming requires a runtime bridge.** `rig`'s streaming traits return `Stream` types. egui renders on the UI thread while Portals work runs on a `tokio` runtime. Use the app's existing `async_bridge` pattern (Phase 2.1): poll the task from the UI, never block it.
 6. **`rig` supports OpenTelemetry GenAI semantic conventions.** Wire this up early if observability is desired; retrofitting it later means touching every call site.
 
 ### Acceptance Criteria
@@ -238,6 +257,8 @@ pub struct EvaluationResult {
     pub prompt_version: i64,
     pub prompt_hash: String,
     pub model_used: String,
+    /// Characters of job text actually sent, after normalization and truncation.
+    pub input_chars: usize,
 }
 
 pub enum Recommendation {
@@ -262,13 +283,38 @@ pub struct EvaluationOutput {
 }
 ```
 
-3. Prompt assembly: system prompt + variable substitution with CV summary and job description
-4. Two execution modes:
+3. Text normalization, in `core::text`:
+
+```rust
+/// Convert stored job markup to prompt text. Deterministic and idempotent:
+/// plain text passes through unchanged, and calling it twice equals calling
+/// it once.
+pub fn plain_text(raw: &str, max_chars: usize) -> PlainText;
+
+pub struct PlainText {
+    pub text: String,
+    pub truncated: bool,
+    /// `raw` length, so a report can compare markup bytes with prompt chars.
+    pub source_chars: usize,
+}
+```
+
+   Rules: drop `script`/`style`/`noscript`/`head`; turn block boundaries
+   (`p`, `br`, `div`, `li`, `tr`, `h1`–`h6`) into line breaks and `li` into
+   `"- "`; decode entities (`&amp;`, `&#39;`, `&nbsp;`); collapse runs of spaces
+   and three or more blank lines; truncate on a character boundary. Parse with
+   the existing `scraper`/html5ever dependency rather than a regex, so malformed
+   provider markup does not produce tag soup in the prompt.
+
+4. Prompt assembly: system prompt + variable substitution with CV summary and
+   the **normalized** job description. `{{job_description}}` receives
+   `plain_text(raw_text).text`; no raw markup reaches a prompt.
+5. Two execution modes:
    - **Structured mode** — uses `rig`'s `Extractor` or `TypedPrompt` to get typed output. Preferred for the match score and recommendation.
    - **Streaming mode** — streams the full markdown report for UI display. Preferred for the narrative.
-5. Report storage in `evaluation_reports` with `prompt_version`, `prompt_hash`, `model_used`, and `generated_at`
-6. Match score storage on the `applications` row for pipeline sorting
-7. Batch evaluation for multiple applications (sequential, with concurrency limit)
+6. Report storage in `evaluation_reports` with `prompt_version`, `prompt_hash`, `model_used`, `input_chars`, and `generated_at`
+7. Match score storage on the `applications` row for pipeline sorting
+8. Batch evaluation for multiple applications (sequential, with concurrency limit)
 
 ### Critical Implementation Notes
 
@@ -279,6 +325,23 @@ pub struct EvaluationOutput {
 5. **`prompt_version` and `prompt_hash` are both stored.** The version is a human-readable integer; the hash is the authoritative content identifier. If a prompt is edited without incrementing the version (a bug), the hash still detects the change.
 6. **`model_used` is stored verbatim.** Provider model names change over time. Storing the exact string used at generation time is necessary for reproducibility audits.
 7. **Errors are classified, not swallowed.** A failed evaluation must record why it failed. Do not store a partial report as if it succeeded.
+8. **`raw_text` is markup for every provider, and normalization happens before
+   the call.** Do not ask the model to ignore tags, and do not strip at
+   acquisition: the row is the record of what the site served, Phase 4 may want
+   it, and a re-fetch is not guaranteed. One pure function with fixtures is
+   testable offline and gives the same input to every provider; a prompt
+   instruction gives neither. The API below is the whole contract:
+   `plain_text(raw, max_chars)` is idempotent and leaves plain text unchanged,
+   because manual pastes and some ATS payloads are already plain.
+9. **Record `input_chars` after normalization.** A report that says the model saw
+   ~400 characters is telling you the row only had a card teaser (Phase 2 enriches
+   at most `detail.max_jobs`, 40 by default), not that the model was weak. Store
+   the post-normalization count, and keep `source_chars` in the same record if the
+   markup size is useful for diagnosis.
+10. **Truncation is a budget decision, not a detail.** Prefer summarizing over
+    truncating (note 4), and when truncation is unavoidable, cut on a character
+    boundary and set `truncated` so the report can say so. Never cut mid-entity:
+    decode first, then truncate.
 
 ### Acceptance Criteria
 
@@ -293,6 +356,11 @@ pub struct EvaluationOutput {
 | Missing API key fails with `MissingApiKey`, not a partial report | Unit test |
 | Context length exceeded is detected before the call | Unit test with mock token counter |
 | Batch evaluation respects concurrency limit | Unit test |
+| Job text is normalized before prompt assembly | Unit test: `plain_text` over real provider fixtures; integration test asserts no markup in the assembled prompt |
+| Normalization is idempotent and leaves plain text unchanged | Unit test: `plain_text(plain_text(x)) == plain_text(x)`; manual-paste fixture |
+| Entities and block boundaries survive normalization | Unit test: `&amp;`, `&#39;`, `&nbsp;`, `<li>`, `<p>`, `<br>` |
+| Truncation never splits a character or an entity | Unit test at the boundary |
+| The report records `input_chars` after normalization | Integration test |
 
 ---
 
@@ -322,7 +390,10 @@ pub struct CoverLetterResult {
 }
 ```
 
-2. Prompt assembly: system prompt + variable substitution with CV summary, job description, and optional tone
+2. Prompt assembly: system prompt + variable substitution with CV summary, the
+   **normalized** job description, and optional tone. It reuses the
+   `{{job_description}}` substitution from Workstream 3, so `plain_text` runs
+   here too; a cover letter must not see tags either.
 3. Storage in `cover_letters` table
 4. Regeneration: a new generation creates a new row rather than overwriting, so the user can compare versions
 
@@ -341,6 +412,7 @@ pub struct CoverLetterResult {
 | Output is stored in `cover_letters` with provenance | Integration test |
 | Regeneration creates a new row | Integration test |
 | Tone parameter is passed to the prompt | Unit test |
+| The job description in the prompt is normalized, the same way as evaluation | Unit test: no markup in the assembled prompt |
 | Missing API key fails cleanly | Unit test |
 
 ---
@@ -419,7 +491,7 @@ Job descriptions are untrusted input. A malicious job posting could contain inst
 ### Critical Implementation Notes
 
 1. **Streaming UI must be cancellable.** A long evaluation should be interruptible by the user. Use `rig`'s `PauseControl` or an equivalent cancellation mechanism.
-2. **Streaming and GPUI integration is the same problem as the browser backends.** Use `gpui-tokio-bridge`. Add a UI responsiveness test.
+2. **Streaming and egui integration is the same problem as the browser backends.** Use the `async_bridge` polling pattern. Add a UI responsiveness test.
 3. **Injection defense is not a solved problem.** No defense is complete. The goal is to make the common cases fail safely, not to guarantee immunity. Document this limitation.
 4. **The structured output validation is the strongest defense.** If the model produces a valid score and recommendation, the injection did not succeed in changing the structured result, even if it changed the narrative. Prioritize structured output reliability.
 5. **Evaluation is per-application, not per-job.** The same job can be evaluated by multiple applications (unlikely but possible) with different CVs. The report is linked to the application, not the job.
@@ -507,6 +579,7 @@ assert!(outcome.is_pass());
 | Malicious job description with injection payload | Hand-crafted | Injection defense tests |
 | Long job description exceeding context window | Hand-crafted | Token budget tests |
 | Real job descriptions captured in Phase 2 | Phase 2 fixtures | Evaluation pipeline (integration) |
+| Provider markup: Eightfold `jobDescription`, JSON-LD `description`, SmartRecruiters sections, and a plain-text manual paste | Phase 2.3 fixtures + hand-crafted | `plain_text` unit tests (idempotence, entities, block boundaries, truncation) |
 
 Phase 3 uses its own fixtures. It does not depend on any Phase 0 artifact.
 
@@ -524,6 +597,7 @@ End-to-end flows:
 4. Attempt to edit a system prompt → verify rejection.
 5. Submit a malicious job description → verify injection does not produce an out-of-range score or invalid recommendation.
 6. Evaluate with a model lacking structured output support → verify fallback or clear error.
+7. Evaluate an application whose `raw_text` is real provider markup → assert the assembled prompt contains no tags and records `input_chars`.
 
 ### CI Jobs
 
@@ -533,7 +607,7 @@ End-to-end flows:
 | `llm-live` | LLM tests against real providers (environment-gated, nightly) |
 | `llm-evals` | `rig::evals` prompt quality tests (cassette-backed, always runs) |
 | `injection-defense` | Malicious input tests (always runs) |
-| `ui-evaluation` | Evaluation UI tests with GPUI harness |
+| `ui-evaluation` | Evaluation UI tests with the `egui_kittest` harness |
 
 ---
 
@@ -544,12 +618,13 @@ End-to-end flows:
 | P3-R1 | **`rig` pre-1.0 breaking changes.** The crate explicitly warns of breaking changes. | High | Pin to a specific version. Verify the current version before pinning. Treat upgrades as deliberate work with migration review. Isolate `rig` behind `core::llm` so churn is absorbed in one place. |
 | P3-R2 | **Provider API differences.** Structured output, streaming, and tool support vary by provider. | Medium | Capability registry per provider/model. UI warns when a model lacks a required capability. Fallback or refusal is explicit. |
 | P3-R3 | **Prompt injection from malicious job descriptions.** | High | Structural separation, instruction hierarchy, structured output validation, no tool access. Documented as imperfect. See Workstream 6. |
-| P3-R4 | **Streaming + GPUI integration causes UI stalls.** Same problem as the browser backends in Phase 2 and 4. | Medium | Use `gpui-tokio-bridge`. Add UI responsiveness test. Cancellation support. |
+| P3-R4 | **Streaming + egui integration causes UI stalls.** Same problem as the browser backends in Phase 2 and 4. | Medium | Use the `async_bridge` polling pattern (Phase 2.1). Add UI responsiveness test. Cancellation support. |
 | P3-R5 | **Token costs and rate limits.** A large CV plus a long job description can be expensive. | Medium | Token budget estimation before calls. Prefer summarization over truncation. Batch evaluation with concurrency limits. Display estimated cost where possible. |
 | P3-R6 | **Prompt quality is hard to test.** LLM output is non-deterministic. | Medium | Cassette-backed tests with curated fixtures. Run each evaluation multiple times. Assert on distributions, not single outcomes. |
 | P3-R7 | **Model version changes invalidate reproducibility.** A provider updates a model and outputs change even with identical input. | Medium | Store `model_used` verbatim. Document that reproducibility is best-effort, not guaranteed. Cassettes are re-recorded on model changes. |
 | P3-R8 | **Prompt versioning schema drift.** If the versioning scheme changes, historical reports lose provenance. | Medium | Content hash is the authoritative identifier. Prompt rows are never hard-deleted. Schema changes require a migration that preserves hashes. |
 | P3-R9 | **Scope creep into prompt tooling.** Building a full templating language or A/B testing framework. | Medium | Phase 3 supports flat variable substitution only. Conditionals, loops, and partials are explicitly deferred. Resist. |
+| P3-R10 | **Markup reaches the model as prose.** A prompt built directly from `raw_text` is mostly tags and attributes; the model sees less content per token and behavior varies by provider. | Medium | `core::text::plain_text` is a pipeline step with fixtures and idempotence tests, applied to every provider's text before assembly. `input_chars` on the report makes a thin input visible. |
 
 ---
 
@@ -558,7 +633,7 @@ End-to-end flows:
 | Week | Focus | Deliverable |
 | :--- | :--- | :--- |
 | **1** | W1 provider integration, key management, capability registry; W2 prompt seeding, variable substitution, versioning | `rig` client works for two providers; system prompts seeded; variables render correctly |
-| **2** | W3 evaluation pipeline: structured output, streaming, storage, provenance | Evaluation produces and stores a report with correct provenance |
+| **2** | W3 evaluation pipeline: text normalization, structured output, streaming, storage, provenance | Evaluation produces and stores a report with correct provenance and normalized input |
 | **3** | W4 cover letter generation; W5 Prompt Manager UI | Cover letters generate and store; Prompt Manager browses, edits, versions |
 | **4** | W6 Evaluation UI, streaming, injection defense; W7 LLM evaluation tests | End-to-end: evaluate → stream → view report → regenerate; injection tests pass |
 
@@ -576,12 +651,15 @@ Phase 3 is complete when **all** of the following are true:
 4. User prompts can be created, edited, versioned, and reverted.
 5. Every evaluation report records `prompt_version`, `prompt_hash`, and `model_used`.
 6. Evaluation produces a structured `EvaluationOutput` with a valid match score and recommendation.
-7. Evaluation reports stream to the UI incrementally and can be cancelled.
-8. Cover letters generate as markdown and are stored with provenance.
-9. Prompt injection defenses are implemented and tested against malicious fixtures.
-10. `rig::evals` tests run in CI against cassettes and pass.
-11. CI is green on Linux, macOS, and Windows, including cassette, injection-defense, and UI jobs.
-12. A short Phase 3 retrospective memo exists, recording `rig` integration friction, provider quirks, and injection-defense effectiveness.
+7. Job text is normalized deterministically before prompting: no markup reaches
+   the model, `plain_text` is idempotent and leaves plain text unchanged, and
+   each report records `input_chars`.
+8. Evaluation reports stream to the UI incrementally and can be cancelled.
+9. Cover letters generate as markdown and are stored with provenance.
+10. Prompt injection defenses are implemented and tested against malicious fixtures.
+11. `rig::evals` tests run in CI against cassettes and pass.
+12. CI is green on Linux, macOS, and Windows, including cassette, injection-defense, and UI jobs.
+13. A short Phase 3 retrospective memo exists, recording `rig` integration friction, provider quirks, and injection-defense effectiveness.
 
 ---
 

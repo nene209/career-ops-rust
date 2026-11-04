@@ -56,6 +56,7 @@ the form's save gate was tightened so invalid JSON can no longer be saved.
 | `cargo clippy --workspace --all-targets --offline -- -D warnings` | clean |
 | `cargo test --workspace --features career-ops-app/keychain --offline -- --skip obscura` | all passed (`obscura` skipped: the sandbox forbids binding a port) |
 | `CAREER_OPS_LIVE_REGISTRY=1 cargo test -p career-ops-app --features keychain --offline -- --ignored live_registry_sites_reach_the_pipeline --nocapture` | both entries verified, none skipped, 33.4 s total |
+| `cargo test -p career-ops-app --features keychain --offline --lib -- registry` | 4 offline registry-sequencing tests passed; the live check filtered as ignored |
 | `cargo test -p career-ops-app --features keychain --lib -- --ignored live_fetch_with_pagination_and_details` | Phase 2.2's Waymo variant, unchanged; re-verified 90 jobs / 3 pages / 2 of 2 descriptions during the registry run |
 
 ---
@@ -72,6 +73,11 @@ paced requests (5 list + 40 detail) and is the cost of the default caps, not of
 the provider; Waymo's 3.7 s is three list pages plus two details. No WAF
 challenge appeared on either site in this run; the previous day's Waymo
 challenges were the reason the live test probes and skips.
+
+A later run the same day exercised the other branch for real: Waymo's probe was
+challenged and the entry was skipped without spending a fetch, while NVIDIA
+verified again (50 jobs, 40 descriptions, 27.3 s). That is the behavior the
+skipping rules are supposed to produce, observed rather than assumed.
 
 ---
 
@@ -122,6 +128,20 @@ overwrite an edit, and cannot resurrect itself after a user clears a field.
 `editing_after_prefill_is_preserved` and `a_known_site_prefills_an_empty_form_once`
 pin both halves. The alternative — an explicit "apply" on URL blur — adds an
 event the app has no other use for.
+
+### F6 — The skip rules needed offline tests (found after the phase closed) — fixed
+
+The registry check is `#[ignore]`d and network-bound, so the only way to know the
+skip logic worked was to run it and wait for a challenge. That is backwards for
+the part most likely to drift: the ordering (probe, fetch only a served page,
+re-probe only on failure) and the three outcomes.
+
+**Fix.** The logic is now `registry_entry`, a sequencer generic over its context.
+The live check passes the app; four ordinary unit tests pass a call recorder and
+assert the call order as well as the outcome — including that a challenged page
+is never fetched and that a healthy fetch is not re-probed. The names are in
+`docs/known-sites.md`. A later live run confirmed the refactor drives the real
+path: Waymo skipped on a challenged probe, NVIDIA verified.
 
 ---
 

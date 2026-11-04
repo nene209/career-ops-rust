@@ -19,6 +19,7 @@
 | v0.4 | Workstream 2 implemented: the `eightfold` engine (list/detail parsing, paging by `start`, stable `eightfold:{domain}:{id}` ids, `PageReport` stop reasons), `FetchSource::fetch_eightfold`, router dispatch through a `DetailSource` that reuses the Phase 2.2 enrichment loop, and default-on enrichment for Eightfold because its list carries no text. Live NVIDIA: 20 jobs from 2 pages, 2 of 2 descriptions, longest 6,253 bytes. |
 | v0.5 | Workstream 3 implemented: the typed registry (`known_sites::{WAYMO, NVIDIA, all, lookup}`), the provider combo and Eightfold fields in the portal form, prefill that runs once per site and only into empty provider fields, and an explicit **Use known config** button. Save and Test config now share one validity gate, which also makes invalid JSON block saving rather than failing later. |
 | v0.6 | Workstream 4 implemented: the gated registry live check, `docs/known-sites.md` with the curation rules and onboarding checklist, and the retrospective. The first full registry run verified both entries: Waymo 90 jobs / 3 pages / 2 of 2 descriptions (longest 3,611 bytes, 3.7 s) and NVIDIA 50 jobs / 5 pages / 40 of 40 descriptions (longest 7,723 bytes, 27.2 s). |
+| v0.7 | The registry skip rules extracted into `registry_entry`, a sequencer shared by the live check and four offline tests. The live check could only be assessed by running it, and the rules it depends on — challenged page means skip without fetching, served page plus failed fetch means fail — are exactly the part that can drift silently. |
 
 ---
 
@@ -448,6 +449,14 @@ rules (an entry ships only with a passing run; a failure is fixed or removed in
 the release commit), and the onboarding checklist from "Adding a site or a
 provider". In production nothing reads `verified_at`: it is a claim in the UI, a
 gate in review, and a unit test that a present date parses.
+
+The skip rules do not depend on a live failure to be trusted. `registry_entry`
+is a small sequencer — probe, fetch only a served page, re-probe only to explain
+a failed fetch — that the live check and four ordinary unit tests share, with a
+call recorder in place of the app. They pin the ordering (a challenged page is
+never fetched, a healthy fetch is not re-probed) and every branch of the outcome
+enum. The second live run exercised the skip path for real: Waymo was challenged
+on the probe and skipped without a fetch while NVIDIA verified again.
 
 First full registry run (2026-11-03, no skips):
 

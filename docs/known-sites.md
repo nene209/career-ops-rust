@@ -37,6 +37,14 @@ It is committed by hand after a passing run; the test never writes it.
 - **`None` is a legitimate state.** The entry still appears in the form, labelled
   "unverified". It is not deleted because a site is having a bad day.
 
+The sequencing behind those rules is unit-tested without a network:
+`a_challenged_registry_page_is_skipped_without_fetching`,
+`a_served_registry_page_is_fetched_once_and_not_probed_again`,
+`a_failed_registry_fetch_on_a_served_page_is_a_failure`, and
+`a_failed_registry_fetch_on_a_challenged_retry_is_skipped`. The live check calls
+the same sequencer, so changing a rule fails a fast offline test before it can
+silently change what a live run reports.
+
 ## Running the check
 
 ```bash
