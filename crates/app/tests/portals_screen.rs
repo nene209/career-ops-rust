@@ -647,6 +647,93 @@ fn save_is_gated_on_an_eightfold_domain() {
 }
 
 #[test]
+fn the_add_chooser_lists_known_sites_and_other() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::ChooseSite),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let _nvidia =
+        harness.get_by_role_and_label(Role::Button, "NVIDIA (Eightfold) - verified 2026-11-03");
+    let _waymo =
+        harness.get_by_role_and_label(Role::Button, "Waymo (Selectors) - verified 2026-11-03");
+    let _other = harness.get_by_role_and_label(Role::Button, "Other site");
+    let _cancel = harness.get_by_role_and_label(Role::Button, "Cancel");
+}
+
+#[test]
+fn choosing_a_known_site_prefills_the_form() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::ChooseSite),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "NVIDIA (Eightfold) - verified 2026-11-03")
+        .click();
+    harness.run();
+
+    let form = harness.state().view.form().expect("the add form is open");
+    assert_eq!(form.url, "https://jobs.nvidia.com/careers");
+    assert_eq!(form.company_name, "NVIDIA");
+    assert_eq!(form.provider, Provider::Eightfold);
+    assert_eq!(form.domain, "nvidia.com");
+
+    let _domain = harness.get_by_label("Eightfold domain");
+    let _source = harness.get_by_label("Known site: NVIDIA (Eightfold) - verified 2026-11-03");
+}
+
+#[test]
+fn choosing_other_site_opens_the_blank_form() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::ChooseSite),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Other site")
+        .click();
+    harness.run();
+
+    let form = harness.state().view.form().expect("the add form is open");
+    assert!(form.url.is_empty());
+    assert_eq!(form.provider, Provider::Selectors);
+    assert!(
+        harness
+            .query_by_label("NVIDIA (Eightfold) - verified 2026-11-03")
+            .is_none(),
+        "the chooser is gone"
+    );
+}
+
+#[test]
+fn cancelling_the_chooser_closes_it() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::ChooseSite),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Cancel")
+        .click();
+    harness.run();
+
+    assert!(harness.state().view.modal.is_none());
+}
+
+#[test]
 fn header_offers_add_and_fetch_all_when_portals_exist() {
     let view_model = PortalsViewModel {
         rows: vec![row(1, "Acme", HealthBadge::Healthy)],

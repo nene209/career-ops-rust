@@ -1,9 +1,9 @@
 # Draft Execution Plan: Career-Ops Rust Desktop Application
 
-**Status:** Draft — v0.5
-**Last updated:** 2026-10-17
+**Status:** Draft — v0.9
+**Last updated:** 2026-11-03
 
-This document outlines the execution plan for porting the `career-ops` project from its current Node.js, file-based architecture to a Rust desktop application using GPUI, SQLite, and a primarily pure-Rust technology stack. The plan incorporates the stated technical decisions and evaluates the key architectural considerations.
+This document outlines the execution plan for porting the `career-ops` project from its current Node.js, file-based architecture to a Rust desktop application using egui, SQLite, and a primarily pure-Rust technology stack. The plan incorporates the stated technical decisions and evaluates the key architectural considerations.
 
 ### Change Log
 
@@ -17,6 +17,7 @@ This document outlines the execution plan for porting the `career-ops` project f
 | v0.6 | UI framework changed from GPUI to **egui/eframe** after Phase 2.01. §3 rewritten against egui. §9 bundle table updated (egui ~5 MB base vs GPUI ~12 MB). §12 amended with Phase 2.01 and Phase 2.1. Decisions log records GPUI as evaluated and rejected, and egui as the chosen framework. Appendix B updated: Q-2 resolved, Q-7 added for the accessibility gap. Toolchain requirement lowered from 1.95.0 (GPUI's `cold_path`) to the workspace's actual MSRV. |
 | v0.7 | Phase 2.2 inserted between the UI shell and AI integration. The Phase 2.1 verification run against a real selector-configured careers page showed that fetched postings are not yet evaluable: Tier 1b stops at page one, stores the card teaser instead of the description, and the SmartRecruiters adapter stores neither a per-posting URL nor any text. Phase 2.2 is the smallest work that closes that gap before Phase 3 builds evaluations on top of it. Phase 2.1 marked complete. |
 | v0.8 | Phase 2.3 added after probing `https://jobs.nvidia.com/careers`, which is an Eightfold site: its postings come from `/api/pcsx/*` JSON endpoints, not from HTML. Neither extraction tier can fetch it, with or without a selector config. Phase 2.3 therefore introduces site providers (selectors, eightfold) and an embedded known-site registry that offers a config when the app knows the host, while keeping manual configuration as the escape hatch. |
+| v0.9 | Phase 2.4 added after Phase 2.3 closed. The registry and prefill work, but the only way to reach them is to type a URL the app already knows, so the embedded profiles are effectively hidden. Phase 2.4 adds a chooser at the start of the add flow, a "based on" attribution with a modified marker, and a visible restore action. It is UI over the existing constants: no storage, no migration, no new provider. |
 
 ---
 
@@ -527,6 +528,7 @@ This principle should be asserted in tests, not just documented — e.g. a test 
 | **Phase 2.1: UI Shell** | ✅ Complete — egui/eframe shell; unlock, first-launch, recovery; Portals and Pipeline screens against the Phase 2 service layer. Retrospective: `.agents/plans/phase_2.1_retrospective.md`. | 1.5–2 weeks |
 | **Phase 2.2: Acquisition Completeness** | ✅ Complete — selector pagination, per-host request pacing, detail-page enrichment, the SmartRecruiters job-URL/description fix, and the "Test config" preview are implemented and verified live. Criterion 8 is partially verified (Waymo's WAF challenged the detail route); caps confirmed, two findings recorded for follow-up. Plan: `.agents/plans/phase_2.2_acquisition_completeness.md`; retrospective: `.agents/plans/phase_2.2_retrospective.md`. | 4–6 days |
 | **Phase 2.3: Site Providers and Known Sites** | ✅ Complete — site providers (`selectors`, `eightfold`), the Eightfold engine, the typed known-site registry with form prefill, and the curation workflow are implemented. The first full registry run verified both entries live: Waymo 90 jobs / 3 pages / 2 of 2 descriptions, NVIDIA 50 jobs / 5 pages / 40 of 40 descriptions. Plan: `.agents/plans/phase_2.3_site_providers.md`; registry doc: `docs/known-sites.md`; retrospective: `.agents/plans/phase_2.3_retrospective.md`. | 4–6 days |
+| **Phase 2.4: Known-Site Catalog** | 🚧 In progress — WS1 (the add-flow chooser, `KnownSite::url()`) complete. Remaining: attribution with a modified marker, **Restore known config**, and the docs/tests pass. UI over the Phase 2.3 constants: no storage change, no migration, no new provider. Plan: `.agents/plans/phase_2.4_known_site_catalog.md`. | 1–2 days |
 | **Phase 3: AI Integration** | `rig` integration, prompt seeding and read-only system prompts, evaluation report generation with `prompt_version` provenance, streaming, injection defense. | 3–4 weeks |
 | **Phase 4: Rendering** | `rust-headless-chrome`-based `PdfBackend`, template system, ATS-safe extraction verification, PDF preview, golden-file tests. | 3–4 weeks |
 | **Phase 5: Polish & Hardening** | Complete Settings, key rotation UI, backend selection, onboarding, error handling audit, panic audit, accessibility, platform testing, performance tuning, backup/export, documentation, visual polish. | 3–4 weeks |

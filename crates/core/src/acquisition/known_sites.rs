@@ -30,6 +30,11 @@ pub struct KnownSite {
 }
 
 impl KnownSite {
+    /// The board URL to prefill: the host plus the path prefix, or its root.
+    pub fn url(&self) -> String {
+        format!("https://{}{}", self.host, self.path_prefix.unwrap_or("/"))
+    }
+
     fn matches_path(&self, path: &str) -> bool {
         match self.path_prefix {
             None => true,
@@ -148,6 +153,20 @@ mod tests {
         };
 
         assert_eq!(site.label(), "NVIDIA (Eightfold) - unverified");
+    }
+
+    #[test]
+    fn an_entry_knows_its_board_url() {
+        assert_eq!(WAYMO.url(), "https://careers.withwaymo.com/jobs/search");
+        assert_eq!(NVIDIA.url(), "https://jobs.nvidia.com/careers");
+
+        // A host that serves one board at its root.
+        let root = KnownSite {
+            host: "example.com",
+            path_prefix: None,
+            ..NVIDIA
+        };
+        assert_eq!(root.url(), "https://example.com/");
     }
 
     #[test]

@@ -286,7 +286,9 @@ impl CareerOpsApp {
                 self.start_portals_load(false);
             }
             PortalsAction::OpenAdd => {
-                self.portals_view.modal = Some(PortalModal::Add(PortalForm::default()));
+                // The chooser is the first step: the embedded registry is only
+                // useful if a user can see it without already knowing a URL.
+                self.portals_view.open_add();
             }
             PortalsAction::OpenEdit(id) => {
                 if let Some(row) = self.portals.row(id) {
@@ -2388,7 +2390,7 @@ mod tests {
 
         let mut waymo_url = String::new();
         for (index, site) in known_sites::all().iter().enumerate() {
-            let url = format!("https://{}{}", site.host, site.path_prefix.unwrap_or("/"));
+            let url = site.url();
             if site.provider == Provider::Selectors {
                 waymo_url = url.clone();
             }
@@ -2497,6 +2499,8 @@ mod tests {
         }"#;
 
         app.handle_portals_action(PortalsAction::OpenAdd);
+        // `OpenAdd` opens the known-site chooser; the preview needs a form.
+        app.portals_view.open_blank_add();
         app.handle_portals_action(PortalsAction::TestConfig(PortalFormData {
             company_name: "Acme".into(),
             url: "https://example.com/careers".into(),
@@ -3332,7 +3336,7 @@ mod tests {
         let mut skipped: Vec<&str> = Vec::new();
 
         for site in sites {
-            let url = format!("https://{}{}", site.host, site.path_prefix.unwrap_or("/"));
+            let url = site.url();
             let expected_rows = app.portals.rows.len() + 1;
             let mut elapsed = Duration::ZERO;
 

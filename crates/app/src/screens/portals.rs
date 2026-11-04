@@ -32,6 +32,33 @@ pub struct PortalsView {
 }
 
 impl PortalsView {
+    /// Start the add flow.
+    ///
+    /// The chooser comes first so the embedded registry is discoverable: a user
+    /// who does not already know a board's URL cannot benefit from an entry.
+    /// "Other site" on the chooser opens the blank form, so nothing is gated.
+    pub fn open_add(&mut self) {
+        self.modal = Some(PortalModal::ChooseSite);
+    }
+
+    /// The blank add form, reached through "Other site".
+    pub fn open_blank_add(&mut self) {
+        self.modal = Some(PortalModal::Add(PortalForm::default()));
+    }
+
+    /// Build the add form from a registry entry.
+    ///
+    /// This is the same `apply_known_site` path the URL prefill uses, so the
+    /// two entry points cannot drift.
+    pub fn choose_known_site(&mut self, site: &KnownSite) {
+        let mut form = PortalForm {
+            url: site.url(),
+            ..PortalForm::default()
+        };
+        form.apply_known_site(site);
+        self.modal = Some(PortalModal::Add(form));
+    }
+
     /// Open the manual-entry dialog.
     ///
     /// Both Portals and Pipeline expose "Add job", so the dialog lives on the
@@ -80,9 +107,19 @@ impl PortalsView {
 }
 
 pub enum PortalModal {
+    /// The first step of the add flow: every embedded known site, plus
+    /// "Other site" for a blank form. Carries no state because the list is a
+    /// const in `known_sites`.
+    ChooseSite,
     Add(PortalForm),
-    Edit { id: i64, form: PortalForm },
-    Delete { id: i64, name: String },
+    Edit {
+        id: i64,
+        form: PortalForm,
+    },
+    Delete {
+        id: i64,
+        name: String,
+    },
     Manual(ManualEntryView),
 }
 
@@ -748,8 +785,15 @@ fn modals(
     state: ModalState,
     action: &mut Option<PortalsAction>,
 ) {
+    // The chooser returns a decision instead of mutating `view.modal` inside the
+    // match, which would be a second mutable borrow of the same field.
+    let mut site_choice = None;
+
     match &mut view.modal {
         None => {}
+        Some(PortalModal::ChooseSite) => {
+            site_choice = choose_site_modal(ui);
+        }
         Some(PortalModal::Add(form)) => {
             portal_form_modal(ui, "New portal", form, None, state, action);
         }
@@ -765,6 +809,65 @@ fn modals(
             manual_modal(ui, manual, state, action);
         }
     }
+
+    match site_choice {
+        Some(SiteChoice::Known(site)) => view.choose_known_site(site),
+        Some(SiteChoice::Blank) => view.open_blank_add(),
+        Some(SiteChoice::Cancel) => view.modal = None,
+        None => {}
+    }
+}
+
+/// What the add-flow chooser decided this frame.
+#[derive(Clone, Copy)]
+enum SiteChoice {
+    Known(&'static KnownSite),
+    Blank,
+    Cancel,
+}
+
+/// The registry, alphabetically, so the order does not depend on declaration.
+fn known_sites_by_name() -> Vec<&'static KnownSite> {
+    let mut sites: Vec<&'static KnownSite> = known_sites::all().iter().collect();
+    sites.sort_by_key(|site| site.name);
+    sites
+}
+
+fn choose_site_modal(ui: &mut Ui) -> Option<SiteChoice> {
+    let mut choice = None;
+
+    Window::new("Add portal")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(480.0)
+        .show(ui.ctx(), |ui| {
+            ui.label(
+                RichText::new(
+                    "Pick a site the app already knows, or configure any other job board.",
+                )
+                .weak()
+                .small(),
+            );
+            ui.add_space(4.0);
+
+            for site in known_sites_by_name() {
+                if ui.button(site.label()).clicked() {
+                    choice = Some(SiteChoice::Known(site));
+                }
+                ui.label(RichText::new(site.notes).weak().small());
+            }
+
+            ui.separator();
+            if ui.button("Other site").clicked() {
+                choice = Some(SiteChoice::Blank);
+            }
+            if ui.button("Cancel").clicked() {
+                choice = Some(SiteChoice::Cancel);
+            }
+        });
+
+    choice
 }
 
 fn portal_form_modal(
@@ -1308,5 +1411,47 @@ mod tests {
         form.maybe_prefill_known_site(Some(site));
         assert_eq!(form.scraper_config, r#"{"list":"custom"}"#);
         assert_eq!(form.provider, Provider::Selectors);
+    }
+
+    #[test]
+    fn open_add_opens_the_chooser_and_other_site_opens_the_blank_form() {
+        let mut view = PortalsView::default();
+
+        view.open_add();
+        assert!(matches!(&view.modal, Some(PortalModal::ChooseSite)));
+        assert!(view.form().is_none(), "the chooser is not a form");
+
+        view.open_blank_add();
+        assert!(matches!(&view.modal, Some(PortalModal::Add(_))));
+        assert!(view.form().expect("form").url.is_empty());
+    }
+
+    #[test]
+    fn known_sites_are_listed_alphabetically() {
+        let names: Vec<&str> = known_sites_by_name().iter().map(|site| site.name).collect();
+
+        assert_eq!(names.len(), known_sites::all().len(), "no entry is dropped");
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "the order must not depend on declaration");
+    }
+
+    /// Choosing an entry and typing its URL must produce the same portal. If
+    /// they diverge, one of the two prefill paths has grown logic of its own.
+    #[test]
+    fn choosing_a_site_builds_the_same_form_as_typing_its_url() {
+        for site in known_sites::all() {
+            let mut view = PortalsView::default();
+            view.choose_known_site(site);
+            let chosen = view.form().expect("chosen form").data();
+
+            let mut typed = PortalForm {
+                url: site.url(),
+                ..Default::default()
+            };
+            typed.maybe_prefill_known_site(Some(site));
+
+            assert_eq!(chosen, typed.data(), "{}", site.name);
+        }
     }
 }
