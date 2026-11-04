@@ -1,7 +1,8 @@
 # Phase 2.3: Site Providers and Known Sites — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.8), §12
-**Status:** In progress — WS1–WS3 complete; WS4 not started
+**Status:** Complete — WS1–WS4 done; retrospective recorded in
+`.agents/plans/phase_2.3_retrospective.md`
 **Last updated:** 2026-11-03
 **Duration:** 4–6 days
 **Depends on:** Phase 2.2 (pagination and detail enrichment freeze the selector-config schema)
@@ -17,6 +18,7 @@
 | v0.3 | Workstream 1 implemented: `core::acquisition::config` owns the `Provider` discriminator and `ScraperConfig::parse`. A missing or null `provider` means `selectors`; an unknown provider is a clear config error. The router parses once, fails invalid configs as `InvalidRequest` (previously logged and ignored), and dispatches `eightfold` before any HTML fetch. `EightfoldConfig` carries the domain and reuses the Phase 2.2 `pagination`/`detail` caps; the Eightfold fetch itself is the WS2 placeholder. |
 | v0.4 | Workstream 2 implemented: the `eightfold` engine (list/detail parsing, paging by `start`, stable `eightfold:{domain}:{id}` ids, `PageReport` stop reasons), `FetchSource::fetch_eightfold`, router dispatch through a `DetailSource` that reuses the Phase 2.2 enrichment loop, and default-on enrichment for Eightfold because its list carries no text. Live NVIDIA: 20 jobs from 2 pages, 2 of 2 descriptions, longest 6,253 bytes. |
 | v0.5 | Workstream 3 implemented: the typed registry (`known_sites::{WAYMO, NVIDIA, all, lookup}`), the provider combo and Eightfold fields in the portal form, prefill that runs once per site and only into empty provider fields, and an explicit **Use known config** button. Save and Test config now share one validity gate, which also makes invalid JSON block saving rather than failing later. |
+| v0.6 | Workstream 4 implemented: the gated registry live check, `docs/known-sites.md` with the curation rules and onboarding checklist, and the retrospective. The first full registry run verified both entries: Waymo 90 jobs / 3 pages / 2 of 2 descriptions (longest 3,611 bytes, 3.7 s) and NVIDIA 50 jobs / 5 pages / 40 of 40 descriptions (longest 7,723 bytes, 27.2 s). |
 
 ---
 
@@ -426,6 +428,39 @@ Known-site labels are ASCII only (a hyphen, not an em dash) because
    (`Eightfold`). Both are `KnownSite` constants. `verified_at` is committed by
    hand after a passing registry run, not generated: a skip leaves it `None`.
 
+**Implementation note (2026-11-03).** The check is
+`live_registry_sites_reach_the_pipeline`, an ignored test gated on
+`CAREER_OPS_LIVE_REGISTRY=1`. It is a sibling of
+`live_fetch_reaches_the_pipeline` rather than a mode inside it: a challenge must
+skip *one entry* without aborting the run, and that test is fail-fast over a
+single URL list. Both still run under `--ignored live_fetch`, and neither is
+affected by the other's environment variable.
+
+Per entry the test probes the page, creates the portal from the `KnownSite`
+constant, fetches it within a 180 s bound, and checks storage: at least one job
+with non-empty text and every `source_url` absolute. A challenge before or after
+the fetch skips the entry and leaves `verified_at` alone; a served page that
+stores nothing fails. It never writes `known_sites.rs`, so a date can only be
+committed by a person reading the run's last line.
+
+`docs/known-sites.md` carries the entries, what "verified" means, the curation
+rules (an entry ships only with a passing run; a failure is fixed or removed in
+the release commit), and the onboarding checklist from "Adding a site or a
+provider". In production nothing reads `verified_at`: it is a claim in the UI, a
+gate in review, and a unit test that a present date parses.
+
+First full registry run (2026-11-03, no skips):
+
+| Entry | Result | Stored | Text | Longest | Time |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| Waymo | `Fetched 90 jobs from 3 pages; 2 of 2 descriptions.` | 90 | 90 | 3,611 B | 3.7 s |
+| NVIDIA | `Fetched 50 jobs from 5 pages; 40 of 40 descriptions.` | 50 | 40 | 7,723 B | 27.2 s |
+
+Waymo's 90 jobs carry text on every row because the card selector fills a teaser;
+NVIDIA's 40-of-50 is the default `detail.max_jobs` cap, which is the documented
+coverage boundary rather than a missing description. The 27 s is 45 paced
+requests (5 list + 40 detail) at 400–800 ms each.
+
 ---
 
 ## Test Strategy
@@ -434,8 +469,8 @@ Known-site labels are ASCII only (a hyphen, not an em dash) because
   paging stop conditions, idempotent ids, registry validation.
 - **`egui_kittest`**: lookup, prefill, no-overwrite, provider selector.
 - **App integration**: a scripted provider through the real router and storage.
-- **Live (ignored)**: the existing default ATS boards, plus the registry
-  iteration once entries exist.
+- **Live (ignored)**: the existing default ATS boards, the Waymo pagination
+  variant, and the registry iteration (`CAREER_OPS_LIVE_REGISTRY=1`).
 
 ---
 

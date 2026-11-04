@@ -3118,6 +3118,197 @@ mod tests {
         );
     }
 
+    /// The registry, live: every `KnownSite` must fetch and store at least one
+    /// posting with text. That is what "known" means — an entry ships only
+    /// after this passes.
+    ///
+    /// It is a sibling of `live_fetch_reaches_the_pipeline` rather than a mode
+    /// inside it because a WAF challenge must skip *one entry*, not abort the
+    /// run, and that test is fail-fast over a single URL list. The environment
+    /// variable is a second gate behind `#[ignore]`, so a broad `--ignored` run
+    /// does not spend minutes on the network by accident.
+    ///
+    /// ```text
+    /// CAREER_OPS_LIVE_REGISTRY=1 \
+    ///     cargo test -p career-ops-app --features keychain -- --ignored \
+    ///     live_registry_sites_reach_the_pipeline
+    /// ```
+    ///
+    /// After a passing run, commit `verified_at` for the entries it verified in
+    /// `crates/core/src/acquisition/known_sites.rs` and reflect them in
+    /// `docs/known-sites.md`. The test never writes either file.
+    #[test]
+    #[ignore = "hits the network; run with --ignored and CAREER_OPS_LIVE_REGISTRY=1"]
+    fn live_registry_sites_reach_the_pipeline() {
+        if std::env::var("CAREER_OPS_LIVE_REGISTRY").as_deref() != Ok("1") {
+            eprintln!("live registry: skipped, set CAREER_OPS_LIVE_REGISTRY=1 to run");
+            return;
+        }
+
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let sites = known_sites::all();
+        assert!(!sites.is_empty(), "the known-site registry is empty");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        // The production HTTP source: the registry is a claim about the real
+        // sites, so a stubbed transport would make the test meaningless.
+        let mut app = CareerOpsApp::new(state, runtime);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        let mut verified: Vec<&str> = Vec::new();
+        let mut skipped: Vec<&str> = Vec::new();
+
+        for site in sites {
+            let url = format!("https://{}{}", site.host, site.path_prefix.unwrap_or("/"));
+
+            // Probe first, like the Waymo live test: a challenge is a site
+            // condition, and spending a fetch on it only widens the block.
+            let probe = live_probe(&app, &url);
+            if live_probe_challenged(probe) {
+                eprintln!(
+                    "live registry: {} skipped, the page is challenged or unreachable ({probe:?})",
+                    site.name
+                );
+                skipped.push(site.name);
+                continue;
+            }
+
+            let expected_rows = app.portals.rows.len() + 1;
+            app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
+                company_name: site.name.to_string(),
+                url: url.clone(),
+                render_mode: "static".into(),
+                scraper_config: Some(site.config.to_string()),
+            }));
+            wait_until_within(&mut app, &ctx, Duration::from_secs(30), |app| {
+                app.portals.rows.len() == expected_rows && app.portals_task.is_none()
+            });
+
+            let portal_id = app
+                .portals
+                .rows
+                .iter()
+                .find(|row| row.name == site.name)
+                .unwrap_or_else(|| panic!("{} was not created", site.name))
+                .id;
+
+            let started = Instant::now();
+            app.handle_portals_action(PortalsAction::FetchOne(portal_id));
+            wait_until_within(&mut app, &ctx, Duration::from_secs(180), |app| {
+                app.portals_task.is_none()
+            });
+            let elapsed = started.elapsed();
+
+            let health = &app
+                .portals
+                .rows
+                .iter()
+                .find(|row| row.name == site.name)
+                .unwrap_or_else(|| panic!("{} row disappeared", site.name))
+                .health;
+
+            if *health != HealthBadge::Healthy {
+                // Served, but the fetch failed: that is a regression, not a
+                // challenge. Only a challenged retry is allowed to skip.
+                let retry = live_probe(&app, &url);
+                assert!(
+                    live_probe_challenged(retry),
+                    "{} was served ({retry:?}) but the fetch failed with {health:?}",
+                    site.name
+                );
+                eprintln!(
+                    "live registry: {} skipped, the fetch was challenged ({retry:?})",
+                    site.name
+                );
+                skipped.push(site.name);
+                continue;
+            }
+
+            eprintln!(
+                "live registry: {} healthy in {elapsed:?}: {:?}",
+                site.name, app.portals_message
+            );
+            verified.push(site.name);
+        }
+
+        let pool = app.pool().expect("pool");
+        let stored = app
+            .runtime()
+            .block_on(job_repo::list_recent(&pool, 10_000))
+            .expect("list stored jobs");
+
+        for name in &verified {
+            let jobs: Vec<_> = stored.iter().filter(|job| job.company == *name).collect();
+            assert!(
+                !jobs.is_empty(),
+                "{name} reported a healthy fetch but stored no jobs"
+            );
+            let with_text = jobs
+                .iter()
+                .filter(|job| !job.raw_text.trim().is_empty())
+                .count();
+            assert!(
+                with_text > 0,
+                "{name} stored {} jobs but none with text; Phase 3 could not evaluate them",
+                jobs.len()
+            );
+            for job in &jobs {
+                assert!(
+                    job.source_url.starts_with("https://"),
+                    "{name} stored a row that is not an absolute posting URL: {}",
+                    job.source_url
+                );
+            }
+            let longest = jobs.iter().map(|job| job.raw_text.len()).max().unwrap_or(0);
+            eprintln!(
+                "live registry: {name} stored {} jobs, {with_text} with text, longest {longest} bytes",
+                jobs.len()
+            );
+        }
+
+        eprintln!(
+            "live registry: verified {verified:?}; skipped {skipped:?}. Commit verified_at for \
+             the verified entries only."
+        );
+        if verified.is_empty() {
+            eprintln!(
+                "live registry: nothing could be verified on this run; no entry may be marked \
+                 verified from it"
+            );
+        }
+    }
+
     #[test]
     fn new_portal_input_rejects_invalid_urls_and_render_modes() {
         let mut data = PortalFormData {

@@ -294,6 +294,8 @@ docs/
   phase-2-acquisition.md      Phase 2 plan
   decisions-addendum.md       Decisions made after the main plan was
                               written, superseding specific sections
+  known-sites.md              The embedded known-site registry: entries,
+                              what "verified" means, and how to add a site
 ```
 
 ---

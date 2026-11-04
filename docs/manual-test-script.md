@@ -158,7 +158,7 @@ it with the screen name.
 
 ## 8. Automated live check (optional)
 
-`crates/app/src/app.rs` contains an ignored test that runs real fetches through
+`crates/app/src/app.rs` contains ignored tests that run real fetches through
 the app: create portals → `FetchOne` on the first → `FetchAll` (batch, which
 re-fetches the first and therefore also exercises dedup) → storage → Pipeline.
 
@@ -198,6 +198,26 @@ Figma, 31 Linear, 84 Spotify, 208 Ubisoft) in about 6.4 s of fetching,
 including two SmartRecruiters detail requests. The batch re-fetches the first
 portal and the stored total stayed 467, so deduplication held. The test also
 asserts the Pipeline page bound rather than assuming every row is visible.
+
+### Registry check
+
+The known-site registry has its own live check: it probes, creates, and fetches
+every entry in `crates/core/src/acquisition/known_sites.rs`, then asserts each
+one stored at least one posting with text. It is gated twice, because it is
+slower than the board checks:
+
+```bash
+CAREER_OPS_LIVE_REGISTRY=1 \
+  cargo test -p career-ops-app --features keychain -- --ignored \
+  live_registry_sites_reach_the_pipeline
+```
+
+A WAF challenge skips that entry and says so; a served page that stores nothing
+fails. The final line names the verified and skipped entries. After a passing
+run, commit `verified_at` in `known_sites.rs` and update `docs/known-sites.md`;
+the rules are in that file. First full run (2026-11-03, no skips): Waymo 90 jobs
+from 3 pages with 2 of 2 descriptions in 3.7 s, NVIDIA 50 jobs from 5 pages with
+40 of 40 descriptions in 27.2 s.
 
 ### Making Waymo's search page work
 
