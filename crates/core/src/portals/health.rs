@@ -135,6 +135,7 @@ mod tests {
             last_verified_at: verified,
             last_fetch_attempt_at: last_attempt,
             last_failure_cause: cause.map(str::to_string),
+            last_page_fetched: 0,
         }
     }
 

@@ -20,12 +20,18 @@ pub enum PipelineAction {
     AddJob,
     Reload,
     SetFilter(JobFilter),
+    /// Re-fetch one posting's description in place.
+    RefreshJob(i64),
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineRenderState<'a> {
     pub loading: bool,
     pub error: Option<&'a str>,
+    /// The outcome of the last refresh, or a hint about one.
+    pub message: Option<&'a str>,
+    /// The job whose description is being re-fetched.
+    pub refreshing: Option<i64>,
 }
 
 pub fn show(
@@ -57,7 +63,7 @@ pub fn show(
 
     if let Some(selected) = view.selected {
         if let Some(row) = view_model.row(selected) {
-            detail(ui, row, view);
+            detail(ui, row, view, state, &mut action);
             return action;
         }
 
@@ -93,6 +99,10 @@ fn header(
         ui.separator();
         ui.label(RichText::new(format!("{} jobs", view_model.rows.len())).weak());
     });
+
+    if let Some(message) = state.message {
+        ui.label(RichText::new(message).weak());
+    }
 
     ui.horizontal(|ui| {
         for &filter in JobFilter::all() {
@@ -170,7 +180,13 @@ fn row_ui(ui: &mut Ui, row: &JobRow, view: &mut PipelineView) {
     ui.separator();
 }
 
-fn detail(ui: &mut Ui, row: &JobRow, view: &mut PipelineView) {
+fn detail(
+    ui: &mut Ui,
+    row: &JobRow,
+    view: &mut PipelineView,
+    state: PipelineRenderState<'_>,
+    action: &mut Option<PipelineAction>,
+) {
     ui.horizontal(|ui| {
         if ui.button("Back to list").clicked() {
             view.selected = None;
@@ -182,6 +198,20 @@ fn detail(ui: &mut Ui, row: &JobRow, view: &mut PipelineView) {
             .on_disabled_hover_text("Available in a later phase");
         ui.add_enabled(false, Button::new("Generate cover letter"))
             .on_disabled_hover_text("Available in a later phase");
+
+        if ui
+            .add_enabled(
+                state.refreshing.is_none(),
+                Button::new("Refresh description"),
+            )
+            .on_hover_text("Fetch this posting again and replace its text")
+            .clicked()
+        {
+            *action = Some(PipelineAction::RefreshJob(row.id));
+        }
+        if state.refreshing == Some(row.id) {
+            LoadingSpinner::show(ui);
+        }
     });
 
     ui.add_space(4.0);

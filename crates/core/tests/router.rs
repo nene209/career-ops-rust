@@ -16,7 +16,8 @@ use career_ops_core::acquisition::error::{AtsError, FailureCause};
 use career_ops_core::acquisition::html::selectors::PaginationConfig;
 use career_ops_core::acquisition::report::{PageReport, PaginationStop};
 use career_ops_core::acquisition::router::{
-    decide_initial_route, fetch_portal, fetch_portal_cancellable, preview, InitialRoute,
+    decide_initial_route, fetch_portal, fetch_portal_cancellable, fetch_portal_more, preview,
+    InitialRoute,
 };
 use career_ops_core::backend::{MockBrowserBackend, RenderedPage};
 use career_ops_core::model::FetchTier;
@@ -217,9 +218,10 @@ async fn an_eightfold_config_fetches_and_enriches() {
             "jobs.nvidia.com".to_string(),
             "nvidia.com".to_string(),
             "Acme".to_string(),
+            1,
             2,
         )],
-        "the provider gets the host, domain, company, and configured page cap"
+        "the provider gets the host, domain, company, start page, and page cap"
     );
     assert!(
         source.html_calls().is_empty(),
@@ -277,9 +279,14 @@ async fn an_eightfold_portal_enriches_by_default() {
     );
     assert_eq!(outcome.details_enriched, 1);
     assert_eq!(
-        source.eightfold_calls()[0].3,
+        source.eightfold_calls()[0].4,
         career_ops_core::acquisition::html::selectors::PaginationConfig::DEFAULT_MAX_PAGES,
         "the default page cap applies when the config omits pagination"
+    );
+    assert_eq!(
+        source.eightfold_calls()[0].3,
+        1,
+        "a normal fetch starts at page one"
     );
 
     db.close().await;
@@ -1253,4 +1260,157 @@ async fn preview_an_ats_board_uses_the_adapter_and_its_detail_endpoint() {
     assert!(report
         .first_description_bytes
         .is_some_and(|bytes| bytes > 0));
+}
+
+// -----------------------------------------------------------------
+// Continuation cursor
+// -----------------------------------------------------------------
+
+#[tokio::test]
+async fn fetch_more_resumes_after_the_last_page() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://jobs.nvidia.com/careers",
+            serde_json::json!({
+                "provider": "eightfold",
+                "domain": "nvidia.com",
+                "pagination": { "max_pages": 2 }
+            }),
+        ),
+    )
+    .await
+    .expect("portal");
+
+    let first = PageReport {
+        jobs: vec![eightfold_job("A", "1")],
+        pages_fetched: 2,
+        stop: PaginationStop::LimitReached,
+    };
+    let source = Arc::new(MockFetchSource::with_eightfold(Ok(first)));
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.first_page, 1);
+    assert_eq!(outcome.next_page, Some(3));
+    assert!(!outcome.end_of_list);
+    assert_eq!(
+        portals::get(&db.pool, portal.id)
+            .await
+            .expect("portal")
+            .expect("row")
+            .last_page_fetched,
+        2,
+        "the cursor is the last page read"
+    );
+
+    let second = PageReport {
+        jobs: vec![eightfold_job("B", "2")],
+        pages_fetched: 1,
+        stop: PaginationStop::EndOfList,
+    };
+    let more = Arc::new(MockFetchSource::with_eightfold(Ok(second)));
+    let resumed = fetch_portal_more(&db.pool, portal.id, more.as_ref(), None)
+        .await
+        .expect("more");
+
+    assert_eq!(
+        more.eightfold_calls()[0].3,
+        3,
+        "the resume starts one page after the cursor"
+    );
+    assert_eq!(resumed.first_page, 3);
+    assert!(resumed.end_of_list);
+    assert_eq!(
+        portals::get(&db.pool, portal.id)
+            .await
+            .expect("portal")
+            .expect("row")
+            .last_page_fetched,
+        0,
+        "the end of the list clears the cursor"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_template_portal_resumes_at_the_next_page() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        NewPortal {
+            company_name: "Acme".into(),
+            url: "https://example.com/careers".into(),
+            render_mode: RenderMode::Static,
+            scraper_config: Some(serde_json::json!({
+                "list": "article.job",
+                "fields": { "title": "h2" },
+                "pagination": {
+                    "url_template": "https://example.com/careers?page={page}",
+                    "max_pages": 2
+                }
+            })),
+        },
+    )
+    .await
+    .expect("portal");
+
+    let first = PageReport {
+        jobs: vec![sample_job("A")],
+        pages_fetched: 2,
+        stop: PaginationStop::LimitReached,
+    };
+    let source = Arc::new(MockFetchSource::with_html_report(Ok(first)));
+    fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    let more = Arc::new(MockFetchSource::with_html_report(Ok(PageReport {
+        jobs: vec![sample_job("B")],
+        pages_fetched: 1,
+        stop: PaginationStop::EndOfList,
+    })));
+    fetch_portal_more(&db.pool, portal.id, more.as_ref(), None)
+        .await
+        .expect("more");
+
+    assert_eq!(more.html_start_pages(), vec![3]);
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_portal_without_a_cursor_ignores_fetch_more() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        NewPortal {
+            company_name: "Acme".into(),
+            url: "https://example.com/careers".into(),
+            render_mode: RenderMode::Static,
+            scraper_config: Some(serde_json::json!({ "next": "a[rel=next]" })),
+        },
+    )
+    .await
+    .expect("portal");
+
+    let source = Arc::new(MockFetchSource::with_html_report(Ok(PageReport {
+        jobs: Vec::new(),
+        pages_fetched: 1,
+        stop: PaginationStop::EndOfList,
+    })));
+    fetch_portal_more(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("more");
+
+    assert_eq!(
+        source.html_start_pages(),
+        vec![1],
+        "a next-link chain has no cursor, so the fetch starts at page one"
+    );
+
+    db.close().await;
 }

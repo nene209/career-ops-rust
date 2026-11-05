@@ -172,3 +172,13 @@ pub async fn record_fetch_attempt(
 
     Ok(())
 }
+
+/// Record how far the list has been read, for a later **Fetch more**.
+pub async fn set_last_page_fetched(pool: &SqlitePool, id: i64, page: i64) -> Result<()> {
+    sqlx::query("UPDATE portals SET last_page_fetched = ? WHERE id = ?")
+        .bind(page.max(0))
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}

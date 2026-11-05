@@ -271,6 +271,7 @@ mod tests {
             last_verified_at: verified,
             last_fetch_attempt_at: attempt,
             last_failure_cause: failure.map(str::to_string),
+            last_page_fetched: 0,
         }
     }
 
@@ -427,8 +428,11 @@ mod tests {
             outcome: Ok(FetchOutcome {
                 jobs_fetched: 3,
                 tier: FetchTier::Tier2Obscura,
+                first_page: 1,
                 pages_fetched: None,
                 pagination_stopped: None,
+                next_page: None,
+                end_of_list: false,
                 details_attempted: 0,
                 details_enriched: 0,
             }),

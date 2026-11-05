@@ -43,9 +43,22 @@ pub async fn fetch_static_jobs(
     url: &Url,
     company_name: &str,
     scraper_config: Option<&SelectorConfig>,
+    start_page: usize,
 ) -> AtsResult<PageReport> {
     let source = HttpPageSource { client };
-    fetch_pages(&source, url, company_name, scraper_config).await
+    fetch_pages_from(&source, url, company_name, scraper_config, start_page).await
+}
+
+/// Fetch from page one. The tests use this shape; the router calls
+/// `fetch_pages_from` with an explicit start.
+#[cfg(test)]
+async fn fetch_pages(
+    source: &dyn PageSource,
+    first_url: &Url,
+    company_name: &str,
+    scraper_config: Option<&SelectorConfig>,
+) -> AtsResult<PageReport> {
+    fetch_pages_from(source, first_url, company_name, scraper_config, 1).await
 }
 
 /// Fetches one page of HTML.
@@ -97,24 +110,43 @@ impl PageSource for HttpPageSource<'_> {
 /// Errors on page one are returned: the router needs them to decide whether to
 /// escalate to Tier 2. Errors after page one stop the loop and keep what was
 /// collected.
-async fn fetch_pages(
+async fn fetch_pages_from(
     source: &dyn PageSource,
     first_url: &Url,
     company_name: &str,
     scraper_config: Option<&SelectorConfig>,
+    start_page: usize,
 ) -> AtsResult<PageReport> {
     let pagination = scraper_config.and_then(|config| config.pagination.as_ref());
     let max_pages = pagination.map_or(1, PaginationConfig::page_limit);
+    let start_page = start_page.max(1);
+
+    // Page one is the portal URL itself. Starting later needs a template:
+    // a chain of next links cannot be jumped into.
+    let first_page_url = if start_page == 1 {
+        first_url.clone()
+    } else {
+        let template = pagination
+            .and_then(|pagination| pagination.url_template.as_deref())
+            .ok_or(AtsError::Unsupported(
+                "a start page requires a url_template",
+            ))?;
+        let raw = template.replace("{page}", &start_page.to_string());
+        Url::parse(&raw)
+            .or_else(|_| first_url.join(&raw))
+            .map_err(|error| AtsError::Parse(format!("start page url: {error}")))?
+    };
 
     let mut jobs: Vec<NormalizedJob> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut page_url = first_url.clone();
+    let mut page_url = first_page_url;
     let mut pages_fetched = 0;
 
-    for page in 1..=max_pages {
+    for offset in 0..max_pages {
+        let page = start_page + offset;
         let body = match source.fetch_page(&page_url).await {
             Ok(body) => body,
-            Err(error) if page == 1 => return Err(error),
+            Err(error) if offset == 0 => return Err(error),
             Err(error) => {
                 warn!(page, %error, "pagination stopped: page fetch failed");
                 return Ok(PageReport {
@@ -127,7 +159,17 @@ async fn fetch_pages(
 
         let page_jobs = match extract_from_html(&body, &page_url, company_name, scraper_config) {
             Ok(jobs) => jobs,
-            Err(error) if page == 1 => return Err(error),
+            Err(error) if offset == 0 && start_page == 1 => return Err(error),
+            Err(_) if offset == 0 => {
+                // The first page of a resumed run produced nothing: the board
+                // has fewer pages than the cursor said. That is an ending, not
+                // a failure, so the cursor is cleared instead of retried.
+                return Ok(PageReport {
+                    jobs,
+                    pages_fetched,
+                    stop: PaginationStop::EndOfList,
+                });
+            }
             Err(error) => {
                 warn!(page, %error, "pagination stopped: page extraction failed");
                 return Ok(PageReport {
@@ -140,7 +182,7 @@ async fn fetch_pages(
 
         pages_fetched += 1;
         let added = push_unique(&mut jobs, &mut seen, page_jobs);
-        if added == 0 && page > 1 {
+        if added == 0 && offset > 0 {
             // The site ignored the page parameter and served the same page,
             // or the next link points back at content we already have.
             warn!(page, "pagination stopped: the page produced no new jobs");
@@ -651,6 +693,35 @@ mod tests {
         .expect_err("the router needs the first-page error");
 
         assert!(matches!(error, AtsError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn resuming_past_the_end_is_an_ending_not_a_failure() {
+        let source = ScriptedPages::new(vec![Ok(
+            "<html><body><p>No jobs here.</p></body></html>".into()
+        )]);
+        let config = config(Some(serde_json::json!({
+            "url_template": "https://example.com/careers?page={page}",
+            "max_pages": 5,
+        })));
+
+        let report = fetch_pages_from(
+            &source,
+            &url("https://example.com/careers"),
+            "Acme",
+            Some(&config),
+            4,
+        )
+        .await
+        .expect("a resumed empty page is not an error");
+
+        assert_eq!(report.pages_fetched, 0);
+        assert_eq!(report.stop, PaginationStop::EndOfList);
+        assert_eq!(
+            source.calls(),
+            vec!["https://example.com/careers?page=4"],
+            "the resumed page is the one requested"
+        );
     }
 
     #[tokio::test]

@@ -55,6 +55,26 @@ pub async fn fetch_one(
     browser: Option<&dyn BrowserBackend>,
 ) -> Result<FetchReport> {
     let outcome = router::fetch_portal(pool, portal_id, source, browser).await;
+    report(pool, portal_id, outcome).await
+}
+
+/// Continue a portal from its stored cursor. Behaves like `fetch_one` for a
+/// portal whose provider has no explicit page.
+pub async fn fetch_more(
+    pool: &SqlitePool,
+    portal_id: i64,
+    source: &dyn FetchSource,
+    browser: Option<&dyn BrowserBackend>,
+) -> Result<FetchReport> {
+    let outcome = router::fetch_portal_more(pool, portal_id, source, browser).await;
+    report(pool, portal_id, outcome).await
+}
+
+async fn report(
+    pool: &SqlitePool,
+    portal_id: i64,
+    outcome: std::result::Result<FetchOutcome, FetchError>,
+) -> Result<FetchReport> {
     let portal = portals::get(pool, portal_id)
         .await?
         .ok_or_else(|| CoreError::Internal("portal vanished during fetch"))?;

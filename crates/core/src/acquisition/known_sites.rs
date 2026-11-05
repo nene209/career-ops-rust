@@ -70,7 +70,7 @@ pub const WAYMO_CONFIG: &str = r#"{
     "url_template": "https://careers.withwaymo.com/jobs/search?page={page}",
     "max_pages": 3
   },
-  "detail": { "max_jobs": 2 }
+  "detail": { "max_jobs": 90 }
 }"#;
 
 pub const WAYMO: KnownSite = KnownSite {

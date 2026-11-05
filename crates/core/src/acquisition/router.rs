@@ -72,6 +72,27 @@ async fn record_fetch_outcome(
             "could not record fetch attempt outcome"
         );
     }
+
+    // Advance the continuation cursor only for outcomes that say where the
+    // next run should start. A partial failure leaves it alone, so the next
+    // attempt retries the range that failed.
+    let Ok(outcome) = result else {
+        return;
+    };
+    let cursor = if outcome.end_of_list {
+        Some(0)
+    } else {
+        outcome.next_page.map(|page| page.saturating_sub(1) as i64)
+    };
+    if let Some(cursor) = cursor {
+        if let Err(e) = portals::set_last_page_fetched(pool, portal_id, cursor).await {
+            tracing::warn!(
+                portal = portal_id,
+                error = %e,
+                "could not record the fetch cursor"
+            );
+        }
+    }
 }
 
 /// Abstraction over the two Tier 1 fetch paths. The production
@@ -90,9 +111,11 @@ pub trait FetchSource: Send + Sync {
         url: &Url,
         company_name: &str,
         config: Option<&SelectorConfig>,
+        start_page: usize,
     ) -> AtsResult<PageReport>;
 
-    /// Fetch a provider's list endpoint, paging up to `max_pages`.
+    /// Fetch a provider's list endpoint, paging up to `max_pages` from
+    /// `start_page` (1-based).
     ///
     /// Separate from `fetch_ats` because the provider decides its own URL from
     /// the portal host and domain, and because its page bound is configuration
@@ -102,6 +125,7 @@ pub trait FetchSource: Send + Sync {
         host: &str,
         domain: &str,
         company_name: &str,
+        start_page: usize,
         max_pages: usize,
     ) -> AtsResult<PageReport>;
 
@@ -140,8 +164,9 @@ impl FetchSource for HttpFetchSource {
         url: &Url,
         company_name: &str,
         config: Option<&SelectorConfig>,
+        start_page: usize,
     ) -> AtsResult<PageReport> {
-        html::fetch_static_jobs(&self.client, url, company_name, config).await
+        html::fetch_static_jobs(&self.client, url, company_name, config, start_page).await
     }
 
     async fn fetch_eightfold(
@@ -149,9 +174,18 @@ impl FetchSource for HttpFetchSource {
         host: &str,
         domain: &str,
         company_name: &str,
+        start_page: usize,
         max_pages: usize,
     ) -> AtsResult<PageReport> {
-        eightfold::fetch_jobs(&self.client, host, domain, company_name, max_pages).await
+        eightfold::fetch_jobs(
+            &self.client,
+            host,
+            domain,
+            company_name,
+            start_page,
+            max_pages,
+        )
+        .await
     }
 
     async fn fetch_page(&self, url: &Url) -> AtsResult<String> {
@@ -174,11 +208,18 @@ impl FetchSource for HttpFetchSource {
 pub struct FetchOutcome {
     pub jobs_fetched: usize,
     pub tier: FetchTier,
+    /// First list page this run requested (1-based).
+    pub first_page: usize,
     /// List pages fetched by the selector path. `None` when an adapter or the
     /// rendering backend owns pagination.
     pub pages_fetched: Option<usize>,
     /// Why the selector loop stopped. `None` when no selector fetch ran.
     pub pagination_stopped: Option<PaginationStop>,
+    /// The page a later **Fetch more** should start from. `Some` only when the
+    /// provider has an explicit cursor and more pages remain.
+    pub next_page: Option<usize>,
+    /// The provider reported the end of its list.
+    pub end_of_list: bool,
     /// Detail pages fetched to fill in descriptions. Zero when the portal has
     /// no `detail` config.
     pub details_attempted: usize,
@@ -260,6 +301,15 @@ pub fn decide_initial_route(
     InitialRoute::Tier1b
 }
 
+/// Where a fetch starts reading a list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchStart {
+    /// Page one, as every fetch did before Phase 2.5.
+    Beginning,
+    /// The page after the portal's stored cursor.
+    Resume,
+}
+
 /// Fetch a portal end-to-end and store the results.
 ///
 /// Records the outcome on the portal row regardless of success or
@@ -272,6 +322,20 @@ pub async fn fetch_portal(
     browser: Option<&dyn BrowserBackend>,
 ) -> FetchResult<FetchOutcome> {
     fetch_portal_cancellable(pool, portal_id, source, browser, None).await
+}
+
+/// Continue a portal from its stored cursor.
+///
+/// The cursor is `portals.last_page_fetched`; the next run starts one page
+/// after it. A portal whose provider has no cursor has nothing stored, so this
+/// behaves like a normal fetch from page one.
+pub async fn fetch_portal_more(
+    pool: &SqlitePool,
+    portal_id: i64,
+    source: &dyn FetchSource,
+    browser: Option<&dyn BrowserBackend>,
+) -> FetchResult<FetchOutcome> {
+    fetch_portal_starting_at(pool, portal_id, source, browser, None, FetchStart::Resume).await
 }
 
 /// As `fetch_portal`, but stops detail enrichment between jobs when `cancel`
@@ -287,7 +351,26 @@ pub async fn fetch_portal_cancellable(
     browser: Option<&dyn BrowserBackend>,
     cancel: Option<&AtomicBool>,
 ) -> FetchResult<FetchOutcome> {
-    let result = fetch_portal_inner(pool, portal_id, source, browser, cancel).await;
+    fetch_portal_starting_at(
+        pool,
+        portal_id,
+        source,
+        browser,
+        cancel,
+        FetchStart::Beginning,
+    )
+    .await
+}
+
+async fn fetch_portal_starting_at(
+    pool: &SqlitePool,
+    portal_id: i64,
+    source: &dyn FetchSource,
+    browser: Option<&dyn BrowserBackend>,
+    cancel: Option<&AtomicBool>,
+    start: FetchStart,
+) -> FetchResult<FetchOutcome> {
+    let result = fetch_portal_inner(pool, portal_id, source, browser, cancel, start).await;
     record_fetch_outcome(pool, portal_id, &result).await;
     result
 }
@@ -303,6 +386,7 @@ pub async fn fetch_portal_inner(
     source: &dyn FetchSource,
     browser: Option<&dyn BrowserBackend>,
     cancel: Option<&AtomicBool>,
+    start: FetchStart,
 ) -> FetchResult<FetchOutcome> {
     let portal = portals::get(pool, portal_id)
         .await
@@ -316,6 +400,11 @@ pub async fn fetch_portal_inner(
         cause: FailureCause::InvalidRequest,
         detail: format!("portal url is invalid: {e}"),
     })?;
+
+    let first_page = match start {
+        FetchStart::Beginning => 1,
+        FetchStart::Resume => (portal.last_page_fetched.max(0) as usize) + 1,
+    };
 
     let adapters = ats::adapters();
     // Parsed once: the tier paths and the enrichment step all use the same
@@ -342,7 +431,13 @@ pub async fn fetch_portal_inner(
                 .unwrap_or(PaginationConfig::DEFAULT_MAX_PAGES);
 
             let report = source
-                .fetch_eightfold(host, &eightfold.domain, &portal.company_name, max_pages)
+                .fetch_eightfold(
+                    host,
+                    &eightfold.domain,
+                    &portal.company_name,
+                    first_page,
+                    max_pages,
+                )
                 .await
                 .map_err(|error| FetchError::from_ats(error, "Eightfold"))?;
 
@@ -386,7 +481,7 @@ pub async fn fetch_portal_inner(
                 }
                 InitialRoute::Tier1b => {
                     match source
-                        .fetch_html(&url, &portal.company_name, selectors_config)
+                        .fetch_html(&url, &portal.company_name, selectors_config, first_page)
                         .await
                     {
                         Ok(report) => (
@@ -412,6 +507,23 @@ pub async fn fetch_portal_inner(
     let (pages_fetched, pagination_stopped) = match page_report {
         Some((pages, stop)) => (Some(pages), Some(stop)),
         None => (None, None),
+    };
+
+    // A cursor exists only where the provider accepts an explicit page: Eightfold
+    // offsets, or a selector config with a URL template. A chain of next links
+    // cannot be jumped into, and adapters page internally.
+    let has_cursor = eightfold_source.is_some()
+        || (matches!(tier, FetchTier::Tier1bHtml)
+            && config
+                .as_ref()
+                .and_then(ScraperConfig::selectors)
+                .and_then(|selectors| selectors.pagination.as_ref())
+                .is_some_and(|pagination| pagination.url_template.is_some()));
+    let end_of_list = pagination_stopped == Some(PaginationStop::EndOfList);
+    let next_page = if has_cursor && pagination_stopped == Some(PaginationStop::LimitReached) {
+        pages_fetched.map(|fetched| first_page + fetched)
+    } else {
+        None
     };
 
     if let Some(cause) = tier1_failure {
@@ -471,8 +583,11 @@ pub async fn fetch_portal_inner(
     Ok(FetchOutcome {
         jobs_fetched: count,
         tier,
+        first_page,
         pages_fetched,
         pagination_stopped,
+        next_page,
+        end_of_list,
         details_attempted,
         details_enriched,
     })
@@ -738,7 +853,7 @@ pub async fn preview(
         // One page only, like the selector preview; the report names the
         // pages the saved config would follow.
         let report = source
-            .fetch_eightfold(host, &eightfold.domain, company_name, 1)
+            .fetch_eightfold(host, &eightfold.domain, company_name, 1, 1)
             .await
             .map_err(|error| FetchError::from_ats(error, "Eightfold"))?;
 
@@ -788,7 +903,7 @@ pub async fn preview(
                     ..config.clone()
                 });
                 let jobs = source
-                    .fetch_html(url, company_name, single_page.as_ref())
+                    .fetch_html(url, company_name, single_page.as_ref(), 1)
                     .await
                     .map_err(|error| FetchError::from_ats(error, "Tier 1b"))?
                     .jobs;

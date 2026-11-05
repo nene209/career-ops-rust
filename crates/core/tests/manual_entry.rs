@@ -465,3 +465,110 @@ async fn an_unknown_host_still_uses_the_generic_path() {
 
     db.close().await;
 }
+
+// -----------------------------------------------------------------
+// Per-job refresh
+// -----------------------------------------------------------------
+
+#[tokio::test]
+async fn refresh_job_fills_a_missing_eightfold_description_in_place() {
+    let db = common::TestDb::new_raw().await;
+    let stored = job_descriptions::upsert(
+        &db.pool,
+        job_descriptions::NewJobDescription {
+            title: "Senior Network Product Engineer".into(),
+            company: "NVIDIA".into(),
+            source_url: "https://jobs.nvidia.com/careers/job/893394864453".into(),
+            raw_text: String::new(),
+            fetch_tier: FetchTier::Tier1aAts,
+            external_id: Some("eightfold:nvidia.com:893394864453".into()),
+        },
+    )
+    .await
+    .expect("store");
+
+    let source = Arc::new(MockFetchSource::default().pages([Ok(NVIDIA_DETAIL.to_string())]));
+    let refreshed = manual::refresh_job(&db.pool, stored.id, source.as_ref())
+        .await
+        .expect("refresh");
+
+    assert_eq!(refreshed.id, stored.id);
+    assert!(refreshed.raw_text.contains("network stack"));
+    assert_eq!(count_jobs(&db.pool).await, 1, "a refresh never inserts");
+    assert_eq!(source.page_calls().len(), 1);
+    assert!(
+        source.html_calls().is_empty(),
+        "the provider id routes straight to the detail endpoint"
+    );
+
+    db.close().await;
+}
+
+const JSONLD_POSTING: &str = r#"<html><head>
+<script type="application/ld+json">
+{"@type":"JobPosting","title":"Engineer","description":"<p>Full description from JSON-LD.</p>"}
+</script></head><body></body></html>"#;
+
+#[tokio::test]
+async fn refresh_job_replaces_a_teaser_from_the_posting_page() {
+    let db = common::TestDb::new_raw().await;
+    let stored = job_descriptions::upsert(
+        &db.pool,
+        job_descriptions::NewJobDescription {
+            title: "Engineer".into(),
+            company: "Acme".into(),
+            source_url: "https://example.com/jobs/1".into(),
+            raw_text: "teaser".into(),
+            fetch_tier: FetchTier::Tier1bHtml,
+            external_id: None,
+        },
+    )
+    .await
+    .expect("store");
+
+    let source = Arc::new(MockFetchSource::default().pages([Ok(JSONLD_POSTING.to_string())]));
+    let refreshed = manual::refresh_job(&db.pool, stored.id, source.as_ref())
+        .await
+        .expect("refresh");
+
+    assert_eq!(refreshed.id, stored.id);
+    assert!(refreshed.raw_text.contains("Full description from JSON-LD"));
+    assert_eq!(count_jobs(&db.pool).await, 1);
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_failed_refresh_leaves_the_stored_text_alone() {
+    let db = common::TestDb::new_raw().await;
+    let stored = job_descriptions::upsert(
+        &db.pool,
+        job_descriptions::NewJobDescription {
+            title: "Engineer".into(),
+            company: "Acme".into(),
+            source_url: "https://example.com/jobs/2".into(),
+            raw_text: "teaser".into(),
+            fetch_tier: FetchTier::Tier1bHtml,
+            external_id: None,
+        },
+    )
+    .await
+    .expect("store");
+
+    let source = Arc::new(
+        MockFetchSource::default().pages([Ok("<html><body>No posting here.</body></html>".into())]),
+    );
+    let error = manual::refresh_job(&db.pool, stored.id, source.as_ref())
+        .await
+        .expect_err("no description");
+
+    assert!(error.to_string().contains("no description"));
+    let after = job_descriptions::get(&db.pool, stored.id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(after.raw_text, "teaser");
+    assert_eq!(count_jobs(&db.pool).await, 1);
+
+    db.close().await;
+}

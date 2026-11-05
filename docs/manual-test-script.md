@@ -117,6 +117,7 @@ otherwise.
 | 4.3c | In the add/edit dialog, click **Test config** with the URL and config filled in. 🌐 | A panel reports "Found N jobs on page 1; the saved config follows up to M pages.", up to three titles with their resolved URLs, and the first description length (or "No detail enrichment configured."). Nothing is saved and the Pipeline count does not change. On an ATS board the panel says "the adapter paginates internally" instead of a page count. |
 | 4.3d | Edit the URL or config after a preview, or enter invalid JSON. | The previous report disappears when the inputs change; invalid JSON disables **Test config** and **Save portal** so a bad config never reaches the network or the database. |
 | 4.4 | Click **Fetch** on the row. 🌐 | The health badge is replaced by a spinner. Afterwards: "Healthy" and "just now", or "Broken" with a cause and a suggested action line. |
+| 4.4a | Click **Fetch more** on a portal whose config has a URL template or the Eightfold provider. 🌐 | The pages after the stored cursor are read and the message names the range, for example "Fetched 50 jobs from pages 6-10." A portal whose pagination is only a next link has no **Fetch more** button. After the board ends, the next **Fetch more** starts from page one. |
 | 4.5 | Click **Edit**, change the company name, save. | The row shows the new name; health is unchanged. |
 | 4.6 | Add a second portal configured for **Browser (Tier 2)**, then **Fetch all**. 🌐 | A progress bar counts `n / N`; each row resolves to Healthy or Broken; the sidecar badge ends as "Running" or "Stopped". |
 | 4.7 | Click **Fetch all** again and press **Cancel** while it runs. 🌐 | Progress stops within one portal. "Fetch cancelled after X of Y portals." Dismissing the bar clears it. |
@@ -145,6 +146,7 @@ otherwise.
 | 6.5 | Click **Back to list**. | The list returns with the filter you had selected. |
 | 6.6 | Open a detail view, then click a different filter. | The list returns (the filter applies to the list). |
 | 6.7 | Click **Refresh**. | The list reloads; the selected filter is still selected. |
+| 6.8 | Open a detail view and click **Refresh description**. 🌐 | A spinner appears on the button, the text is replaced with the posting's current description, and the header reports "Description refreshed: N bytes." A posting whose detail cannot be read keeps its old text and reports an error. |
 
 ## 7. Idle behaviour
 

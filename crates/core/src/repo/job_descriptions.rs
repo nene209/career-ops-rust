@@ -220,6 +220,26 @@ async fn find_existing(
     Ok(row)
 }
 
+/// Replace the stored description, bypassing the merge rule.
+///
+/// Used by an explicit per-job refresh, where the user asked for the new text.
+/// The discovery timestamp is kept: the row was first seen then, and reordering
+/// the pipeline on a description refresh would be surprising.
+pub async fn set_raw_text(pool: &SqlitePool, id: i64, raw_text: &str) -> Result<()> {
+    let existing = get(pool, id)
+        .await?
+        .ok_or(CoreError::Internal("job_descriptions::set_raw_text"))?;
+    let hash = hash_parts(&existing.title, &existing.company, raw_text);
+
+    sqlx::query("UPDATE job_descriptions SET raw_text = ?, content_hash = ? WHERE id = ?")
+        .bind(raw_text)
+        .bind(hash)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn insert(
     pool: &SqlitePool,
     input: NewJobDescription,

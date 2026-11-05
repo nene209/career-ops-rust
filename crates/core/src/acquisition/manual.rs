@@ -91,7 +91,7 @@ pub async fn add_job_from_url(
                 // still try JSON-LD and Tier 2, which is what it did before
                 // this branch existed.
                 if let Ok(report) = source
-                    .fetch_html(&url, &target.company, Some(&config))
+                    .fetch_html(&url, &target.company, Some(&config), 1)
                     .await
                 {
                     if let Some(job) = pick_job_for_url(&report.jobs, &url)
@@ -137,7 +137,7 @@ pub async fn add_job_from_url(
     }
 
     // 2. Tier 1b, with 3. Tier 2 fallback.
-    let tier1b = source.fetch_html(&url, "Manual", None).await;
+    let tier1b = source.fetch_html(&url, "Manual", None, 1).await;
 
     // Tier 1b succeeded and found at least one job. Store the one
     // whose URL matches the pasted URL.
@@ -356,6 +356,110 @@ async fn add_eightfold_job(
         })?;
 
     store_one(pool, job, FetchTier::Tier1aAts, Vec::new()).await
+}
+
+/// Re-fetch one stored posting's description, in place.
+///
+/// This is the repair tool for a row whose description is missing or is a card
+/// teaser. The provider is inferred from `external_id` first (an Eightfold id
+/// carries the domain and position), then the posting page is fetched and its
+/// JSON-LD or the portal's `detail` selector is used. It never inserts a row.
+pub async fn refresh_job(
+    pool: &SqlitePool,
+    job_id: i64,
+    source: &dyn FetchSource,
+) -> Result<JobDescription> {
+    let job = job_descriptions::get(pool, job_id)
+        .await?
+        .ok_or_else(|| CoreError::Message(format!("job {job_id} was not found")))?;
+    let url = Url::parse(&job.source_url)
+        .map_err(|e| CoreError::Message(format!("job url is invalid: {e}")))?;
+
+    let text = fetch_description(pool, &job, &url, source).await?;
+    if text.trim().is_empty() {
+        return Err(CoreError::Message(
+            "the posting page has no description to extract".into(),
+        ));
+    }
+
+    job_descriptions::set_raw_text(pool, job_id, &text).await?;
+    job_descriptions::get(pool, job_id)
+        .await?
+        .ok_or_else(|| CoreError::Message(format!("job {job_id} vanished")))
+}
+
+async fn fetch_description(
+    pool: &SqlitePool,
+    job: &JobDescription,
+    url: &Url,
+    source: &dyn FetchSource,
+) -> Result<String> {
+    // A provider id is the cheapest route: it names the domain and position.
+    if let Some(rest) = job
+        .external_id
+        .as_deref()
+        .and_then(|external_id| external_id.strip_prefix("eightfold:"))
+    {
+        if let Some((domain, position_id)) = rest.split_once(':') {
+            let host = url.host_str().unwrap_or_default();
+            if let Some(detail_url) = eightfold::detail_url_for(host, domain, position_id) {
+                let body = source
+                    .fetch_page(&detail_url)
+                    .await
+                    .map_err(|e| CoreError::Message(format!("fetch failed: {e}")))?;
+                if let Some(detail) = eightfold::detail_from_body(&body) {
+                    return Ok(detail.text);
+                }
+            }
+        }
+    }
+
+    // Otherwise fetch the posting page: JSON-LD first, then the portal's
+    // description selector when one is configured.
+    let body = source
+        .fetch_page(url)
+        .await
+        .map_err(|e| CoreError::Message(format!("fetch failed: {e}")))?;
+    let detail_config = portal_detail_config(pool, url).await;
+    if let Some(config) = detail_config.as_ref() {
+        if let Some(text) = html::detail::extract_detail(&body, url, &job.title, config) {
+            return Ok(text);
+        }
+    }
+    if let Some(text) = html::detail::extract_detail(&body, url, &job.title, &Default::default()) {
+        return Ok(text);
+    }
+
+    Err(CoreError::Message(
+        "no description was found on the posting page".into(),
+    ))
+}
+
+/// The `detail` block of a portal whose host matches the posting, if any.
+async fn portal_detail_config(
+    pool: &SqlitePool,
+    url: &Url,
+) -> Option<super::html::detail::DetailConfig> {
+    let portals = portal_repo::list(pool).await.ok()?;
+    for portal in portals {
+        let Ok(portal_url) = Url::parse(&portal.url) else {
+            continue;
+        };
+        if portal_url.host_str() != url.host_str() {
+            continue;
+        }
+        let Some(config) = portal
+            .scraper_config
+            .as_deref()
+            .and_then(|raw| ScraperConfig::parse(raw).ok())
+        else {
+            continue;
+        };
+        if let Some(detail) = config.detail() {
+            return Some(detail.clone());
+        }
+    }
+    None
 }
 
 /// Exact match first, then path match. The path fallback handles URLs

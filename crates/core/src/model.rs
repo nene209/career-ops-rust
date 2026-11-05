@@ -179,6 +179,9 @@ pub struct Portal {
     pub last_verified_at: Option<DateTime<Utc>>,
     pub last_fetch_attempt_at: Option<DateTime<Utc>>,
     pub last_failure_cause: Option<String>,
+    /// The last list page a fetch read. `0` means none yet. Only providers with
+    /// an explicit page (Eightfold, a selector URL template) advance it.
+    pub last_page_fetched: i64,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

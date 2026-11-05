@@ -119,10 +119,15 @@ use url::Url;
 ///
 /// - Single-call tests: `MockFetchSource::with_ats(Ok(vec![job]))`
 /// - Batch tests: `MockFetchSource::sequence_ats([Ok(vec![j1]), Err(...), Ok(vec![j2])])`
+///
+/// One Eightfold fetch call: `(host, domain, company_name, start_page, max_pages)`.
+type EightfoldCall = (String, String, String, usize, usize);
+
 pub struct MockFetchSource {
     ats_calls: Mutex<Vec<(String, String)>>,
     html_calls: Mutex<Vec<String>>,
-    eightfold_calls: Mutex<Vec<(String, String, String, usize)>>,
+    html_starts: Mutex<Vec<usize>>,
+    eightfold_calls: Mutex<Vec<EightfoldCall>>,
     page_calls: Mutex<Vec<String>>,
     ats_queue: Mutex<VecDeque<Result<Vec<NormalizedJob>, AtsError>>>,
     html_queue: Mutex<VecDeque<Result<PageReport, AtsError>>>,
@@ -135,6 +140,7 @@ impl Default for MockFetchSource {
         Self {
             ats_calls: Mutex::new(Vec::new()),
             html_calls: Mutex::new(Vec::new()),
+            html_starts: Mutex::new(Vec::new()),
             eightfold_calls: Mutex::new(Vec::new()),
             page_calls: Mutex::new(Vec::new()),
             ats_queue: Mutex::new(VecDeque::new()),
@@ -199,6 +205,11 @@ impl MockFetchSource {
         self.html_calls.lock().unwrap().clone()
     }
 
+    /// The `start_page` of each HTML list fetch, in call order.
+    pub fn html_start_pages(&self) -> Vec<usize> {
+        self.html_starts.lock().unwrap().clone()
+    }
+
     /// Raw detail pages, popped in call order. Chain onto a `with_*`
     /// constructor: `with_html(Ok(jobs)).pages([Ok(detail_html)])`.
     pub fn pages(self, pages: impl IntoIterator<Item = Result<String, AtsError>>) -> Self {
@@ -210,8 +221,9 @@ impl MockFetchSource {
         self.page_calls.lock().unwrap().clone()
     }
 
-    /// `(host, domain, company_name, max_pages)` for every Eightfold fetch.
-    pub fn eightfold_calls(&self) -> Vec<(String, String, String, usize)> {
+    /// `(host, domain, company_name, start_page, max_pages)` for every Eightfold
+    /// fetch.
+    pub fn eightfold_calls(&self) -> Vec<EightfoldCall> {
         self.eightfold_calls.lock().unwrap().clone()
     }
 }
@@ -240,8 +252,10 @@ impl FetchSource for MockFetchSource {
         url: &Url,
         _company_name: &str,
         _config: Option<&SelectorConfig>,
+        start_page: usize,
     ) -> Result<PageReport, AtsError> {
         self.html_calls.lock().unwrap().push(url.to_string());
+        self.html_starts.lock().unwrap().push(start_page);
         self.html_queue
             .lock()
             .unwrap()
@@ -254,12 +268,14 @@ impl FetchSource for MockFetchSource {
         host: &str,
         domain: &str,
         company_name: &str,
+        start_page: usize,
         max_pages: usize,
     ) -> Result<PageReport, AtsError> {
         self.eightfold_calls.lock().unwrap().push((
             host.to_string(),
             domain.to_string(),
             company_name.to_string(),
+            start_page,
             max_pages,
         ));
         self.eightfold_queue

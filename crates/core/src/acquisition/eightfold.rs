@@ -302,16 +302,22 @@ pub fn detail_from_body(body: &str) -> Option<JobDetail> {
     })
 }
 
-/// Fetch up to `max_pages` list pages from an Eightfold site.
+/// Fetch up to `max_pages` list pages from an Eightfold site, starting at
+/// `start_page` (1-based).
+///
+/// The API ignores `num` and returns ten positions per page, so a page number
+/// maps to an offset. If the vendor ever changes that, dedup keeps the result
+/// correct and only the cursor can drift.
 pub async fn fetch_jobs(
     client: &Client,
     host: &str,
     domain: &str,
     company_name: &str,
+    start_page: usize,
     max_pages: usize,
 ) -> AtsResult<PageReport> {
     let source = HttpPageSource { client };
-    fetch_jobs_with(&source, host, domain, company_name, max_pages).await
+    fetch_jobs_with(&source, host, domain, company_name, start_page, max_pages).await
 }
 
 /// The paging loop's HTTP seam, so stop conditions are testable without a
@@ -344,20 +350,24 @@ impl PageSource for HttpPageSource<'_> {
     }
 }
 
+/// The API returns ten positions per page regardless of `num`.
+const PAGE_SIZE: usize = 10;
+
 async fn fetch_jobs_with(
     source: &dyn PageSource,
     host: &str,
     domain: &str,
     company_name: &str,
+    start_page: usize,
     max_pages: usize,
 ) -> AtsResult<PageReport> {
     let max_pages = max_pages.max(1);
     let mut jobs: Vec<NormalizedJob> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut start = 0usize;
+    let mut start = (start_page.max(1) - 1) * PAGE_SIZE;
     let mut pages_fetched = 0;
 
-    for _page in 1..=max_pages {
+    for _page in 0..max_pages {
         let url = search_url(host, domain, start)?;
         let page = match source.fetch_page(&url).await {
             Ok(page) => page,
@@ -755,7 +765,7 @@ mod tests {
             Ok(page(2, vec![position("2", "B")])),
         ]);
 
-        let report = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 5)
+        let report = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 1, 5)
             .await
             .expect("fetch");
 
@@ -779,7 +789,7 @@ mod tests {
             Ok(page(30, vec![position("3", "C")])),
         ]);
 
-        let report = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 2)
+        let report = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 1, 2)
             .await
             .expect("fetch");
 
@@ -796,7 +806,7 @@ mod tests {
             Ok(page(30, Vec::new())),
         ]);
 
-        let report = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 5)
+        let report = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 1, 5)
             .await
             .expect("fetch");
 
@@ -812,7 +822,7 @@ mod tests {
             Err(AtsError::Timeout("slow".into())),
         ]);
 
-        let report = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 5)
+        let report = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 1, 5)
             .await
             .expect("partial results are not an error");
 
@@ -825,7 +835,7 @@ mod tests {
     async fn a_failing_first_page_is_an_error() {
         let source = ScriptedPages::new(vec![Err(AtsError::Transport("down".into()))]);
 
-        let error = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 5)
+        let error = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 1, 5)
             .await
             .expect_err("the router needs the first-page error");
 
@@ -839,7 +849,7 @@ mod tests {
             Ok(page(30, vec![position("1", "A")])),
         ]);
 
-        let report = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 5)
+        let report = fetch_jobs_with(&source, "jobs.example.com", "example.com", "Acme", 1, 5)
             .await
             .expect("fetch");
 

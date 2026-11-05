@@ -1,7 +1,7 @@
 # Phase 2.5: Manual-Testing Fixes — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.10), §12
-**Status:** In progress — WS1 complete; WS2–WS5 not started
+**Status:** In progress — WS1–WS2 complete; WS3–WS5 not started
 **Last updated:** 2026-11-03
 **Duration:** 4–6 days
 **Depends on:** Phase 2.2 (pagination, detail enrichment), Phase 2.3 (providers, registry), Phase 2.4 (catalog UI)
@@ -16,6 +16,7 @@
 | v0.1 | Initial plan, written from the first manual test session against NVIDIA and Waymo. Eight findings, five workstreams. Two are data-integrity bugs (duplicate postings, description clobbering), three are missing controls, one is a missing status, one is a missing search, and two are display questions the data already answers. |
 | v0.2 | Decisions after review. Deletion needs no confirmation for a fetched-only row, but an evaluated (or otherwise user-touched) row is behind a typed `delete me` gate, because evaluations cost real tokens and are not re-fetchable. Waymo's production entry enriches **every posting on the pages it fetched**, not `max_jobs: 2`; the small caps stay in test configs only. WS1 starts. |
 | v0.3 | Workstream 1 implemented: canonical URL identity, migration 0003 with a guarded backfill, dedup rules that survive different extractions, never-clobber on update, provider-aware manual add, and the JSON-LD company fallback. The reported duplicate is reproduced by a test and fixed. |
+| v0.4 | Workstream 2 implemented: migration 0004 and `portals.last_page_fetched`, an explicit start page in both fetch paths, `FetchStart::{Beginning, Resume}` with **Fetch more**, a per-job **Refresh description**, and Waymo's production entry enriching every posting on its fetched pages. |
 
 ---
 
@@ -262,6 +263,52 @@ and `jsonld` (2: page company for a manual fetch, portal name preserved).
 | Adapters without a cursor disable the action | `egui_kittest` |
 | **Refresh description** updates in place and never inserts | Integration test |
 | A failed detail keeps the existing text | Unit test |
+
+**Implementation note (2026-11-03).** Migration 0004 adds
+`portals.last_page_fetched` (default 0). `FetchSource` grew a `start_page`
+argument on both list paths, and `html::fetch_pages_from` builds the first URL
+from the config's `url_template` when the start is past one — a chain of `next`
+links cannot be jumped into, so such a config has no cursor. Eightfold maps a
+page to `(page - 1) * 10`; the page size is a constant because the API ignores
+`num`. If the vendor changes it, dedup keeps the result correct and only the
+cursor can drift.
+
+`router::fetch_portal_more` passes `FetchStart::Resume`, which reads the cursor.
+The cursor policy is deliberately conservative: a fetch that hit the configured
+page cap (`LimitReached`) stores `next_page - 1`, the end of the list clears it
+to 0, and a partial failure leaves it untouched so the next attempt retries the
+range that failed. A resumed fetch whose first page yields nothing is an ending,
+not a failure — otherwise tapping **Fetch more** past the end would mark the
+portal Broken. `FetchOutcome` carries `first_page`, `next_page`, and
+`end_of_list`, and the result line names a resumed range
+(`Fetched 50 jobs from pages 6-10.`).
+
+In the UI, **Fetch more** appears only when `can_fetch_more` finds an Eightfold
+provider or a selectors config with a URL template; ATS adapters paginate
+internally and a next-link chain has no cursor. The button is disabled while any
+portal task runs.
+
+`manual::refresh_job` re-fetches one posting without inserting: an Eightfold id
+routes straight to `pcsx/position_details`, otherwise the posting page is fetched
+and JSON-LD or the matching portal's `detail` selector is used. The new text goes
+through `job_descriptions::set_raw_text`, which bypasses the merge rule (the user
+asked for it) and keeps `fetched_at` so a description refresh does not reorder
+the pipeline. The Pipeline detail shows the byte count on success and keeps the
+old text on failure.
+
+Waymo's embedded `detail.max_jobs` is now 90, which covers all 30 cards on each
+of its three fetched pages. The test configs keep `max_jobs: 2`; that number was
+a test value, not a product one.
+
+Tests: `router.rs` (3: resume after the cursor with an Eightfold portal, a URL
+template portal resuming at page 3, and a next-link portal ignoring
+`FetchMore`), `manual_entry.rs` (3: refresh fills a missing Eightfold
+description, replaces a teaser from JSON-LD, and leaves text alone on failure),
+`html` (1: a resumed page past the end is an ending), `portals_screen.rs` (2:
+the button appears for an offset provider and not for a next-link one),
+`pipeline_screen.rs` (2: the action and the busy state), an app test that runs
+the refresh through the real storage and pipeline, and the `fetch_summary` range
+case.
 
 ---
 

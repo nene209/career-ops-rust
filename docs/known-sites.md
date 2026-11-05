@@ -26,7 +26,7 @@ does not know use the same form with no attribution.
 
 | Board | Name | Provider | Verified | Caps | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `https://careers.withwaymo.com/jobs/search` | Waymo | `selectors` | 2026-11-03 | `pagination.max_pages: 3`, `detail.max_jobs: 2` | Rails + Stimulus, server-rendered, no `JobPosting` JSON-LD. 30 cards per page. AWS WAF intermittently answers `202` with an empty body. Detail pages do carry `JobPosting` JSON-LD. |
+| `https://careers.withwaymo.com/jobs/search` | Waymo | `selectors` | 2026-11-03 | `pagination.max_pages: 3`, `detail.max_jobs: 90` | Rails + Stimulus, server-rendered, no `JobPosting` JSON-LD. 30 cards per page, so 90 covers every posting on the three fetched pages. AWS WAF intermittently answers `202` with an empty body; a challenged detail keeps the card teaser. Detail pages do carry `JobPosting` JSON-LD. |
 | `https://jobs.nvidia.com/careers` | NVIDIA | `eightfold` | 2026-11-03 | `pagination.max_pages` default (5), `detail.max_jobs` default (40) | Client-rendered Eightfold shell; postings come from `/api/pcsx/*`. The board reports ~2,750 positions and returns 10 per request, so the page cap is what bounds a fetch. The `pcsx` endpoints are not a public contract. Descriptions are stored as HTML. |
 
 Caps are the embedded values, not universal defaults: `pagination.max_pages`

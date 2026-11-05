@@ -235,7 +235,7 @@ async fn eightfold_live() {
     let domain = slug_or("LIVE_EIGHTFOLD_DOMAIN", "nvidia.com");
     let client = http::default_client().expect("http client");
 
-    let report = eightfold::fetch_jobs(&client, &host, &domain, "NVIDIA", 2)
+    let report = eightfold::fetch_jobs(&client, &host, &domain, "NVIDIA", 1, 2)
         .await
         .expect("live eightfold list");
     assert!(

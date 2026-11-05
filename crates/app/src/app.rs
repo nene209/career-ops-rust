@@ -153,7 +153,10 @@ pub struct CareerOpsApp {
     pipeline_view: PipelineView,
     pipeline_loaded: bool,
     pipeline_error: Option<String>,
+    pipeline_message: Option<String>,
     pipeline_task: Option<AsyncTask<PipelineLoad>>,
+    pipeline_refresh_task: Option<AsyncTask<CoreResult<JobDescription>>>,
+    refreshing_job: Option<i64>,
 }
 
 impl CareerOpsApp {
@@ -201,7 +204,10 @@ impl CareerOpsApp {
             pipeline_view: PipelineView::default(),
             pipeline_loaded: false,
             pipeline_error: None,
+            pipeline_message: None,
             pipeline_task: None,
+            pipeline_refresh_task: None,
+            refreshing_job: None,
         }
     }
 
@@ -313,7 +319,8 @@ impl CareerOpsApp {
                 self.start_portal_mutation(Some(id), data);
             }
             PortalsAction::DeletePortal(id) => self.start_portal_delete(id),
-            PortalsAction::FetchOne(id) => self.start_portal_fetch(id),
+            PortalsAction::FetchOne(id) => self.start_portal_fetch(id, false),
+            PortalsAction::FetchMore(id) => self.start_portal_fetch(id, true),
             PortalsAction::FetchAll => self.start_portal_batch(),
             PortalsAction::CancelBatch => {
                 self.batch_cancel.store(true, Ordering::Relaxed);
@@ -349,6 +356,7 @@ impl CareerOpsApp {
             PipelineAction::AddJob => self.portals_view.open_manual(),
             PipelineAction::Reload => self.start_pipeline_load(),
             PipelineAction::SetFilter(filter) => self.pipeline.filter = filter,
+            PipelineAction::RefreshJob(job_id) => self.start_job_refresh(job_id),
         }
     }
 
@@ -546,7 +554,10 @@ impl CareerOpsApp {
         self.pipeline_view = PipelineView::default();
         self.pipeline_loaded = false;
         self.pipeline_error = None;
+        self.pipeline_message = None;
         self.pipeline_task = None;
+        self.pipeline_refresh_task = None;
+        self.refreshing_job = None;
     }
 
     fn pool(&self) -> Option<sqlx::SqlitePool> {
@@ -635,7 +646,7 @@ impl CareerOpsApp {
         });
     }
 
-    fn start_portal_fetch(&mut self, id: i64) {
+    fn start_portal_fetch(&mut self, id: i64, resume: bool) {
         if !self.begin_portals_task() {
             return;
         }
@@ -648,7 +659,11 @@ impl CareerOpsApp {
         let source = Arc::clone(&self.fetch_source);
         let browser = Arc::clone(&self.browser);
         let task = self.spawn(async move {
-            service::fetch_one(&pool, id, source.as_ref(), Some(browser.as_ref())).await
+            if resume {
+                service::fetch_more(&pool, id, source.as_ref(), Some(browser.as_ref())).await
+            } else {
+                service::fetch_one(&pool, id, source.as_ref(), Some(browser.as_ref())).await
+            }
         });
 
         self.fetching_portal = Some(id);
@@ -1131,6 +1146,71 @@ impl CareerOpsApp {
         }
     }
 
+    /// Re-fetch one posting's description. The row is updated in place; the
+    /// pipeline is not reloaded, because nothing about ordering changed.
+    fn start_job_refresh(&mut self, job_id: i64) {
+        if self.refreshing_job.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.pipeline_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let source = Arc::clone(&self.fetch_source);
+        let task =
+            self.spawn(async move { manual::refresh_job(&pool, job_id, source.as_ref()).await });
+
+        self.pipeline_error = None;
+        self.pipeline_message = None;
+        self.refreshing_job = Some(job_id);
+        self.pipeline_refresh_task = Some(task);
+    }
+
+    fn poll_pipeline_refresh(&mut self, ctx: &egui::Context) {
+        let poll = match self.pipeline_refresh_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.pipeline_refresh_task = None;
+                self.refreshing_job = None;
+                match result {
+                    Ok(job) => {
+                        if let Some(row) =
+                            self.pipeline.rows.iter_mut().find(|row| row.id == job.id)
+                        {
+                            row.raw_text = job.raw_text.clone();
+                        }
+                        self.pipeline_message = Some(format!(
+                            "Description refreshed: {} bytes.",
+                            job.raw_text.len()
+                        ));
+                        self.pipeline_error = None;
+                    }
+                    Err(error) => {
+                        self.pipeline_message = None;
+                        self.pipeline_error =
+                            Some(format!("Could not refresh the description: {error}"));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.pipeline_refresh_task = None;
+                self.refreshing_job = None;
+                self.pipeline_error = Some("The refresh was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // End Pipeline
     // ------------------------------------------------------------------
@@ -1141,6 +1221,7 @@ impl Drop for CareerOpsApp {
         // Abort any in-flight work before asking the sidecar to exit.
         self.portals_task = None;
         self.pipeline_task = None;
+        self.pipeline_refresh_task = None;
         self.pending = None;
 
         if tokio::runtime::Handle::try_current().is_err() {
@@ -1198,8 +1279,13 @@ fn friendly_error(error: &CoreError) -> String {
 /// names the page it could not read: a partial list must not look complete.
 fn fetch_summary(outcome: &FetchOutcome) -> String {
     let jobs = count_with_noun(outcome.jobs_fetched, "job");
+    let first = outcome.first_page.max(1);
     let mut summary = match outcome.pages_fetched {
+        Some(pages) if pages > 1 && first > 1 => {
+            format!("Fetched {jobs} from pages {first}-{}", first + pages - 1)
+        }
         Some(pages) if pages > 1 => format!("Fetched {jobs} from {pages} pages"),
+        Some(1) if first > 1 => format!("Fetched {jobs} from page {first}"),
         _ => format!("Fetched {jobs}"),
     };
 
@@ -1224,7 +1310,7 @@ fn fetch_summary(outcome: &FetchOutcome) -> String {
 /// ended. Expected endings (end of list, configured cap) say nothing.
 fn pagination_stop_note(outcome: &FetchOutcome) -> Option<String> {
     let pages = outcome.pages_fetched?;
-    let next = pages + 1;
+    let next = outcome.first_page.max(1) + pages;
     match outcome.pagination_stopped? {
         PaginationStop::FetchFailed | PaginationStop::ExtractionFailed => {
             Some(format!("page {next} could not be read"))
@@ -1291,6 +1377,7 @@ impl eframe::App for CareerOpsApp {
             Screen::Ready => {
                 self.poll_portals_task(ui.ctx());
                 self.poll_pipeline_task(ui.ctx());
+                self.poll_pipeline_refresh(ui.ctx());
                 self.drain_batch_progress();
 
                 if self.navigation.current() == MainScreen::Portals
@@ -1320,6 +1407,8 @@ impl eframe::App for CareerOpsApp {
                 let pipeline_state = PipelineRenderState {
                     loading: self.pipeline_task.is_some(),
                     error: self.pipeline_error.as_deref(),
+                    message: self.pipeline_message.as_deref(),
+                    refreshing: self.refreshing_job,
                 };
 
                 let navigation = &mut self.navigation;
@@ -1758,6 +1847,7 @@ mod tests {
             app.poll_pending(ctx);
             app.poll_portals_task(ctx);
             app.poll_pipeline_task(ctx);
+            app.poll_pipeline_refresh(ctx);
             app.drain_batch_progress();
             if condition(app) {
                 return;
@@ -2020,6 +2110,7 @@ mod tests {
             url: &url::Url,
             _company_name: &str,
             _config: Option<&SelectorConfig>,
+            _start_page: usize,
         ) -> AtsResult<PageReport> {
             self.calls.lock().unwrap().push(url.to_string());
             Ok(PageReport::single(vec![NormalizedJob {
@@ -2041,6 +2132,7 @@ mod tests {
             host: &str,
             domain: &str,
             _company_name: &str,
+            _start_page: usize,
             _max_pages: usize,
         ) -> AtsResult<PageReport> {
             self.eightfold_calls
@@ -2128,13 +2220,107 @@ mod tests {
         assert_eq!(app.pipeline.rows[0].raw_text, "Build things.");
     }
 
+    /// The per-job refresh through the app: a job stored with no text gets the
+    /// posting's description, in place, without a second row.
+    #[test]
+    fn refresh_description_updates_the_row_in_place() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::default());
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source.clone());
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        // The portal supplies the description selector for this host.
+        app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
+            company_name: "Acme".into(),
+            url: "https://example.com/careers".into(),
+            render_mode: "static".into(),
+            scraper_config: Some(
+                r#"{"list":"article.job","fields":{"title":"h3 a"},"detail":{"fields":{"description":".job-description"},"max_jobs":3}}"#
+                    .into(),
+            ),
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals.rows.len() == 1 && app.portals_task.is_none()
+        });
+
+        let pool = app.pool().expect("pool");
+        let stored = app
+            .runtime()
+            .block_on(job_repo::upsert(
+                &pool,
+                job_repo::NewJobDescription {
+                    title: "Engineer".into(),
+                    company: "Acme".into(),
+                    source_url: "https://example.com/careers".into(),
+                    raw_text: String::new(),
+                    fetch_tier: FetchTier::Tier1bHtml,
+                    external_id: None,
+                },
+            ))
+            .expect("store");
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+        assert_eq!(app.pipeline.rows[0].raw_text, "");
+
+        app.handle_pipeline_action(PipelineAction::RefreshJob(stored.id));
+        wait_until(&mut app, &ctx, |app| {
+            app.refreshing_job.is_none() && app.pipeline_message.is_some()
+        });
+
+        assert_eq!(
+            app.pipeline.rows[0].raw_text,
+            "Full description from the detail page."
+        );
+        assert!(
+            app.pipeline_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Description refreshed:")),
+            "message: {:?}",
+            app.pipeline_message
+        );
+    }
+
     #[test]
     fn fetch_summary_reports_descriptions() {
         let with_details = FetchOutcome {
             jobs_fetched: 1,
             tier: FetchTier::Tier1bHtml,
+            first_page: 1,
             pages_fetched: Some(1),
             pagination_stopped: Some(PaginationStop::EndOfList),
+            next_page: None,
+            end_of_list: true,
             details_attempted: 1,
             details_enriched: 1,
         };
@@ -2146,8 +2332,11 @@ mod tests {
         let multi_page = FetchOutcome {
             jobs_fetched: 60,
             tier: FetchTier::Tier1bHtml,
+            first_page: 1,
             pages_fetched: Some(2),
             pagination_stopped: Some(PaginationStop::ExtractionFailed),
+            next_page: None,
+            end_of_list: false,
             details_attempted: 2,
             details_enriched: 2,
         };
@@ -2159,8 +2348,11 @@ mod tests {
         let capped = FetchOutcome {
             jobs_fetched: 150,
             tier: FetchTier::Tier1bHtml,
+            first_page: 1,
             pages_fetched: Some(5),
             pagination_stopped: Some(PaginationStop::LimitReached),
+            next_page: Some(6),
+            end_of_list: false,
             details_attempted: 0,
             details_enriched: 0,
         };
@@ -2173,12 +2365,32 @@ mod tests {
         let no_details = FetchOutcome {
             jobs_fetched: 3,
             tier: FetchTier::Tier1bHtml,
+            first_page: 1,
             pages_fetched: Some(1),
             pagination_stopped: Some(PaginationStop::EndOfList),
+            next_page: None,
+            end_of_list: true,
             details_attempted: 0,
             details_enriched: 0,
         };
         assert_eq!(fetch_summary(&no_details), "Fetched 3 jobs.");
+
+        let resumed = FetchOutcome {
+            jobs_fetched: 50,
+            tier: FetchTier::Tier1aAts,
+            first_page: 6,
+            pages_fetched: Some(5),
+            pagination_stopped: Some(PaginationStop::LimitReached),
+            next_page: Some(11),
+            end_of_list: false,
+            details_attempted: 0,
+            details_enriched: 0,
+        };
+        assert_eq!(
+            fetch_summary(&resumed),
+            "Fetched 50 jobs from pages 6-10.",
+            "a resumed fetch names the range it read"
+        );
     }
 
     /// Detail enrichment through the app: the scripted source returns a card

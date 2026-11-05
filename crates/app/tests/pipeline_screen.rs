@@ -21,6 +21,8 @@ fn idle_state() -> PipelineRenderState<'static> {
     PipelineRenderState {
         loading: false,
         error: None,
+        message: None,
+        refreshing: None,
     }
 }
 
@@ -197,6 +199,50 @@ fn selecting_a_row_shows_the_detail_and_placeholder_buttons() {
 }
 
 #[test]
+fn refresh_description_emits_the_action() {
+    let view_model = PipelineViewModel {
+        rows: vec![row(1, "Engineer", None, TierLabel::Ats)],
+        filter: JobFilter::All,
+    };
+    let view = PipelineView { selected: Some(1) };
+    let mut harness = test_harness(&view_model, view, idle_state());
+
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Refresh description")
+        .click();
+    harness.run();
+
+    assert!(harness
+        .state()
+        .actions
+        .contains(&PipelineAction::RefreshJob(1)));
+}
+
+#[test]
+fn refreshing_disables_the_button_and_reports_the_result() {
+    let view_model = PipelineViewModel {
+        rows: vec![row(1, "Engineer", None, TierLabel::Ats)],
+        filter: JobFilter::All,
+    };
+    let view = PipelineView { selected: Some(1) };
+    let render_state = PipelineRenderState {
+        loading: false,
+        error: None,
+        message: Some("Description refreshed: 2048 bytes."),
+        refreshing: Some(1),
+    };
+    let mut harness = test_harness(&view_model, view, render_state);
+
+    // The spinner keeps requesting repaints; `run()` would never settle.
+    harness.run_steps(2);
+
+    let button = harness.get_by_role_and_label(Role::Button, "Refresh description");
+    assert!(button.accesskit_node().is_disabled());
+    let _ = harness.get_by_label("Description refreshed: 2048 bytes.");
+}
+
+#[test]
 fn a_selection_that_disappeared_falls_back_to_the_list() {
     let view_model = PipelineViewModel {
         rows: Vec::new(),
@@ -221,6 +267,8 @@ fn first_load_shows_a_spinner_instead_of_the_empty_state() {
     let render_state = PipelineRenderState {
         loading: true,
         error: None,
+        message: None,
+        refreshing: None,
     };
 
     let mut harness = test_harness(&view_model, PipelineView::default(), render_state);
@@ -237,6 +285,8 @@ fn an_error_offers_a_retry() {
     let render_state = PipelineRenderState {
         loading: false,
         error: Some("database is locked"),
+        message: None,
+        refreshing: None,
     };
 
     let mut harness = test_harness(&view_model, PipelineView::default(), render_state);

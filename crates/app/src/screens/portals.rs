@@ -501,6 +501,8 @@ pub enum PortalsAction {
     },
     DeletePortal(i64),
     FetchOne(i64),
+    /// Continue from the portal's stored page cursor.
+    FetchMore(i64),
     FetchAll,
     CancelBatch,
     DismissBatch,
@@ -748,6 +750,14 @@ fn row_ui(
             if ui.add_enabled(!state.busy, Button::new("Fetch")).clicked() {
                 *action = Some(PortalsAction::FetchOne(row.id));
             }
+            if can_fetch_more(row)
+                && ui
+                    .add_enabled(!state.busy, Button::new("Fetch more"))
+                    .on_hover_text("Continue after the last page this portal read")
+                    .clicked()
+            {
+                *action = Some(PortalsAction::FetchMore(row.id));
+            }
         });
     });
 
@@ -755,6 +765,26 @@ fn row_ui(
         ui.label(RichText::new(suggested).weak().small());
     }
     ui.separator();
+}
+
+/// Whether **Fetch more** can continue this portal's list.
+///
+/// Only a provider with an explicit page has a cursor: Eightfold offsets, or a
+/// selector config with a URL template. A chain of next links cannot be jumped
+/// into, and an ATS adapter pages internally.
+fn can_fetch_more(row: &PortalRow) -> bool {
+    let Some(raw) = row.scraper_config.as_deref() else {
+        return false;
+    };
+
+    match ScraperConfig::parse(raw) {
+        Ok(ScraperConfig::Eightfold(_)) => true,
+        Ok(ScraperConfig::Selectors(config)) => config
+            .pagination
+            .as_ref()
+            .is_some_and(|pagination| pagination.url_template.is_some()),
+        Err(_) => false,
+    }
 }
 
 fn health_badge(ui: &mut Ui, health: &HealthBadge) {

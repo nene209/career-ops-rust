@@ -840,6 +840,44 @@ fn cancelling_the_chooser_closes_it() {
 }
 
 #[test]
+fn fetch_more_is_offered_for_an_offset_provider() {
+    let view_model = PortalsViewModel {
+        rows: vec![PortalRow {
+            scraper_config: Some(r#"{"provider":"eightfold","domain":"nvidia.com"}"#.into()),
+            ..row(1, "NVIDIA", HealthBadge::NeverFetched)
+        }],
+        ..Default::default()
+    };
+
+    let mut harness = test_harness(&view_model, PortalsView::default(), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_role_and_label(Role::Button, "Fetch more");
+}
+
+#[test]
+fn fetch_more_is_absent_for_a_next_link_portal() {
+    let view_model = PortalsViewModel {
+        rows: vec![PortalRow {
+            scraper_config: Some(r#"{"next":"a[rel=next]"}"#.into()),
+            ..row(1, "Acme", HealthBadge::NeverFetched)
+        }],
+        ..Default::default()
+    };
+
+    let mut harness = test_harness(&view_model, PortalsView::default(), idle_state());
+    harness.run();
+
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Fetch more")
+            .is_none(),
+        "a next-link chain cannot be jumped into"
+    );
+    let _ = harness.get_by_role_and_label(Role::Button, "Fetch");
+}
+
+#[test]
 fn header_offers_add_and_fetch_all_when_portals_exist() {
     let view_model = PortalsViewModel {
         rows: vec![row(1, "Acme", HealthBadge::Healthy)],
