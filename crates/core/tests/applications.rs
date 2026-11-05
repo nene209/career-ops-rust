@@ -6,6 +6,8 @@
 
 mod common;
 
+use std::collections::HashSet;
+
 use career_ops_core::model::{ApplicationStatus, FetchTier};
 use career_ops_core::repo::applications;
 use career_ops_core::repo::job_descriptions::{self, NewJobDescription};
@@ -85,6 +87,65 @@ async fn a_submitted_application_cannot_be_marked_not_a_match() {
         .expect_err("a submitted application is not a mis-filed posting");
 
     assert!(error.to_string().contains("invalid transition"), "{error}");
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn deleting_a_job_removes_its_application() {
+    let db = TestDb::new_raw().await;
+    let stored = job_descriptions::upsert(&db.pool, job("https://example.com/jobs/4"))
+        .await
+        .expect("job");
+    applications::mark_not_a_match(&db.pool, stored.id)
+        .await
+        .expect("mark");
+
+    job_descriptions::delete(&db.pool, stored.id)
+        .await
+        .expect("delete");
+
+    assert!(
+        job_descriptions::get(&db.pool, stored.id)
+            .await
+            .expect("get")
+            .is_none(),
+        "the posting is gone"
+    );
+    assert!(
+        applications::list(&db.pool).await.expect("list").is_empty(),
+        "the application cascades"
+    );
+
+    db.close().await;
+}
+
+/// `user_touched_ids` is what decides whether the Pipeline asks for the typed
+/// confirmation. A row that only exists because it was fetched must not count.
+#[tokio::test]
+async fn user_touched_ids_lists_only_rows_the_user_worked_on() {
+    let db = TestDb::new_raw().await;
+    let fetched = job_descriptions::upsert(&db.pool, job("https://example.com/jobs/5"))
+        .await
+        .expect("fetched job");
+    let marked = job_descriptions::upsert(&db.pool, job("https://example.com/jobs/6"))
+        .await
+        .expect("marked job");
+
+    // A discovered application on its own is not user state.
+    applications::create(&db.pool, fetched.id)
+        .await
+        .expect("create");
+    applications::mark_not_a_match(&db.pool, marked.id)
+        .await
+        .expect("mark");
+
+    let touched = job_descriptions::user_touched_ids(&db.pool)
+        .await
+        .expect("user touched ids");
+
+    assert_eq!(touched, HashSet::from([marked.id]));
+    assert!(!touched.contains(&fetched.id));
 
     db.close().await;
 }

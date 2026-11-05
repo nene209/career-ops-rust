@@ -1,8 +1,8 @@
 # Phase 2.5: Manual-Testing Fixes — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.10), §12
-**Status:** In progress — WS1–WS3 complete; WS4–WS5 not started
-**Last updated:** 2026-11-03
+**Status:** In progress — WS1–WS4 complete; WS5 not started
+**Last updated:** 2026-11-05
 **Duration:** 4–6 days
 **Depends on:** Phase 2.2 (pagination, detail enrichment), Phase 2.3 (providers, registry), Phase 2.4 (catalog UI)
 **Blocks:** Phase 3 benefits from WS5 (`plain_text`) but does not depend on the rest.
@@ -18,6 +18,7 @@
 | v0.3 | Workstream 1 implemented: canonical URL identity, migration 0003 with a guarded backfill, dedup rules that survive different extractions, never-clobber on update, provider-aware manual add, and the JSON-LD company fallback. The reported duplicate is reproduced by a test and fixed. |
 | v0.4 | Workstream 2 implemented: migration 0004 and `portals.last_page_fetched`, an explicit start page in both fetch paths, `FetchStart::{Beginning, Resume}` with **Fetch more**, a per-job **Refresh description**, and Waymo's production entry enriching every posting on its fetched pages. |
 | v0.5 | Workstream 3 implemented: `Not a match` as an application status, its transition rules, the first production writer of `applications` (create-if-absent, idempotent), a filter that excludes it from **Not applied**, and the detail action. |
+| v0.6 | Workstream 4 implemented: `job_descriptions::delete` with cascading application/report/letter removal, a typed `delete me` gate for rows the user touched, a case-insensitive Pipeline search over title and company with its own empty state and **Clear**, and a search that survives a reload. The gate is view state, so only a confirmed delete reaches the app. |
 
 ---
 
@@ -403,6 +404,29 @@ pipeline.
 | Search composes with the status filter | Unit test |
 | A reload keeps the search text | Unit test |
 | The empty state distinguishes "no jobs" from "no matches" | `egui_kittest` |
+
+**Implementation note (2026-11-05).** `job_descriptions::delete` relies on the
+schema's existing `ON DELETE CASCADE`, so one statement removes the posting, its
+application, its evaluation reports, and its cover letters. The Pipeline learns
+which rows are gated from `job_descriptions::user_touched_ids`: a status other
+than `discovered`, a report, or a letter. A fetched-only row deletes from the
+detail view with no dialog; a touched row opens a window that names the posting
+and what goes with it, and its **Delete job** button stays disabled until the
+user types `delete me`. The window is view state, so only the confirmed
+`DeleteJob` reaches the app, which deletes and removes the row in place; a
+failure leaves the gate open with the error in the header.
+
+Search lives on `PipelineViewModel`, so it survives a reload the same way the
+filter does. `apply_filter` composes the status filter with a case-insensitive
+substring over title and company, and the screen has its own "No jobs match
+this search" empty state with a **Clear search** action. The detail view is
+dismissed when the query changes, mirroring a filter change.
+
+Tests: repo integration tests for the cascade and the touched-id query,
+view-model tests for search matching and composition, `egui_kittest` for the
+field, the empty states, the no-gate path, the gate's wording, the wrong-phrase
+lockout, the typed phrase, and Cancel, and an app test that deletes through the
+real storage and pipeline.
 
 ---
 

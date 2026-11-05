@@ -4,7 +4,7 @@
 //! them by job id, and hands the result to this view model. Filtering and
 //! labels are pure data shaping; the screen renders the result.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use career_ops_core::model::{ApplicationStatus, JobDescription};
 use chrono::Utc;
@@ -15,6 +15,9 @@ use super::portals::relative_time;
 pub struct PipelineViewModel {
     pub rows: Vec<JobRow>,
     pub filter: JobFilter,
+    /// Case-insensitive substring over title and company. Kept here rather
+    /// than in the screen so a reload does not clear it.
+    pub search: String,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +32,9 @@ pub struct JobRow {
     /// database read.
     pub source_url: String,
     pub raw_text: String,
+    /// The user has a status, evaluation, or cover letter for this job, so
+    /// deleting it needs the typed confirmation.
+    pub has_user_state: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,27 +174,34 @@ impl PipelineViewModel {
     pub fn from_jobs(
         jobs: Vec<JobDescription>,
         statuses: &HashMap<i64, ApplicationStatus>,
+        touched: &HashSet<i64>,
     ) -> Self {
         Self {
-            rows: rows_from_jobs(jobs, statuses),
+            rows: rows_from_jobs(jobs, statuses, touched),
             filter: JobFilter::All,
+            search: String::new(),
         }
     }
 
-    /// Replace the rows after a reload, keeping the user's filter.
+    /// Replace the rows after a reload, keeping the user's filter and search.
     ///
-    /// The filter is a view preference, not data: refreshing must not reset it.
+    /// Both are view preferences, not data: refreshing must not reset them.
     pub fn replace_jobs(
         &mut self,
         jobs: Vec<JobDescription>,
         statuses: &HashMap<i64, ApplicationStatus>,
+        touched: &HashSet<i64>,
     ) {
-        self.rows = rows_from_jobs(jobs, statuses);
+        self.rows = rows_from_jobs(jobs, statuses, touched);
     }
 
-    /// Rows matching the current filter, in the original fetched-at order.
+    /// Rows matching the current filter and search, in the original
+    /// fetched-at order.
     pub fn apply_filter(&self) -> impl Iterator<Item = &JobRow> {
-        self.rows.iter().filter(move |row| self.filter.matches(row))
+        let query = self.search.trim().to_lowercase();
+        self.rows.iter().filter(move |row| {
+            self.filter.matches(row) && (query.is_empty() || row.matches_search(&query))
+        })
     }
 
     pub fn row(&self, id: i64) -> Option<&JobRow> {
@@ -196,23 +209,38 @@ impl PipelineViewModel {
     }
 }
 
+impl JobRow {
+    /// Case-insensitive match against an already-lowercased query.
+    fn matches_search(&self, query: &str) -> bool {
+        self.title.to_lowercase().contains(query) || self.company.to_lowercase().contains(query)
+    }
+}
+
 fn rows_from_jobs(
     jobs: Vec<JobDescription>,
     statuses: &HashMap<i64, ApplicationStatus>,
+    touched: &HashSet<i64>,
 ) -> Vec<JobRow> {
     jobs.into_iter()
-        .map(|job| JobRow {
-            id: job.id,
-            title: job.title,
-            company: job.company,
-            tier: TierLabel::from_fetch_tier(&job.fetch_tier),
-            fetched_at: relative_time(job.fetched_at, Utc::now()),
-            status: statuses
+        .map(|job| {
+            let status = statuses
                 .get(&job.id)
                 .copied()
-                .map(StatusLabel::from_application_status),
-            source_url: job.source_url,
-            raw_text: job.raw_text,
+                .map(StatusLabel::from_application_status);
+            let has_user_state = touched.contains(&job.id)
+                || status.is_some_and(|status| status != StatusLabel::Discovered);
+
+            JobRow {
+                id: job.id,
+                title: job.title,
+                company: job.company,
+                tier: TierLabel::from_fetch_tier(&job.fetch_tier),
+                fetched_at: relative_time(job.fetched_at, Utc::now()),
+                status,
+                source_url: job.source_url,
+                raw_text: job.raw_text,
+                has_user_state,
+            }
         })
         .collect()
 }
@@ -246,6 +274,7 @@ mod tests {
             status,
             source_url: format!("https://example.com/{id}"),
             raw_text: "body".into(),
+            has_user_state: status.is_some_and(|status| status != StatusLabel::Discovered),
         }
     }
 
@@ -293,7 +322,7 @@ mod tests {
         ];
         let statuses = HashMap::from([(1, ApplicationStatus::Ready)]);
 
-        let view_model = PipelineViewModel::from_jobs(jobs, &statuses);
+        let view_model = PipelineViewModel::from_jobs(jobs, &statuses, &HashSet::new());
 
         assert_eq!(view_model.rows.len(), 2);
         assert_eq!(view_model.rows[0].title, "Engineer");
@@ -325,6 +354,7 @@ mod tests {
             let view_model = PipelineViewModel {
                 rows: rows.clone(),
                 filter,
+                search: String::new(),
             };
             view_model
                 .apply_filter()
@@ -355,13 +385,75 @@ mod tests {
         let mut view_model = PipelineViewModel {
             rows: Vec::new(),
             filter: JobFilter::Applied,
+            search: "engineer".into(),
         };
 
-        view_model.replace_jobs(vec![job(9, "New", "tier1a:ats")], &HashMap::new());
+        view_model.replace_jobs(
+            vec![job(9, "New", "tier1a:ats")],
+            &HashMap::new(),
+            &HashSet::new(),
+        );
 
         assert_eq!(view_model.rows.len(), 1);
         assert_eq!(view_model.rows[0].title, "New");
         assert_eq!(view_model.filter, JobFilter::Applied);
+        assert_eq!(
+            view_model.search, "engineer",
+            "a reload must not clear the search"
+        );
+    }
+
+    #[test]
+    fn search_matches_title_or_company_case_insensitively() {
+        let mut engineer = row(1, None);
+        engineer.title = "Senior Network Engineer".into();
+        let mut designer = row(2, None);
+        designer.company = "Engineering Co".into();
+        let other = row(3, None);
+
+        let view_model = PipelineViewModel {
+            rows: vec![engineer, designer, other],
+            filter: JobFilter::All,
+            search: "ENGINEER".into(),
+        };
+
+        let ids: Vec<i64> = view_model.apply_filter().map(|row| row.id).collect();
+        assert_eq!(ids, vec![1, 2], "title and company both match");
+    }
+
+    #[test]
+    fn search_composes_with_the_status_filter() {
+        let mut rejected = row(1, Some(StatusLabel::Rejected));
+        rejected.title = "Engineer".into();
+        let mut applied = row(2, Some(StatusLabel::Applied));
+        applied.title = "Engineer".into();
+
+        let view_model = PipelineViewModel {
+            rows: vec![rejected, applied],
+            filter: JobFilter::Applied,
+            search: "engineer".into(),
+        };
+
+        let ids: Vec<i64> = view_model.apply_filter().map(|row| row.id).collect();
+        assert_eq!(ids, vec![2]);
+    }
+
+    #[test]
+    fn a_status_beyond_discovered_counts_as_user_state() {
+        let jobs = vec![
+            job(1, "Engineer", "tier1a:ats"),
+            job(2, "Other", "tier1a:ats"),
+        ];
+        let statuses = HashMap::from([(1, ApplicationStatus::NotAMatch)]);
+        let touched = HashSet::from([2]);
+
+        let view_model = PipelineViewModel::from_jobs(jobs, &statuses, &touched);
+
+        assert!(view_model.rows[0].has_user_state, "the status counts");
+        assert!(
+            view_model.rows[1].has_user_state,
+            "a report or letter counts"
+        );
     }
 
     #[test]
@@ -369,6 +461,7 @@ mod tests {
         let view_model = PipelineViewModel {
             rows: vec![row(1, None), row(2, None)],
             filter: JobFilter::All,
+            search: String::new(),
         };
 
         assert_eq!(view_model.row(2).map(|row| row.id), Some(2));

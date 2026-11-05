@@ -2,7 +2,7 @@
 //!
 //! The screen is rendered with `egui_kittest` against hand-built view-models.
 //! App-level tests cover the database load and the manual-entry round trip;
-//! these cover the controls, filters, and action intents.
+//! these cover the controls, filters, search, delete gate, and action intents.
 
 use career_ops_app::screens::pipeline::{self, PipelineAction, PipelineRenderState, PipelineView};
 use career_ops_app::view_models::pipeline::{
@@ -24,6 +24,7 @@ fn idle_state() -> PipelineRenderState<'static> {
         message: None,
         refreshing: None,
         marking: None,
+        deleting: None,
     }
 }
 
@@ -57,13 +58,29 @@ fn row(id: i64, title: &str, status: Option<StatusLabel>, tier: TierLabel) -> Jo
         status,
         source_url: format!("https://example.com/jobs/{id}"),
         raw_text: "We are hiring.".into(),
+        has_user_state: status.is_some_and(|status| status != StatusLabel::Discovered),
+    }
+}
+
+fn selected(id: i64) -> PipelineView {
+    PipelineView {
+        selected: Some(id),
+        ..PipelineView::default()
+    }
+}
+
+fn view_model(rows: Vec<JobRow>, filter: JobFilter, search: &str) -> PipelineViewModel {
+    PipelineViewModel {
+        rows,
+        filter,
+        search: search.into(),
     }
 }
 
 #[test]
 fn renders_rows_with_tier_and_status() {
-    let view_model = PipelineViewModel {
-        rows: vec![
+    let view_model = view_model(
+        vec![
             row(
                 1,
                 "Engineer",
@@ -72,8 +89,9 @@ fn renders_rows_with_tier_and_status() {
             ),
             row(2, "Designer", None, TierLabel::Manual),
         ],
-        filter: JobFilter::All,
-    };
+        JobFilter::All,
+        "",
+    );
 
     let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
     harness.run();
@@ -106,10 +124,11 @@ fn empty_state_opens_the_add_job_action() {
 
 #[test]
 fn header_add_job_emits_the_action() {
-    let view_model = PipelineViewModel {
-        rows: vec![row(1, "Engineer", None, TierLabel::Ats)],
-        filter: JobFilter::All,
-    };
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
     let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
 
     harness.run();
@@ -123,12 +142,12 @@ fn header_add_job_emits_the_action() {
 
 #[test]
 fn filter_buttons_emit_the_selected_filter() {
-    let view_model = PipelineViewModel {
-        rows: vec![row(1, "Engineer", None, TierLabel::Ats)],
-        filter: JobFilter::All,
-    };
-    let view = PipelineView { selected: Some(1) };
-    let mut harness = test_harness(&view_model, view, idle_state());
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
 
     harness.run();
     harness.get_by_label("Rejected").click();
@@ -147,10 +166,11 @@ fn filter_buttons_emit_the_selected_filter() {
 
 #[test]
 fn a_filter_with_no_matches_explains_itself() {
-    let view_model = PipelineViewModel {
-        rows: vec![row(1, "Engineer", None, TierLabel::Ats)],
-        filter: JobFilter::Rejected,
-    };
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::Rejected,
+        "",
+    );
 
     let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
     harness.run();
@@ -163,16 +183,78 @@ fn a_filter_with_no_matches_explains_itself() {
 }
 
 #[test]
+fn the_search_field_emits_the_query() {
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let field = harness.get_by_label("Search");
+    field.focus();
+    field.type_text("engineer");
+    harness.run();
+
+    assert!(
+        harness.state().actions.iter().any(
+            |action| matches!(action, PipelineAction::SetSearch(query) if query == "engineer")
+        ),
+        "actions: {:?}",
+        harness.state().actions
+    );
+}
+
+#[test]
+fn a_search_with_no_matches_explains_itself() {
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "zzz",
+    );
+
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("No jobs match this search");
+    assert!(
+        harness.query_by_label("Engineer — Acme").is_none(),
+        "the non-matching row must not be rendered"
+    );
+}
+
+#[test]
+fn clearing_the_search_emits_an_empty_query() {
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "zzz",
+    );
+
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+    harness.get_by_role_and_label(Role::Button, "Clear").click();
+    harness.run();
+
+    assert!(harness
+        .state()
+        .actions
+        .contains(&PipelineAction::SetSearch(String::new())));
+}
+
+#[test]
 fn selecting_a_row_shows_the_detail_and_placeholder_buttons() {
-    let view_model = PipelineViewModel {
-        rows: vec![row(
+    let view_model = view_model(
+        vec![row(
             1,
             "Engineer",
             Some(StatusLabel::Interviewing),
             TierLabel::Ats,
         )],
-        filter: JobFilter::All,
-    };
+        JobFilter::All,
+        "",
+    );
     let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
 
     harness.run();
@@ -201,12 +283,12 @@ fn selecting_a_row_shows_the_detail_and_placeholder_buttons() {
 
 #[test]
 fn refresh_description_emits_the_action() {
-    let view_model = PipelineViewModel {
-        rows: vec![row(1, "Engineer", None, TierLabel::Ats)],
-        filter: JobFilter::All,
-    };
-    let view = PipelineView { selected: Some(1) };
-    let mut harness = test_harness(&view_model, view, idle_state());
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
 
     harness.run();
     harness
@@ -222,19 +304,20 @@ fn refresh_description_emits_the_action() {
 
 #[test]
 fn refreshing_disables_the_button_and_reports_the_result() {
-    let view_model = PipelineViewModel {
-        rows: vec![row(1, "Engineer", None, TierLabel::Ats)],
-        filter: JobFilter::All,
-    };
-    let view = PipelineView { selected: Some(1) };
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
     let render_state = PipelineRenderState {
         loading: false,
         error: None,
         message: Some("Description refreshed: 2048 bytes."),
         refreshing: Some(1),
         marking: None,
+        deleting: None,
     };
-    let mut harness = test_harness(&view_model, view, render_state);
+    let mut harness = test_harness(&view_model, selected(1), render_state);
 
     // The spinner keeps requesting repaints; `run()` would never settle.
     harness.run_steps(2);
@@ -246,12 +329,12 @@ fn refreshing_disables_the_button_and_reports_the_result() {
 
 #[test]
 fn mark_not_a_match_emits_the_action() {
-    let view_model = PipelineViewModel {
-        rows: vec![row(1, "Engineer", None, TierLabel::Ats)],
-        filter: JobFilter::All,
-    };
-    let view = PipelineView { selected: Some(1) };
-    let mut harness = test_harness(&view_model, view, idle_state());
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
 
     harness.run();
     harness
@@ -274,12 +357,12 @@ fn mark_not_a_match_is_disabled_once_the_application_is_decided() {
         StatusLabel::Rejected,
         StatusLabel::NotAMatch,
     ] {
-        let view_model = PipelineViewModel {
-            rows: vec![row(1, "Engineer", Some(status), TierLabel::Ats)],
-            filter: JobFilter::All,
-        };
-        let view = PipelineView { selected: Some(1) };
-        let mut harness = test_harness(&view_model, view, idle_state());
+        let view_model = view_model(
+            vec![row(1, "Engineer", Some(status), TierLabel::Ats)],
+            JobFilter::All,
+            "",
+        );
+        let mut harness = test_harness(&view_model, selected(1), idle_state());
         harness.run();
 
         let button = harness.get_by_role_and_label(Role::Button, "Mark not a match");
@@ -289,10 +372,11 @@ fn mark_not_a_match_is_disabled_once_the_application_is_decided() {
 
 #[test]
 fn the_not_a_match_filter_is_offered() {
-    let view_model = PipelineViewModel {
-        rows: vec![row(1, "Engineer", None, TierLabel::Ats)],
-        filter: JobFilter::All,
-    };
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
     let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
     harness.run();
 
@@ -300,14 +384,148 @@ fn the_not_a_match_filter_is_offered() {
 }
 
 #[test]
-fn a_selection_that_disappeared_falls_back_to_the_list() {
-    let view_model = PipelineViewModel {
-        rows: Vec::new(),
-        filter: JobFilter::All,
-    };
-    let view = PipelineView { selected: Some(7) };
+fn a_fetched_only_row_deletes_without_confirmation() {
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
 
-    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Delete job")
+        .click();
+    harness.run();
+
+    assert!(harness
+        .state()
+        .actions
+        .contains(&PipelineAction::DeleteJob(1)));
+    assert!(
+        harness.state().view.delete.is_none(),
+        "a fetched-only row must not open the gate"
+    );
+}
+
+#[test]
+fn a_touched_row_opens_the_typed_gate() {
+    let mut touched = row(1, "Engineer", Some(StatusLabel::Discovered), TierLabel::Ats);
+    touched.has_user_state = true;
+    let view_model = view_model(vec![touched], JobFilter::All, "");
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
+
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Delete job...")
+        .click();
+    harness.run();
+
+    assert!(harness.state().view.delete.is_some());
+    assert!(
+        !harness
+            .state()
+            .actions
+            .contains(&PipelineAction::DeleteJob(1)),
+        "opening the gate must not delete anything"
+    );
+
+    let _ = harness.get_by_label("Delete Engineer at Acme?");
+    let _ = harness.get_by_label(
+        "The application, its evaluation reports, and any cover letters are deleted too.",
+    );
+    let _ = harness.get_by_label("An evaluation cannot be fetched again.");
+    let _ = harness.get_by_label("Type delete me to confirm");
+    assert!(harness
+        .get_by_role_and_label(Role::Button, "Delete job")
+        .accesskit_node()
+        .is_disabled());
+}
+
+#[test]
+fn a_wrong_phrase_keeps_the_delete_disabled() {
+    let mut touched = row(1, "Engineer", None, TierLabel::Ats);
+    touched.has_user_state = true;
+    let view_model = view_model(vec![touched], JobFilter::All, "");
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
+
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Delete job...")
+        .click();
+    harness.run();
+
+    let field = harness.get_by_label("Type delete me to confirm");
+    field.focus();
+    field.type_text("delete");
+    harness.run();
+
+    let button = harness.get_by_role_and_label(Role::Button, "Delete job");
+    assert!(button.accesskit_node().is_disabled());
+    assert!(!harness
+        .state()
+        .actions
+        .contains(&PipelineAction::DeleteJob(1)));
+}
+
+#[test]
+fn the_typed_phrase_enables_the_delete() {
+    let mut touched = row(1, "Engineer", None, TierLabel::Ats);
+    touched.has_user_state = true;
+    let view_model = view_model(vec![touched], JobFilter::All, "");
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
+
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Delete job...")
+        .click();
+    harness.run();
+
+    let field = harness.get_by_label("Type delete me to confirm");
+    field.focus();
+    field.type_text("delete me");
+    harness.run();
+
+    let button = harness.get_by_role_and_label(Role::Button, "Delete job");
+    assert!(!button.accesskit_node().is_disabled());
+    button.click();
+    harness.run();
+
+    assert!(harness
+        .state()
+        .actions
+        .contains(&PipelineAction::DeleteJob(1)));
+}
+
+#[test]
+fn cancelling_the_gate_leaves_the_job_alone() {
+    let mut touched = row(1, "Engineer", None, TierLabel::Ats);
+    touched.has_user_state = true;
+    let view_model = view_model(vec![touched], JobFilter::All, "");
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
+
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Delete job...")
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Cancel")
+        .click();
+    harness.run();
+
+    assert!(harness.state().view.delete.is_none());
+    assert!(!harness
+        .state()
+        .actions
+        .contains(&PipelineAction::DeleteJob(1)));
+}
+
+#[test]
+fn a_selection_that_disappeared_falls_back_to_the_list() {
+    let view_model = view_model(Vec::new(), JobFilter::All, "");
+
+    let mut harness = test_harness(&view_model, selected(7), idle_state());
     harness.run();
 
     assert_eq!(
@@ -327,6 +545,7 @@ fn first_load_shows_a_spinner_instead_of_the_empty_state() {
         message: None,
         refreshing: None,
         marking: None,
+        deleting: None,
     };
 
     let mut harness = test_harness(&view_model, PipelineView::default(), render_state);
@@ -346,6 +565,7 @@ fn an_error_offers_a_retry() {
         message: None,
         refreshing: None,
         marking: None,
+        deleting: None,
     };
 
     let mut harness = test_harness(&view_model, PipelineView::default(), render_state);

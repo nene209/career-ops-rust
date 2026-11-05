@@ -23,7 +23,7 @@
 //! the fetch source and browser backend through `Arc`. The state machine stays
 //! available while a fetch or mutation runs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,8 +63,12 @@ use crate::view_models::portals::{BatchProgress, PortalsViewModel};
 type StateTask = AsyncTask<(AppState, CoreResult<()>)>;
 
 /// A page of recent jobs, paired with the status of the application attached
-/// to each job id.
-type PipelineLoad = CoreResult<(Vec<JobDescription>, HashMap<i64, ApplicationStatus>)>;
+/// to each job id and the ids that carry user-authored state.
+type PipelineLoad = CoreResult<(
+    Vec<JobDescription>,
+    HashMap<i64, ApplicationStatus>,
+    HashSet<i64>,
+)>;
 
 /// How many recent jobs the Pipeline loads at once.
 ///
@@ -159,6 +163,8 @@ pub struct CareerOpsApp {
     refreshing_job: Option<i64>,
     pipeline_status_task: Option<AsyncTask<CoreResult<()>>>,
     marking_job: Option<i64>,
+    pipeline_delete_task: Option<AsyncTask<CoreResult<()>>>,
+    deleting_job: Option<i64>,
 }
 
 impl CareerOpsApp {
@@ -212,6 +218,8 @@ impl CareerOpsApp {
             refreshing_job: None,
             pipeline_status_task: None,
             marking_job: None,
+            pipeline_delete_task: None,
+            deleting_job: None,
         }
     }
 
@@ -360,8 +368,10 @@ impl CareerOpsApp {
             PipelineAction::AddJob => self.portals_view.open_manual(),
             PipelineAction::Reload => self.start_pipeline_load(),
             PipelineAction::SetFilter(filter) => self.pipeline.filter = filter,
+            PipelineAction::SetSearch(query) => self.pipeline.search = query,
             PipelineAction::RefreshJob(job_id) => self.start_job_refresh(job_id),
             PipelineAction::MarkNotAMatch(job_id) => self.start_not_a_match(job_id),
+            PipelineAction::DeleteJob(job_id) => self.start_job_delete(job_id),
         }
     }
 
@@ -565,6 +575,8 @@ impl CareerOpsApp {
         self.refreshing_job = None;
         self.pipeline_status_task = None;
         self.marking_job = None;
+        self.pipeline_delete_task = None;
+        self.deleting_job = None;
     }
 
     fn pool(&self) -> Option<sqlx::SqlitePool> {
@@ -1117,7 +1129,8 @@ impl CareerOpsApp {
                         .map(|status| (application.job_description_id, status))
                 })
                 .collect();
-            Ok((jobs, statuses))
+            let touched = job_repo::user_touched_ids(&pool).await?;
+            Ok((jobs, statuses, touched))
         });
 
         self.pipeline_task = Some(task);
@@ -1133,8 +1146,8 @@ impl CareerOpsApp {
             TaskPoll::Ready(result) => {
                 self.pipeline_task = None;
                 match result {
-                    Ok((jobs, statuses)) => {
-                        self.pipeline.replace_jobs(jobs, &statuses);
+                    Ok((jobs, statuses, touched)) => {
+                        self.pipeline.replace_jobs(jobs, &statuses, &touched);
                         self.pipeline_loaded = true;
                         self.pipeline_error = None;
                     }
@@ -1262,6 +1275,9 @@ impl CareerOpsApp {
                                 self.pipeline.rows.iter_mut().find(|row| row.id == id)
                             {
                                 row.status = Some(StatusLabel::NotAMatch);
+                                // The status itself is user state: deleting
+                                // this row now needs the typed gate.
+                                row.has_user_state = true;
                             }
                         }
                         self.pipeline_message = Some("Marked as not a match.".into());
@@ -1283,6 +1299,68 @@ impl CareerOpsApp {
         }
     }
 
+    /// Delete a job description. Its application, evaluation reports, and cover
+    /// letters cascade, which is why a touched row is gated.
+    fn start_job_delete(&mut self, job_id: i64) {
+        if self.deleting_job.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.pipeline_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let task = self.spawn(async move { job_repo::delete(&pool, job_id).await });
+
+        self.pipeline_error = None;
+        self.pipeline_message = None;
+        self.deleting_job = Some(job_id);
+        self.pipeline_delete_task = Some(task);
+    }
+
+    fn poll_pipeline_delete(&mut self, ctx: &egui::Context) {
+        let poll = match self.pipeline_delete_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.pipeline_delete_task = None;
+                let job_id = self.deleting_job.take();
+                match result {
+                    Ok(()) => {
+                        if let Some(id) = job_id {
+                            self.pipeline.rows.retain(|row| row.id != id);
+                            if self.pipeline_view.selected == Some(id) {
+                                self.pipeline_view.selected = None;
+                            }
+                        }
+                        self.pipeline_view.delete = None;
+                        self.pipeline_message = Some("Job deleted.".into());
+                        self.pipeline_error = None;
+                    }
+                    Err(error) => {
+                        // The gate stays open so the user can retry or cancel.
+                        self.pipeline_message = None;
+                        self.pipeline_error = Some(format!("Could not delete the job: {error}"));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.pipeline_delete_task = None;
+                self.deleting_job = None;
+                self.pipeline_error = Some("The delete was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // End Pipeline
     // ------------------------------------------------------------------
@@ -1295,6 +1373,7 @@ impl Drop for CareerOpsApp {
         self.pipeline_task = None;
         self.pipeline_refresh_task = None;
         self.pipeline_status_task = None;
+        self.pipeline_delete_task = None;
         self.pending = None;
 
         if tokio::runtime::Handle::try_current().is_err() {
@@ -1452,6 +1531,7 @@ impl eframe::App for CareerOpsApp {
                 self.poll_pipeline_task(ui.ctx());
                 self.poll_pipeline_refresh(ui.ctx());
                 self.poll_pipeline_status(ui.ctx());
+                self.poll_pipeline_delete(ui.ctx());
                 self.drain_batch_progress();
 
                 if self.navigation.current() == MainScreen::Portals
@@ -1484,6 +1564,7 @@ impl eframe::App for CareerOpsApp {
                     message: self.pipeline_message.as_deref(),
                     refreshing: self.refreshing_job,
                     marking: self.marking_job,
+                    deleting: self.deleting_job,
                 };
 
                 let navigation = &mut self.navigation;
@@ -1924,6 +2005,7 @@ mod tests {
             app.poll_pipeline_task(ctx);
             app.poll_pipeline_refresh(ctx);
             app.poll_pipeline_status(ctx);
+            app.poll_pipeline_delete(ctx);
             app.drain_batch_progress();
             if condition(app) {
                 return;
@@ -2452,6 +2534,10 @@ mod tests {
         });
 
         assert_eq!(app.pipeline.rows[0].status, Some(StatusLabel::NotAMatch));
+        assert!(
+            app.pipeline.rows[0].has_user_state,
+            "the status alone makes the row gated"
+        );
         assert_eq!(
             app.pipeline_message.as_deref(),
             Some("Marked as not a match.")
@@ -2464,6 +2550,83 @@ mod tests {
         assert_eq!(applications.len(), 1);
         assert_eq!(applications[0].job_description_id, stored.id);
         assert_eq!(applications[0].status, "not_a_match");
+    }
+
+    /// Deleting through the app removes the row from the view model, clears the
+    /// selection, and closes the gate. The cascade onto the application is a
+    /// core test; this covers the app's orchestration.
+    #[test]
+    fn delete_a_job_removes_the_row_from_the_pipeline() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::default());
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        let pool = app.pool().expect("pool");
+        let stored = app
+            .runtime()
+            .block_on(job_repo::upsert(
+                &pool,
+                job_repo::NewJobDescription {
+                    title: "Engineer".into(),
+                    company: "Acme".into(),
+                    source_url: "https://example.com/jobs/delete".into(),
+                    raw_text: "body".into(),
+                    fetch_tier: FetchTier::Tier1bHtml,
+                    external_id: None,
+                },
+            ))
+            .expect("store");
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+        assert_eq!(app.pipeline.rows.len(), 1);
+        app.pipeline_view.selected = Some(stored.id);
+
+        app.handle_pipeline_action(PipelineAction::DeleteJob(stored.id));
+        wait_until(&mut app, &ctx, |app| {
+            app.deleting_job.is_none() && app.pipeline_message.is_some()
+        });
+
+        assert!(app.pipeline.rows.is_empty());
+        assert_eq!(app.pipeline_view.selected, None);
+        assert!(app.pipeline_view.delete.is_none());
+        assert_eq!(app.pipeline_message.as_deref(), Some("Job deleted."));
+        assert!(app
+            .runtime()
+            .block_on(job_repo::get(&pool, stored.id))
+            .expect("get")
+            .is_none());
     }
 
     #[test]

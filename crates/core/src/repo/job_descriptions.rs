@@ -240,6 +240,38 @@ pub async fn set_raw_text(pool: &SqlitePool, id: i64, raw_text: &str) -> Result<
     Ok(())
 }
 
+/// Delete a job description. Its application, evaluations, and cover letters
+/// cascade (`foreign_keys = ON`).
+pub async fn delete(pool: &SqlitePool, id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM job_descriptions WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Job ids that carry anything the user would lose: a status beyond
+/// `discovered`, an evaluation report, or a cover letter.
+///
+/// The Pipeline uses this to decide whether deleting a row needs the typed
+/// confirmation. A fetched-only row has nothing in this set.
+pub async fn user_touched_ids(pool: &SqlitePool) -> Result<std::collections::HashSet<i64>> {
+    let ids: Vec<(i64,)> = sqlx::query_as(
+        "SELECT DISTINCT job_description_id FROM applications
+         WHERE status != 'discovered'
+         UNION
+         SELECT DISTINCT a.job_description_id FROM evaluation_reports e
+         JOIN applications a ON a.id = e.application_id
+         UNION
+         SELECT DISTINCT a.job_description_id FROM cover_letters c
+         JOIN applications a ON a.id = c.application_id",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(ids.into_iter().map(|(id,)| id).collect())
+}
+
 async fn insert(
     pool: &SqlitePool,
     input: NewJobDescription,

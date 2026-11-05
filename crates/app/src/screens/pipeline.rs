@@ -4,38 +4,58 @@
 //! local view state, and returns a `PipelineAction`. The app owns the load,
 //! the filter mutation, and the shared manual-entry modal.
 
-use egui::{Button, Color32, RichText, Ui};
+use egui::{Align2, Button, Color32, RichText, Ui, Window};
 
 use crate::view_models::pipeline::{JobFilter, JobRow, PipelineViewModel, StatusLabel, TierLabel};
 
-use super::components::{EmptyState, LoadingSpinner, StatusBadge};
+use super::components::{labelled_input, EmptyState, LoadingSpinner, StatusBadge};
 
 #[derive(Default)]
 pub struct PipelineView {
     pub selected: Option<i64>,
+    /// Open only for a job the user has touched; a fetched-only row deletes
+    /// without a dialog.
+    pub delete: Option<DeleteJobModal>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The typed gate in front of a destructive delete.
+#[derive(Default)]
+pub struct DeleteJobModal {
+    pub id: i64,
+    pub title: String,
+    pub company: String,
+    pub phrase: String,
+}
+
+/// The phrase the user types to confirm deleting a touched job.
+pub const DELETE_PHRASE: &str = "delete me";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineAction {
     AddJob,
     Reload,
     SetFilter(JobFilter),
+    SetSearch(String),
     /// Re-fetch one posting's description in place.
     RefreshJob(i64),
     /// Mark the job's application as not worth pursuing.
     MarkNotAMatch(i64),
+    /// Delete the job, confirmed.
+    DeleteJob(i64),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 pub struct PipelineRenderState<'a> {
     pub loading: bool,
     pub error: Option<&'a str>,
-    /// The outcome of the last refresh, or a hint about one.
+    /// The outcome of the last refresh or status change, or a hint about one.
     pub message: Option<&'a str>,
     /// The job whose description is being re-fetched.
     pub refreshing: Option<i64>,
     /// The job whose status is being changed.
     pub marking: Option<i64>,
+    /// The job being deleted.
+    pub deleting: Option<i64>,
 }
 
 pub fn show(
@@ -46,11 +66,23 @@ pub fn show(
 ) -> Option<PipelineAction> {
     let mut action = None;
 
+    // The gate belongs to one row: if the selection moved on, drop it.
+    if view
+        .delete
+        .as_ref()
+        .is_some_and(|modal| view.selected != Some(modal.id))
+    {
+        view.delete = None;
+    }
+
     header(ui, view_model, state, &mut action);
 
-    // A filter applies to the list. Return to it so the change is visible
-    // instead of leaving the detail panel on screen.
-    if matches!(action, Some(PipelineAction::SetFilter(_))) {
+    // A filter or a query applies to the list. Return to it so the change is
+    // visible instead of leaving the detail panel on screen.
+    if matches!(
+        &action,
+        Some(PipelineAction::SetFilter(_) | PipelineAction::SetSearch(_))
+    ) {
         view.selected = None;
     }
 
@@ -65,18 +97,27 @@ pub fn show(
 
     ui.separator();
 
+    let mut showing_detail = false;
     if let Some(selected) = view.selected {
         if let Some(row) = view_model.row(selected) {
             detail(ui, row, view, state, &mut action);
-            return action;
+            showing_detail = true;
+        } else {
+            // The row disappeared after a reload. Fall back to the list rather
+            // than leaving the detail panel in an inconsistent state.
+            view.selected = None;
         }
-
-        // The row disappeared after a reload. Fall back to the list rather
-        // than leaving the detail panel in an inconsistent state.
-        view.selected = None;
     }
 
-    list(ui, view_model, state, view, &mut action);
+    if !showing_detail {
+        list(ui, view_model, state, view, &mut action);
+    }
+
+    // The typed gate is chrome over the screen, like the portal dialogs.
+    if let Some(gate_action) = delete_gate(ui, view, state) {
+        action = Some(gate_action);
+    }
+
     action
 }
 
@@ -118,6 +159,19 @@ fn header(
             }
         }
     });
+
+    ui.horizontal(|ui| {
+        // The screen does not own the view model, so the field edits a copy and
+        // signals the app. The app applies it before the next frame.
+        let mut query = view_model.search.clone();
+        if labelled_input(ui, "Search", &mut query, false).changed() && query != view_model.search {
+            *action = Some(PipelineAction::SetSearch(query));
+        }
+
+        if !view_model.search.is_empty() && ui.button("Clear").clicked() {
+            *action = Some(PipelineAction::SetSearch(String::new()));
+        }
+    });
 }
 
 fn list(
@@ -148,6 +202,17 @@ fn list(
             .show(ui)
             {
                 *action = Some(PipelineAction::AddJob);
+            }
+        } else if !view_model.search.trim().is_empty() {
+            if EmptyState::new(
+                "|||",
+                "No jobs match this search",
+                "Clear the search or try a different title or company.",
+            )
+            .with_action("Clear search")
+            .show(ui)
+            {
+                *action = Some(PipelineAction::SetSearch(String::new()));
             }
         } else {
             EmptyState::new(
@@ -203,9 +268,12 @@ fn detail(
         ui.add_enabled(false, Button::new("Generate cover letter"))
             .on_disabled_hover_text("Available in a later phase");
 
+        let deleting = state.deleting == Some(row.id);
+        let busy = state.refreshing == Some(row.id) || state.marking == Some(row.id) || deleting;
+
         if ui
             .add_enabled(
-                state.refreshing.is_none(),
+                state.refreshing.is_none() && state.deleting.is_none(),
                 Button::new("Refresh description"),
             )
             .on_hover_text("Fetch this posting again and replace its text")
@@ -221,7 +289,6 @@ fn detail(
             None => true,
             Some(status) => status.can_mark_not_a_match(),
         };
-        let busy = state.refreshing == Some(row.id) || state.marking == Some(row.id);
         if ui
             .add_enabled(can_mark && !busy, Button::new("Mark not a match"))
             .on_hover_text("Keep the posting but leave it out of the active pipeline")
@@ -230,6 +297,40 @@ fn detail(
             *action = Some(PipelineAction::MarkNotAMatch(row.id));
         }
         if state.marking == Some(row.id) {
+            LoadingSpinner::show(ui);
+        }
+
+        // A fetched-only row has nothing to lose: the portal can fetch it
+        // again. A row with an evaluation or a saved status is gated.
+        let label = if row.has_user_state {
+            "Delete job..."
+        } else {
+            "Delete job"
+        };
+        let hint = if row.has_user_state {
+            "This job has an evaluation, cover letter, or saved status; you will be asked to confirm"
+        } else {
+            "Remove this posting. The next portal fetch can add it again"
+        };
+        if ui
+            .add_enabled(!busy, Button::new(label))
+            .on_hover_text(hint)
+            .clicked()
+        {
+            if row.has_user_state {
+                // The gate is view state, so the screen owns it. Only the
+                // confirmed delete travels to the app.
+                view.delete = Some(DeleteJobModal {
+                    id: row.id,
+                    title: row.title.clone(),
+                    company: row.company.clone(),
+                    phrase: String::new(),
+                });
+            } else {
+                *action = Some(PipelineAction::DeleteJob(row.id));
+            }
+        }
+        if deleting {
             LoadingSpinner::show(ui);
         }
     });
@@ -256,6 +357,65 @@ fn detail(
             ui.label(RichText::new(&row.raw_text).monospace());
         }
     });
+}
+
+/// The typed gate in front of a destructive delete.
+///
+/// A fetched-only row deletes without this dialog, because nothing the user
+/// authored is lost. This dialog exists for the rows where something is: an
+/// evaluation costs tokens and cannot be re-created by fetching.
+fn delete_gate(
+    ui: &mut Ui,
+    view: &mut PipelineView,
+    state: PipelineRenderState<'_>,
+) -> Option<PipelineAction> {
+    let modal = view.delete.as_mut()?;
+
+    let id = modal.id;
+    let busy = state.deleting == Some(id);
+    let confirmed = modal.phrase.trim() == DELETE_PHRASE;
+    let mut decision = None;
+
+    Window::new("Delete job?")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(460.0)
+        .show(ui.ctx(), |ui| {
+            ui.label(format!("Delete {} at {}?", modal.title, modal.company));
+            ui.label(
+                "The application, its evaluation reports, and any cover letters are deleted too.",
+            );
+            ui.label("An evaluation cannot be fetched again.");
+            ui.add_space(8.0);
+            labelled_input(ui, "Type delete me to confirm", &mut modal.phrase, false);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(confirmed && !busy, Button::new("Delete job"))
+                    .clicked()
+                {
+                    decision = Some(true);
+                }
+                if ui.add_enabled(!busy, Button::new("Cancel")).clicked() {
+                    decision = Some(false);
+                }
+                if busy {
+                    LoadingSpinner::show(ui);
+                }
+            });
+        });
+
+    match decision {
+        // The modal stays open until the app reports the outcome, so a failure
+        // leaves the confirmation on screen instead of losing it.
+        Some(true) => Some(PipelineAction::DeleteJob(id)),
+        Some(false) => {
+            view.delete = None;
+            None
+        }
+        None => None,
+    }
 }
 
 fn tier_label(ui: &mut Ui, tier: TierLabel) {

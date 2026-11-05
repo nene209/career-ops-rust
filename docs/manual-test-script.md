@@ -148,6 +148,9 @@ otherwise.
 | 6.7 | Click **Refresh**. | The list reloads; the selected filter is still selected. |
 | 6.8 | Open a detail view and click **Refresh description**. 🌐 | A spinner appears on the button, the text is replaced with the posting's current description, and the header reports "Description refreshed: N bytes." A posting whose detail cannot be read keeps its old text and reports an error. |
 | 6.9 | In a detail view, click **Mark not a match**. | The badge changes to "Not a match", the header reports "Marked as not a match.", the job appears under the **Not a match** filter and disappears from **Not applied**. An application row is created if the job had none. The button disables once the application is applied, interviewing, offered, rejected, or already not a match. Clicking it twice is harmless. |
+| 6.10 | Type into **Search**. | The list narrows to rows whose title or company contains the text, without a reload; the status filter still applies. A query with no matches shows "No jobs match this search" with a **Clear search** button. |
+| 6.11 | Open the detail view of a job that was only fetched and click **Delete job**. | The row disappears without a dialog and the header reports "Job deleted." **Refresh** does not bring it back; only the portal fetching it again does. |
+| 6.12 | Open the detail view of a job with a saved status or an evaluation and click **Delete job...**. | A window names the job and says that its application, evaluation reports, and cover letters go with it. **Delete job** stays disabled until you type `delete me`; a wrong phrase keeps it disabled, and **Cancel** closes the window and leaves the job. |
 
 ## 7. Idle behaviour
 
