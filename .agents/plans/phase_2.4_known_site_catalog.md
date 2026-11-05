@@ -1,7 +1,7 @@
 # Phase 2.4: Known-Site Catalog — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.9), §12
-**Status:** In progress — WS1 complete; WS2–WS3 not started
+**Status:** In progress — WS1–WS2 complete; WS3 not started
 **Last updated:** 2026-11-03
 **Duration:** 1–2 days
 **Depends on:** Phase 2.3 (registry, `apply_known_site`, prefill, provider combo)
@@ -15,6 +15,7 @@
 | :--- | :--- |
 | v0.1 | Initial plan. Phase 2.3 ships an embedded registry and working prefill, but the only way to reach either is to type a URL the app already knows. This phase makes the registry discoverable: a chooser in the add flow, an "based on" attribution in the form, and a visible restore action. No storage change, no migration, no new dependency. |
 | v0.2 | Workstream 1 implemented: `KnownSite::url()` in core, `PortalsView::{open_add, open_blank_add, choose_known_site}`, `PortalModal::ChooseSite`, and the chooser rendering. `OpenAdd` now opens the list instead of a blank form. Attribution and restore are unchanged until WS2. |
+| v0.3 | Workstream 2 implemented: the chooser's notes moved to hover text, **Use known config** renamed to **Restore known config**, and a `Modified from the known config.` marker added when the form diverges from the entry. The marker and the action share `matches_known_site`, so whitespace and key order never count as edits. |
 
 ---
 
@@ -241,6 +242,32 @@ NVIDIA, choosing "Other site", and cancelling.
 | Whitespace/key-order changes do not count as modified | Unit test on `matches_known_site` |
 | Editing a saved known portal shows its source and can restore | `egui_kittest` |
 | An unknown host shows no source line, marker, or restore action | `egui_kittest` |
+
+**Implementation note (2026-11-03).** The source line, the modified marker, and
+the restore action are one block driven by `matches_known_site`, so a form can
+never claim to match while offering restore. `matches_known_site` compares parsed
+JSON, which makes whitespace and key order irrelevant; the unit tests pin both
+directions (`a_reformatted_known_config_is_not_modified`, `changing_a_known_value_is_modified`).
+
+Restore calls `apply_known_site`, the same function the URL prefill and the
+chooser use, so "restore" and "prefill" cannot produce different configs.
+
+The block is rendered before the provider fields, so the marker reflects the
+previous frame's keystrokes in those fields. That is one frame of lag on a
+human-scale interaction, and the alternative — moving the attribution below the
+fields — reads worse. Tests render after the edit, so they see the settled state.
+
+**Chooser notes on hover.** The entry notes were visible lines under each
+button; with two entries that is informative, with twenty it is noise. They now
+appear as `on_hover_text`, which leaves the accessible name of the button as the
+`site.label()` the tests query.
+
+Tests added: `restore_known_config_replaces_a_divergent_config` (renamed, and now
+asserts the marker clears), `a_matching_config_shows_no_modified_marker`,
+`editing_a_known_portal_shows_its_source_and_can_restore`,
+`an_unknown_site_has_no_known_site_affordances`, plus the two unit tests above.
+The edit case seeds a saved config with `pagination.max_pages: 2` so restore has
+something to remove.
 
 ---
 

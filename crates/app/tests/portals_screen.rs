@@ -585,7 +585,7 @@ fn editing_after_prefill_is_preserved() {
 }
 
 #[test]
-fn use_known_config_replaces_a_divergent_config() {
+fn restore_known_config_replaces_a_divergent_config() {
     let view_model = PortalsViewModel::default();
     let view = PortalsView {
         modal: Some(PortalModal::Add(PortalForm {
@@ -601,8 +601,10 @@ fn use_known_config_replaces_a_divergent_config() {
     let mut harness = test_harness(&view_model, view, idle_state());
     harness.run();
 
+    let _modified = harness.get_by_label("Modified from the known config.");
+
     harness
-        .get_by_role_and_label(Role::Button, "Use known config")
+        .get_by_role_and_label(Role::Button, "Restore known config")
         .click();
     harness.run();
 
@@ -610,10 +612,114 @@ fn use_known_config_replaces_a_divergent_config() {
     assert_eq!(form.domain, "nvidia.com");
     assert!(
         harness
-            .query_by_role_and_label(Role::Button, "Use known config")
+            .query_by_role_and_label(Role::Button, "Restore known config")
             .is_none(),
         "the button disappears once the form matches the entry"
     );
+    assert!(
+        harness
+            .query_by_label("Modified from the known config.")
+            .is_none(),
+        "restoring clears the modified marker"
+    );
+}
+
+#[test]
+fn a_matching_config_shows_no_modified_marker() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            company_name: "NVIDIA".into(),
+            url: "https://jobs.nvidia.com/careers".into(),
+            provider: Provider::Eightfold,
+            domain: "nvidia.com".into(),
+            ..Default::default()
+        })),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let _source = harness.get_by_label("Known site: NVIDIA (Eightfold) - verified 2026-11-03");
+    assert!(harness
+        .query_by_label("Modified from the known config.")
+        .is_none());
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Restore known config")
+        .is_none());
+}
+
+#[test]
+fn editing_a_known_portal_shows_its_source_and_can_restore() {
+    let view_model = PortalsViewModel {
+        rows: vec![PortalRow {
+            id: 1,
+            name: "NVIDIA".into(),
+            url: "https://jobs.nvidia.com/careers".into(),
+            render_mode: "static".into(),
+            scraper_config: Some(
+                r#"{"provider":"eightfold","domain":"nvidia.com","pagination":{"max_pages":2}}"#
+                    .into(),
+            ),
+            health: HealthBadge::NeverFetched,
+            last_attempt: None,
+            suggested_action: None,
+        }],
+        ..Default::default()
+    };
+    let view = PortalsView {
+        modal: Some(PortalModal::Edit {
+            id: 1,
+            form: PortalForm::from_row(&view_model.rows[0]),
+        }),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let _source = harness.get_by_label("Known site: NVIDIA (Eightfold) - verified 2026-11-03");
+    let _modified = harness.get_by_label("Modified from the known config.");
+
+    harness
+        .get_by_role_and_label(Role::Button, "Restore known config")
+        .click();
+    harness.run();
+
+    let form = harness.state().view.form().expect("form");
+    assert_eq!(form.domain, "nvidia.com");
+    assert!(
+        form.eightfold_config.is_empty(),
+        "restoring drops the saved extra caps"
+    );
+}
+
+#[test]
+fn an_unknown_site_has_no_known_site_affordances() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            company_name: "Acme".into(),
+            url: "https://acme.example/jobs".into(),
+            ..Default::default()
+        })),
+    };
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    for label in [
+        "Known site: NVIDIA (Eightfold) - verified 2026-11-03",
+        "Known site: Waymo (Selectors) - verified 2026-11-03",
+        "Modified from the known config.",
+    ] {
+        assert!(
+            harness.query_by_label(label).is_none(),
+            "{label} must not appear for an unknown host"
+        );
+    }
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Restore known config")
+        .is_none());
 }
 
 #[test]

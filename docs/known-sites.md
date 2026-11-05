@@ -6,10 +6,21 @@ passed. The entries are typed constants in
 `crates/core/src/acquisition/known_sites.rs` and ship inside the binary, so a
 wrong entry is fixed by a release rather than a migration.
 
-The registry is a convenience. Typing a known URL in the portal form shows
-"Known site: <name> (<provider>) - verified <date>" and offers the config; it
-never overrides an edit, and the provider and config fields always remain
-editable for hosts the registry does not know.
+The registry is a convenience, never a gate. In the app:
+
+- **Choosing a site.** **Add portal** opens a chooser listing every entry with
+  its provider and verification date; **Other site** opens the blank form. The
+  entries are sorted by name and their notes are on hover.
+- **Attribution.** A URL that matches an entry shows
+  `Known site: <name> (<provider>) - verified <date>` in the add and edit forms.
+  An unverified entry says `- unverified`.
+- **Editing and restoring.** The user can change anything. When the saved config
+  differs from the entry, the form says `Modified from the known config.` and
+  offers **Restore known config**, which rewrites the provider, domain, and
+  config from the entry. Whitespace and key order are not edits.
+
+The provider and config fields always remain editable, and hosts the registry
+does not know use the same form with no attribution.
 
 ## Entries
 
@@ -88,6 +99,8 @@ run; only the first step differs.
    instead of silently returning zero jobs.
 4. Add the docs row above with the caps and any block or rate limit observed.
 5. Run the registry check, then commit `verified_at` and the date in this table.
+   The entry appears in the add-flow chooser automatically; there is no separate
+   UI registration.
 
 **No engine can** (the NVIDIA case):
 

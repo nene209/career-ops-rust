@@ -852,10 +852,17 @@ fn choose_site_modal(ui: &mut Ui) -> Option<SiteChoice> {
             ui.add_space(4.0);
 
             for site in known_sites_by_name() {
-                if ui.button(site.label()).clicked() {
+                // Names and dates are visible; the notes would crowd the list
+                // as the registry grows, so they live on hover.
+                let response = ui.button(site.label());
+                let response = if site.notes.is_empty() {
+                    response
+                } else {
+                    response.on_hover_text(site.notes)
+                };
+                if response.clicked() {
                     choice = Some(SiteChoice::Known(site));
                 }
-                ui.label(RichText::new(site.notes).weak().small());
             }
 
             ui.separator();
@@ -918,8 +925,18 @@ fn portal_form_modal(
                         .weak()
                         .small(),
                 );
-                if !form.matches_known_site(site) && ui.button("Use known config").clicked() {
-                    form.apply_known_site(site);
+                // The action is the same call the URL prefill makes, so it
+                // restores exactly what the registry ships. A config that only
+                // differs in whitespace or key order still matches.
+                if !form.matches_known_site(site) {
+                    ui.label(
+                        RichText::new("Modified from the known config.")
+                            .weak()
+                            .small(),
+                    );
+                    if ui.button("Restore known config").clicked() {
+                        form.apply_known_site(site);
+                    }
                 }
             }
 
@@ -1453,5 +1470,38 @@ mod tests {
 
             assert_eq!(chosen, typed.data(), "{}", site.name);
         }
+    }
+
+    #[test]
+    fn a_reformatted_known_config_is_not_modified() {
+        let site = &known_sites::WAYMO;
+        let minified = serde_json::to_string(
+            &serde_json::from_str::<serde_json::Value>(site.config).expect("entry json"),
+        )
+        .expect("minify");
+
+        let form = PortalForm {
+            url: site.url(),
+            scraper_config: minified,
+            ..Default::default()
+        };
+
+        assert!(
+            form.matches_known_site(site),
+            "whitespace and key order are not edits"
+        );
+    }
+
+    #[test]
+    fn changing_a_known_value_is_modified() {
+        let site = &known_sites::NVIDIA;
+        let form = PortalForm {
+            url: site.url(),
+            provider: Provider::Eightfold,
+            domain: "example.com".into(),
+            ..Default::default()
+        };
+
+        assert!(!form.matches_known_site(site));
     }
 }
