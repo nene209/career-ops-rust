@@ -1711,6 +1711,24 @@ mod tests {
         ));
     }
 
+    /// The add flow starts with the embedded registry. An app test, not only a
+    /// screen test, because the initial state is set by an action handler.
+    #[test]
+    fn open_add_opens_the_known_site_chooser() {
+        let (mut app, _dir) = test_app();
+
+        app.handle_portals_action(PortalsAction::OpenAdd);
+
+        assert!(
+            matches!(&app.portals_view.modal, Some(PortalModal::ChooseSite)),
+            "the add flow starts with the registry, not a blank form"
+        );
+        assert!(app.portals_view.form().is_none());
+
+        app.handle_portals_action(PortalsAction::CloseModal);
+        assert!(app.portals_view.modal.is_none());
+    }
+
     #[test]
     fn pipeline_set_filter_only_mutates_the_view_model() {
         let (mut app, _dir) = test_app();

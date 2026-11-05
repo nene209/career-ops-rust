@@ -105,8 +105,8 @@ otherwise.
 | # | Step | Expected |
 | :-- | :--- | :--- |
 | 4.1 | Select **Portals** in the sidebar. | Empty state "No portals configured yet" with **Add your first portal**; header shows "Sidecar: Not started". |
-| 4.2 | Click **Add portal** and enter `not a url` in the URL field. | "Enter a valid http(s) URL." appears under the field and **Save portal** is disabled. |
-| 4.2a | Close the dialog and click **Add portal**. | A chooser lists every known site with its provider and verification date (NVIDIA before Waymo, alphabetically), each with an explanatory hover text, plus **Other site** and **Cancel**. Nothing is typed to see them. |
+| 4.2 | Click **Add portal**, choose **Other site**, and enter `not a url` in the URL field. | "Enter a valid http(s) URL." appears under the field and **Save portal** is disabled. |
+| 4.2a | Cancel the dialog and click **Add portal**. | A chooser lists every known site with its provider and verification date (NVIDIA before Waymo, alphabetically), each with an explanatory hover text, plus **Other site** and **Cancel**. Nothing is typed to see them. |
 | 4.3 | Choose **Other site**, enter a company name and a real job-board URL, keep **Static (Tier 1)**, save. | The modal closes and the row appears with "Never fetched". |
 | 4.3a | Click **Add portal** and choose **NVIDIA (Eightfold) - verified <date>** from the list. | The add form opens with the URL, company name, provider, and domain already filled, and "Known site: NVIDIA (Eightfold) - verified <date>" above the provider selector. It is the same form typing the URL produces. |
 | 4.3b | For a career page with no JSON-LD that the registry does not know, paste its selector config into **Scraper config (JSON, optional)** before saving. | Invalid JSON shows "Scraper config is not valid JSON." under the field and disables **Save portal**. With valid JSON the portal saves, `Fetch` returns jobs, and the row becomes Healthy with tier HTML. |

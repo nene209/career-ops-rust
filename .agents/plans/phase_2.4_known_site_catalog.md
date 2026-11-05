@@ -1,7 +1,8 @@
 # Phase 2.4: Known-Site Catalog — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.9), §12
-**Status:** In progress — WS1–WS2 complete; WS3 not started
+**Status:** Complete — retrospective recorded in
+`.agents/plans/phase_2.4_retrospective.md`
 **Last updated:** 2026-11-03
 **Duration:** 1–2 days
 **Depends on:** Phase 2.3 (registry, `apply_known_site`, prefill, provider combo)
@@ -16,6 +17,7 @@
 | v0.1 | Initial plan. Phase 2.3 ships an embedded registry and working prefill, but the only way to reach either is to type a URL the app already knows. This phase makes the registry discoverable: a chooser in the add flow, an "based on" attribution in the form, and a visible restore action. No storage change, no migration, no new dependency. |
 | v0.2 | Workstream 1 implemented: `KnownSite::url()` in core, `PortalsView::{open_add, open_blank_add, choose_known_site}`, `PortalModal::ChooseSite`, and the chooser rendering. `OpenAdd` now opens the list instead of a blank form. Attribution and restore are unchanged until WS2. |
 | v0.3 | Workstream 2 implemented: the chooser's notes moved to hover text, **Use known config** renamed to **Restore known config**, and a `Modified from the known config.` marker added when the form diverges from the entry. The marker and the action share `matches_known_site`, so whitespace and key order never count as edits. |
+| v0.4 | Workstream 3 implemented: an app-level test for the `OpenAdd` transition, the manual script and `docs/known-sites.md` updated alongside WS2, the full offline suite re-run, and the retrospective recorded. Phase complete. |
 
 ---
 
@@ -291,6 +293,16 @@ something to remove.
 6. Full validation: `cargo fmt --all --check`,
    `cargo clippy --workspace --all-targets --offline -- -D warnings`,
    `cargo test --workspace --features career-ops-app/keychain --offline -- --skip obscura`.
+
+**Implementation note (2026-11-03).** The docs landed with the workstreams they
+describe rather than at the end: the manual script's chooser steps came with WS1,
+and the restore wording with WS2, because a stale script is worse than a missing
+one. WS3 added the app-level transition test
+(`open_add_opens_the_known_site_chooser`), re-ran the full suite, and recorded the
+retrospective.
+
+No new test needs a network. The registry is a constant, the chooser is a view
+over it, and every assertion is either a form inspection or a rendered modal.
 
 ---
 
