@@ -48,10 +48,26 @@ pub fn extract(html: &str, source_url: &Url, company_name: &str) -> Option<Vec<N
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("{source_url}#{title}"));
 
+            // The caller's company name is a label (a portal name, or "Manual"
+            // for a single fetched posting). The page's own organization is
+            // more accurate when the caller had nothing to offer.
+            let organization = item
+                .get("hiringOrganization")
+                .and_then(|org| org.get("name"))
+                .and_then(|name| name.as_str())
+                .map(str::trim)
+                .filter(|name| !name.is_empty());
+            let company =
+                if company_name.trim().is_empty() || company_name.eq_ignore_ascii_case("manual") {
+                    organization.unwrap_or(company_name).to_string()
+                } else {
+                    company_name.to_string()
+                };
+
             jobs.push(NormalizedJob {
                 external_id,
                 title,
-                company: company_name.to_string(),
+                company,
                 location: item
                     .get("jobLocation")
                     .and_then(|l| l.get("address"))
@@ -79,5 +95,37 @@ pub fn extract(html: &str, source_url: &Url, company_name: &str) -> Option<Vec<N
         None
     } else {
         Some(jobs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NVIDIA_POSTING: &str = r#"<script type="application/ld+json">
+        {
+          "@type": "JobPosting",
+          "title": "Engineer",
+          "description": "<p>Build things.</p>",
+          "hiringOrganization": { "name": "NVIDIA" }
+        }
+    </script>"#;
+
+    #[test]
+    fn a_manual_fetch_takes_the_company_from_the_page() {
+        let url = Url::parse("https://jobs.example.com/1").expect("url");
+
+        let jobs = extract(NVIDIA_POSTING, &url, "Manual").expect("jobs");
+
+        assert_eq!(jobs[0].company, "NVIDIA");
+    }
+
+    #[test]
+    fn a_portal_name_is_not_overridden_by_the_page() {
+        let url = Url::parse("https://jobs.example.com/1").expect("url");
+
+        let jobs = extract(NVIDIA_POSTING, &url, "NVIDIA Careers").expect("jobs");
+
+        assert_eq!(jobs[0].company, "NVIDIA Careers");
     }
 }

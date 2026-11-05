@@ -47,7 +47,36 @@ pub async fn open(data_dir: impl AsRef<Path>, dek: &[u8; 32]) -> Result<SqlitePo
     // enforcing the append-only rule at runtime.
     sqlx::migrate!("./migrations").run(&pool).await?;
 
+    backfill_canonical_urls(&pool).await?;
+
     Ok(pool)
+}
+
+/// Fill `canonical_url` for rows written before Phase 2.5.
+///
+/// Idempotent and bounded: only rows where the column is NULL are touched, so a
+/// reopened database does one indexed lookup and no writes. A URL that cannot
+/// be parsed falls back to its raw form, so every row is covered by the
+/// identity indexes.
+async fn backfill_canonical_urls(pool: &SqlitePool) -> Result<()> {
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, source_url FROM job_descriptions WHERE canonical_url IS NULL")
+            .fetch_all(pool)
+            .await?;
+
+    for (id, source_url) in rows {
+        let canonical = url::Url::parse(&source_url)
+            .map(|url| crate::acquisition::identity::canonical_url(&url))
+            .unwrap_or_else(|_| source_url.clone());
+
+        sqlx::query("UPDATE job_descriptions SET canonical_url = ? WHERE id = ?")
+            .bind(canonical)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+
+    Ok(())
 }
 
 /// Create a fresh encrypted database and run migrations.

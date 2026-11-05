@@ -1,16 +1,28 @@
 //! Job descriptions — the acquisition pipeline's destination.
 //!
-//! Deduplication is the load-bearing behaviour. The lookup order is:
+//! Deduplication is the load-bearing behaviour. A row is identified by its
+//! **canonical URL** (`acquisition::identity`) plus the provider's id, so two
+//! extractions of the same posting meet even when one carries tracking
+//! parameters and the other does not. The lookup order is:
 //!
-//! 1. `(source_url, external_id)` — the source's own stable identifier.
-//! 2. `(source_url, content_hash)` — catches reposts under a new external_id
+//! 1. The provider-scoped `external_id` alone (`eightfold:{domain}:{id}`) — it
+//!    is unique within its engine, so a renamed URL slug still finds the row.
+//! 2. `(canonical_url, external_id)` — the source's own stable identifier.
+//! 3. `(canonical_url, content_hash)` — catches reposts under a new external id
 //!    with identical title, company, and body.
-//! 3. `(source_url, title, company)` — fallback for entries with no
-//!    external_id (manual entries, some HTML extractions).
+//! 4. `(canonical_url, title, company)` — the same URL with the same title and
+//!    company is the same posting, whether or not an external id is present.
+//!    (The earlier rule excluded the external-id case, which let a second
+//!    extraction of one posting insert a duplicate.)
 //!
 //! The `content_hash` column was added during Phase 1 to implement the
 //! "content-aware deduplication" requirement from the Phase 2 plan. It is
 //! computed by this module, not provided by callers.
+//!
+//! **Update policy:** a re-fetch never degrades a row. Empty text, or text that
+//! is a strict prefix of the stored description (a site truncating its own
+//! teaser), keeps the stored text; the hash is recomputed from what is stored.
+//! An explicit refresh may replace it.
 //!
 //! **Preservation note:** when a row is found by content hash with a
 //! *different* external_id, the existing row's `external_id` is preserved
@@ -20,7 +32,9 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
+use url::Url;
 
+use crate::acquisition::identity;
 use crate::error::{CoreError, Result};
 use crate::model::{FetchTier, JobDescription};
 
@@ -45,14 +59,51 @@ pub struct NewJobDescription {
 /// different hash, which is the conservative choice: an edited posting is
 /// treated as a new posting rather than silently overwriting the old one.
 fn hash_job(input: &NewJobDescription) -> String {
-    let mut combined =
-        String::with_capacity(input.title.len() + input.company.len() + input.raw_text.len() + 2);
-    combined.push_str(&input.title);
+    hash_parts(&input.title, &input.company, &input.raw_text)
+}
+
+fn hash_parts(title: &str, company: &str, raw_text: &str) -> String {
+    let mut combined = String::with_capacity(title.len() + company.len() + raw_text.len() + 2);
+    combined.push_str(title);
     combined.push('\n');
-    combined.push_str(&input.company);
+    combined.push_str(company);
     combined.push('\n');
-    combined.push_str(&input.raw_text);
+    combined.push_str(raw_text);
     content_hash(&combined)
+}
+
+/// The comparison form of a stored URL. Unparsable values fall back to the raw
+/// string so a row is still covered by the identity indexes.
+fn canonical_url_of(source_url: &str) -> String {
+    Url::parse(source_url)
+        .map(|url| identity::canonical_url(&url))
+        .unwrap_or_else(|_| source_url.to_string())
+}
+
+/// Choose the text to store when an existing row is updated.
+///
+/// A re-fetch that produced nothing, or a card teaser that is a strict prefix
+/// of the stored description, must not degrade a row. A genuinely different
+/// text replaces the old one; only an explicit refresh can replace a longer
+/// text with a shorter unrelated one.
+fn merge_raw_text(existing: &str, incoming: &str) -> String {
+    let incoming = incoming.trim();
+    if incoming.is_empty() {
+        return existing.to_string();
+    }
+
+    let existing = existing.trim();
+    if incoming.len() < existing.len() && existing.starts_with(incoming) {
+        return existing.to_string();
+    }
+
+    incoming.to_string()
+}
+
+/// Provider ids are globally unique within their engine (`eightfold:{domain}:{id}`),
+/// so they identify a posting even when the site renames its URL slug.
+fn is_provider_scoped_id(external_id: &str) -> bool {
+    external_id.starts_with("eightfold:")
 }
 
 pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<JobDescription>> {
@@ -76,23 +127,24 @@ pub async fn list_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<JobDescrip
 /// Insert a new job description, or update the existing row if one matches
 /// by the dedup rule. Returns the row that ends up in the database.
 pub async fn upsert(pool: &SqlitePool, input: NewJobDescription) -> Result<JobDescription> {
+    let canonical = canonical_url_of(&input.source_url);
     let hash = hash_job(&input);
 
-    if let Some(existing) = find_existing(pool, &input, &hash).await? {
-        return update(pool, existing.id, input, &hash).await;
+    if let Some(existing) = find_existing(pool, &input, &canonical, &hash).await? {
+        return update(pool, existing.id, &existing.raw_text, input, &canonical).await;
     }
 
-    match insert(pool, input.clone(), &hash).await {
+    match insert(pool, input.clone(), &canonical, &hash).await {
         Ok(row) => Ok(row),
         Err(CoreError::Database(e)) if is_unique_violation(&e) => {
             // Lost a race against a concurrent insert, or hit one of the two
             // unique indexes in an unexpected way. Re-read and update.
-            let existing = find_existing(pool, &input, &hash)
+            let existing = find_existing(pool, &input, &canonical, &hash)
                 .await?
                 .ok_or(CoreError::Internal(
                     "upsert: unique violation but no existing row found",
                 ))?;
-            update(pool, existing.id, input, &hash).await
+            update(pool, existing.id, &existing.raw_text, input, &canonical).await
         }
         Err(e) => Err(e),
     }
@@ -101,14 +153,34 @@ pub async fn upsert(pool: &SqlitePool, input: NewJobDescription) -> Result<JobDe
 async fn find_existing(
     pool: &SqlitePool,
     input: &NewJobDescription,
+    canonical: &str,
     hash: &str,
 ) -> Result<Option<JobDescription>> {
-    // 1. Primary: external_id if present.
+    // 0. Primary for provider-scoped ids: the id alone. An Eightfold position
+    //    keeps its id when the site renames the URL, so comparing the URL
+    //    first would create a second row for the same posting.
+    if let Some(ext) = &input.external_id {
+        if is_provider_scoped_id(ext) {
+            let row = sqlx::query_as::<_, JobDescription>(
+                "SELECT * FROM job_descriptions WHERE external_id = ? ORDER BY id ASC LIMIT 1",
+            )
+            .bind(ext)
+            .fetch_optional(pool)
+            .await?;
+            if row.is_some() {
+                return Ok(row);
+            }
+        }
+    }
+
+    // 1. The provider's own identity within one canonical URL.
     if let Some(ext) = &input.external_id {
         let row = sqlx::query_as::<_, JobDescription>(
-            "SELECT * FROM job_descriptions WHERE source_url = ? AND external_id = ?",
+            "SELECT * FROM job_descriptions
+             WHERE canonical_url = ? AND external_id = ?
+             ORDER BY id ASC LIMIT 1",
         )
-        .bind(&input.source_url)
+        .bind(canonical)
         .bind(ext)
         .fetch_optional(pool)
         .await?;
@@ -117,13 +189,13 @@ async fn find_existing(
         }
     }
 
-    // 2. Secondary: content hash catches reposts under new external_ids.
+    // 2. Content hash: a repost under a new external id.
     let by_hash = sqlx::query_as::<_, JobDescription>(
         "SELECT * FROM job_descriptions
-         WHERE source_url = ? AND content_hash = ?
+         WHERE canonical_url = ? AND content_hash = ?
          LIMIT 1",
     )
-    .bind(&input.source_url)
+    .bind(canonical)
     .bind(hash)
     .fetch_optional(pool)
     .await?;
@@ -131,35 +203,41 @@ async fn find_existing(
         return Ok(by_hash);
     }
 
-    // 3. Fallback: title/company for entries with no external_id.
-    if input.external_id.is_none() {
-        let row = sqlx::query_as::<_, JobDescription>(
-            "SELECT * FROM job_descriptions
-             WHERE source_url = ? AND title = ? AND company = ? AND external_id IS NULL
-             ORDER BY id ASC LIMIT 1",
-        )
-        .bind(&input.source_url)
-        .bind(&input.title)
-        .bind(&input.company)
-        .fetch_optional(pool)
-        .await?;
-        return Ok(row);
-    }
-
-    Ok(None)
+    // 3. Title and company at the same URL, whether or not an external id is
+    //    present. The same URL with the same title and company is the same
+    //    posting; this is the rule that catches a second extraction whose
+    //    external id differs from the first one.
+    let row = sqlx::query_as::<_, JobDescription>(
+        "SELECT * FROM job_descriptions
+         WHERE canonical_url = ? AND title = ? AND company = ?
+         ORDER BY id ASC LIMIT 1",
+    )
+    .bind(canonical)
+    .bind(&input.title)
+    .bind(&input.company)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
-async fn insert(pool: &SqlitePool, input: NewJobDescription, hash: &str) -> Result<JobDescription> {
+async fn insert(
+    pool: &SqlitePool,
+    input: NewJobDescription,
+    canonical: &str,
+    hash: &str,
+) -> Result<JobDescription> {
     let now: DateTime<Utc> = Utc::now();
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO job_descriptions
-         (title, company, source_url, raw_text, fetched_at, fetch_tier, external_id, content_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         (title, company, source_url, canonical_url, raw_text, fetched_at, fetch_tier,
+          external_id, content_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING id",
     )
     .bind(&input.title)
     .bind(&input.company)
     .bind(&input.source_url)
+    .bind(canonical)
     .bind(&input.raw_text)
     .bind(now)
     .bind(input.fetch_tier.as_str())
@@ -176,25 +254,32 @@ async fn insert(pool: &SqlitePool, input: NewJobDescription, hash: &str) -> Resu
 async fn update(
     pool: &SqlitePool,
     id: i64,
+    previous_text: &str,
     input: NewJobDescription,
-    hash: &str,
+    canonical: &str,
 ) -> Result<JobDescription> {
     // external_id is deliberately NOT updated. If this row was found by
     // content hash with a different external_id, the original is preserved
     // to keep downstream references stable.
+    //
+    // `source_url` is not updated either: it is the user-facing address the
+    // row was first seen at, and a renamed slug should not rewrite history.
+    let raw_text = merge_raw_text(previous_text, &input.raw_text);
+    let hash = hash_parts(&input.title, &input.company, &raw_text);
     let now: DateTime<Utc> = Utc::now();
     sqlx::query(
         "UPDATE job_descriptions
          SET title = ?, company = ?, raw_text = ?, fetched_at = ?,
-             fetch_tier = ?, content_hash = ?
+             fetch_tier = ?, content_hash = ?, canonical_url = ?
          WHERE id = ?",
     )
     .bind(&input.title)
     .bind(&input.company)
-    .bind(&input.raw_text)
+    .bind(&raw_text)
     .bind(now)
     .bind(input.fetch_tier.as_str())
-    .bind(hash)
+    .bind(&hash)
+    .bind(canonical)
     .bind(id)
     .execute(pool)
     .await?;

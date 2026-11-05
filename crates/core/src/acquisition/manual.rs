@@ -13,13 +13,18 @@
 //!
 //! ## Deduplication
 //!
-//! `job_descriptions::upsert` dedups by `(source_url, external_id)`,
-//! then by `(source_url, content_hash)`, then by
-//! `(source_url, title, company)`.
+//! `job_descriptions::upsert` identifies a posting by its canonical URL and
+//! the provider's id: first the provider-scoped `external_id`, then
+//! `(canonical_url, external_id)`, then `(canonical_url, content_hash)`, then
+//! `(canonical_url, title, company)`. Tracking parameters and a trailing slash
+//! are not significant.
 //!
 //! - A **URL fetch** uses the real job URL as `source_url`. If the same
 //!   job was previously fetched via a portal, the existing row is
 //!   updated — one row, not two.
+//! - The URL fetch resolves the host through the user's portals and the
+//!   embedded registry first, so a known provider produces the same identity
+//!   (and a description) the portal path would.
 //! - A **paste** uses a synthetic `manual://` URL. If the same job was
 //!   previously fetched via a portal, two rows exist, because the URLs
 //!   differ. That is deliberate: the user pasted it for a reason, and
@@ -34,13 +39,16 @@ use sqlx::SqlitePool;
 use url::Url;
 
 use super::ats::{self, NormalizedJob};
+use super::config::{EightfoldConfig, ScraperConfig};
+use super::eightfold;
 use super::error::AtsError;
 use super::html;
+use super::known_sites;
 use super::router::FetchSource;
 use crate::backend::BrowserBackend;
 use crate::error::{CoreError, Result};
 use crate::model::{FetchTier, JobDescription};
-use crate::repo::{content_hash, job_descriptions};
+use crate::repo::{content_hash, job_descriptions, portals as portal_repo};
 
 /// Result of a manual URL fetch.
 #[derive(Debug)]
@@ -70,6 +78,34 @@ pub async fn add_job_from_url(
     browser: Option<&dyn BrowserBackend>,
 ) -> Result<ManualFetchResult> {
     let url = Url::parse(url_str).map_err(|e| CoreError::Message(format!("invalid url: {e}")))?;
+
+    // The app may already know this host: a portal the user configured, or an
+    // embedded known site. Using that provider keeps the identity and the
+    // description the portal path would produce, so adding a posting that a
+    // portal already fetched updates that row instead of creating a duplicate.
+    if let Some(target) = known_target(pool, &url).await {
+        match target.config {
+            ScraperConfig::Selectors(config) => {
+                // Use the known config when it produces a posting. If it does
+                // not, fall through rather than returning: the generic path can
+                // still try JSON-LD and Tier 2, which is what it did before
+                // this branch existed.
+                if let Ok(report) = source
+                    .fetch_html(&url, &target.company, Some(&config))
+                    .await
+                {
+                    if let Some(job) = pick_job_for_url(&report.jobs, &url)
+                        .or_else(|| report.jobs.first().cloned())
+                    {
+                        return store_one(pool, job, FetchTier::Tier1bHtml, Vec::new()).await;
+                    }
+                }
+            }
+            ScraperConfig::Eightfold(config) => {
+                return add_eightfold_job(pool, &url, &target.company, &config, source).await;
+            }
+        }
+    }
 
     let adapters = ats::adapters();
     let mut warnings = Vec::new();
@@ -207,6 +243,121 @@ pub async fn add_job_from_text(
 
 /// Pick the job whose URL best matches `target`.
 ///
+/// The company name and provider config for a URL the app already knows.
+struct KnownTarget {
+    company: String,
+    config: ScraperConfig,
+}
+
+/// Resolve a URL against the user's portals first, then the embedded registry.
+///
+/// A portal is the user's own configuration and wins over the shipped entry.
+/// A selectors config with no list selector has nothing to contribute to a
+/// single-posting fetch, so it is ignored and the ATS/generic paths handle the
+/// board as before.
+async fn known_target(pool: &SqlitePool, url: &Url) -> Option<KnownTarget> {
+    let mut best: Option<(usize, KnownTarget)> = None;
+
+    if let Ok(portals) = portal_repo::list(pool).await {
+        for portal in portals {
+            let Ok(portal_url) = Url::parse(&portal.url) else {
+                continue;
+            };
+            if portal_url.host_str() != url.host_str() {
+                continue;
+            }
+
+            let Some(config) = portal
+                .scraper_config
+                .as_deref()
+                .and_then(|raw| ScraperConfig::parse(raw).ok())
+            else {
+                continue;
+            };
+            if matches!(&config, ScraperConfig::Selectors(selectors) if selectors.list.is_none()) {
+                continue;
+            }
+
+            // A list config describes the board page, not a posting page. Using
+            // it on a pasted posting URL would extract (and store) the wrong
+            // job, so a selectors portal only applies to its own page.
+            let same_page =
+                url.path().trim_end_matches('/') == portal_url.path().trim_end_matches('/');
+            if matches!(&config, ScraperConfig::Selectors(_)) && !same_page {
+                continue;
+            }
+
+            // One host can serve several boards. The portal whose path is the
+            // longest prefix of the target wins, so `/careers` and `/jobs`
+            // keep their own configs.
+            let score = if url.path().starts_with(portal_url.path()) {
+                portal_url.path().len()
+            } else {
+                0
+            };
+            let best_score = best.as_ref().map_or(0, |(score, _)| *score);
+            if best.is_none() || score > best_score {
+                best = Some((
+                    score,
+                    KnownTarget {
+                        company: portal.company_name,
+                        config,
+                    },
+                ));
+            }
+        }
+    }
+
+    if let Some((_, target)) = best {
+        return Some(target);
+    }
+
+    let site = known_sites::lookup(url)?;
+    let config = ScraperConfig::parse(site.config).ok()?;
+    Some(KnownTarget {
+        company: site.name.to_string(),
+        config,
+    })
+}
+
+/// Fetch one Eightfold posting through the provider's detail endpoint.
+///
+/// The position id is in the URL, so there is no need to page through the
+/// board. The result carries the same `external_id` the list path assigns,
+/// which is what lets the store step update an existing row.
+async fn add_eightfold_job(
+    pool: &SqlitePool,
+    url: &Url,
+    company: &str,
+    config: &EightfoldConfig,
+    source: &dyn FetchSource,
+) -> Result<ManualFetchResult> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| CoreError::Message("the URL has no host".into()))?;
+
+    let position_id = eightfold::position_id_from_url(url).ok_or_else(|| {
+        CoreError::Message(format!(
+            "could not find a posting id in {url}; open the posting from its board first"
+        ))
+    })?;
+
+    let detail_url = eightfold::detail_url_for(host, &config.domain, &position_id)
+        .ok_or_else(|| CoreError::Message("could not build the Eightfold detail URL".into()))?;
+
+    let body = source
+        .fetch_page(&detail_url)
+        .await
+        .map_err(|e| CoreError::Message(format!("fetch failed: {e}")))?;
+
+    let job =
+        eightfold::job_from_detail_body(&body, company, &config.domain, url).ok_or_else(|| {
+            CoreError::Message("the Eightfold detail response did not contain a posting".into())
+        })?;
+
+    store_one(pool, job, FetchTier::Tier1aAts, Vec::new()).await
+}
+
 /// Exact match first, then path match. The path fallback handles URLs
 /// with tracking parameters (`?utm_source=...`) that differ from the
 /// canonical job URL but share the path.

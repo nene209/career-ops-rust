@@ -309,3 +309,159 @@ async fn paste_does_not_merge_into_portal_fetched_row() {
 
     db.close().await;
 }
+
+// -----------------------------------------------------------------
+// Known sites
+// -----------------------------------------------------------------
+
+/// The detail response NVIDIA's `pcsx` endpoint returns for one position.
+const NVIDIA_DETAIL: &str = r#"{
+  "status": 200,
+  "data": {
+    "id": 893394864453,
+    "name": "Senior Network Product Engineer",
+    "publicUrl": "https://jobs.nvidia.com/careers/job/893394864453",
+    "department": "Engineer, Product Development",
+    "locations": ["Remote - Vietnam"],
+    "efcustomTextTimeType": ["Full time"],
+    "jobDescription": "<p>Build the network stack.</p>"
+  }
+}"#;
+
+/// A known Eightfold posting is fetched through the provider, not through the
+/// generic HTML path. That is what lets the row carry the same id the portal
+/// fetch produced.
+#[tokio::test]
+async fn url_fetch_of_a_known_eightfold_posting_uses_the_provider() {
+    let db = common::TestDb::new_raw().await;
+    let source = Arc::new(
+        MockFetchSource::default()
+            .pages([Ok(NVIDIA_DETAIL.to_string()), Ok(NVIDIA_DETAIL.to_string())]),
+    );
+
+    let url = "https://jobs.nvidia.com/careers/job/893394864453";
+    let first = manual::add_job_from_url(&db.pool, url, source.as_ref(), None)
+        .await
+        .expect("add_job_from_url");
+
+    assert_eq!(first.tier, FetchTier::Tier1aAts);
+    assert_eq!(
+        first.stored.external_id.as_deref(),
+        Some("eightfold:nvidia.com:893394864453")
+    );
+    assert_eq!(first.stored.company, "NVIDIA");
+    assert!(first.stored.raw_text.contains("network stack"));
+    assert_eq!(source.page_calls().len(), 1, "one detail request");
+    assert!(
+        source.html_calls().is_empty(),
+        "the provider path must not fetch HTML"
+    );
+
+    // Adding the same posting again updates the row instead of inserting.
+    let second = manual::add_job_from_url(&db.pool, url, source.as_ref(), None)
+        .await
+        .expect("second add");
+    assert_eq!(second.stored.id, first.stored.id);
+    assert_eq!(count_jobs(&db.pool).await, 1);
+
+    db.close().await;
+}
+
+/// A known selectors site is fetched with its embedded config.
+#[tokio::test]
+async fn url_fetch_of_a_known_site_uses_its_selector_config() {
+    let db = common::TestDb::new_raw().await;
+    let source = Arc::new(MockFetchSource::with_html(Ok(vec![sample_job("waymo")])));
+
+    let url = "https://careers.withwaymo.com/jobs/search";
+    manual::add_job_from_url(&db.pool, url, source.as_ref(), None)
+        .await
+        .expect("add_job_from_url");
+
+    assert_eq!(source.html_calls(), vec![url.to_string()]);
+    assert!(
+        source.ats_calls().is_empty(),
+        "a known site is not an ATS board"
+    );
+    assert_eq!(count_jobs(&db.pool).await, 1);
+
+    db.close().await;
+}
+
+/// A URL on a host the user configured as a portal uses that portal's
+/// provider, even though the registry does not know the site.
+#[tokio::test]
+async fn url_fetch_uses_a_configured_portal_for_the_host() {
+    let db = common::TestDb::new_raw().await;
+
+    portals::create(
+        &db.pool,
+        NewPortal {
+            company_name: "Acme".into(),
+            url: "https://careers.acme.example/careers".into(),
+            render_mode: RenderMode::Static,
+            scraper_config: Some(serde_json::json!({
+                "provider": "eightfold",
+                "domain": "acme.com"
+            })),
+        },
+    )
+    .await
+    .expect("portal");
+
+    let detail = r#"{
+      "status": 200,
+      "data": {
+        "id": 7,
+        "name": "Platform Engineer",
+        "department": "Engineering",
+        "locations": ["Remote"],
+        "jobDescription": "<p>Run the platform.</p>"
+      }
+    }"#;
+    let source = Arc::new(MockFetchSource::default().pages([Ok(detail.to_string())]));
+
+    let result = manual::add_job_from_url(
+        &db.pool,
+        "https://careers.acme.example/careers/job/7",
+        source.as_ref(),
+        None,
+    )
+    .await
+    .expect("add_job_from_url");
+
+    assert_eq!(result.stored.company, "Acme");
+    assert_eq!(
+        result.stored.external_id.as_deref(),
+        Some("eightfold:acme.com:7")
+    );
+    assert_eq!(
+        result.stored.source_url, "https://careers.acme.example/careers/job/7",
+        "the pasted URL is the fallback when the detail has no public URL"
+    );
+    assert_eq!(source.page_calls().len(), 1);
+    assert!(source.html_calls().is_empty());
+
+    db.close().await;
+}
+
+/// A URL that is not a known site still goes through the old chain.
+#[tokio::test]
+async fn an_unknown_host_still_uses_the_generic_path() {
+    let db = common::TestDb::new_raw().await;
+    let source = Arc::new(MockFetchSource::with_html(Ok(vec![sample_job("only")])));
+
+    manual::add_job_from_url(
+        &db.pool,
+        "https://example.com/careers/senior-engineer",
+        source.as_ref(),
+        None,
+    )
+    .await
+    .expect("add_job_from_url");
+
+    assert_eq!(source.html_calls().len(), 1);
+    assert!(source.page_calls().is_empty(), "no provider detail request");
+
+    db.close().await;
+}

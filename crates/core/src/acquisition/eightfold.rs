@@ -81,12 +81,36 @@ struct DetailEnvelope {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DetailPage {
+    #[serde(default, deserialize_with = "deserialize_optional_id")]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    public_url: Option<String>,
+    #[serde(default)]
+    locations: Vec<String>,
     #[serde(default)]
     job_description: Option<String>,
     #[serde(default)]
     department: Option<String>,
     #[serde(default)]
     efcustom_text_time_type: Vec<String>,
+}
+
+/// Accept the optional id as a number or a string, or as nothing at all.
+fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => Ok(Some(number.to_string())),
+        Some(serde_json::Value::String(text)) => Ok(Some(text)),
+        Some(other) => Err(de::Error::custom(format!(
+            "eightfold position id must be a number or a string, got {other}"
+        ))),
+    }
 }
 
 /// Accept the id as a number (NVIDIA) or a string (other Eightfold sites).
@@ -160,6 +184,12 @@ pub fn normalize(
 pub fn detail_url(host: &str, domain: &str, job: &NormalizedJob) -> Option<Url> {
     let prefix = format!("eightfold:{domain}:");
     let position_id = job.external_id.strip_prefix(&prefix)?;
+    detail_url_for(host, domain, position_id)
+}
+
+/// The detail endpoint for a position id. Used when the id came from a URL
+/// rather than from a list row.
+pub fn detail_url_for(host: &str, domain: &str, position_id: &str) -> Option<Url> {
     if position_id.is_empty() {
         return None;
     }
@@ -170,6 +200,77 @@ pub fn detail_url(host: &str, domain: &str, job: &NormalizedJob) -> Option<Url> 
         .append_pair("domain", domain)
         .append_pair("hl", "en");
     Some(url)
+}
+
+/// The numeric (or string) position id embedded in an Eightfold posting URL.
+///
+/// Registry URLs look like `/careers/job/{id}`; a slugged URL looks like
+/// `/careers/job/{id}/some-title`. The segment after `job` wins, and an
+/// all-digit trailing segment is the fallback.
+pub fn position_id_from_url(url: &Url) -> Option<String> {
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+
+    if let Some(window) = segments.windows(2).find(|pair| pair[0] == "job") {
+        let candidate = window[1];
+        if !candidate.is_empty() {
+            return Some(candidate.to_string());
+        }
+    }
+
+    segments
+        .iter()
+        .rev()
+        .find(|segment| segment.chars().all(|c| c.is_ascii_digit()))
+        .map(|segment| segment.to_string())
+}
+
+/// Build a complete posting from a detail response.
+///
+/// The list carries the same fields, but a single manual add does not have the
+/// list row. The detail response is enough: id, name, public URL, locations,
+/// department, employment type, and the description.
+pub fn job_from_detail_body(
+    body: &str,
+    company: &str,
+    domain: &str,
+    fallback_url: &Url,
+) -> Option<NormalizedJob> {
+    let envelope: DetailEnvelope = serde_json::from_str(body).ok()?;
+    if envelope.status.is_some_and(|status| status != 200) {
+        return None;
+    }
+
+    let data = envelope.data;
+    let id = data.id?;
+    let title = data.name?.trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+
+    let source_url = data
+        .public_url
+        .as_deref()
+        .and_then(|raw| Url::parse(raw.trim()).ok())
+        .unwrap_or_else(|| fallback_url.clone());
+
+    Some(NormalizedJob {
+        external_id: format!("eightfold:{domain}:{id}"),
+        title,
+        company: company.to_string(),
+        location: data
+            .locations
+            .into_iter()
+            .find(|value| !value.trim().is_empty()),
+        department: data.department,
+        employment_type: data
+            .efcustom_text_time_type
+            .into_iter()
+            .find(|value| !value.trim().is_empty()),
+        workplace_type: None,
+        source_url,
+        raw_text: detail::truncate(data.job_description.unwrap_or_default()),
+        posted_at: None,
+    })
 }
 
 /// Parse one detail response into the description and metadata.
@@ -455,6 +556,73 @@ mod tests {
             count: Some(count),
             positions,
         }
+    }
+
+    fn fallback_url() -> Url {
+        Url::parse("https://jobs.nvidia.com/careers/job/893394864453").expect("url")
+    }
+
+    #[test]
+    fn a_detail_body_builds_a_complete_posting() {
+        let job = job_from_detail_body(DETAIL_FIXTURE, "NVIDIA", "nvidia.com", &fallback_url())
+            .expect("posting");
+
+        assert_eq!(job.external_id, "eightfold:nvidia.com:893394864453");
+        assert_eq!(job.title, "Senior Network Product Engineer");
+        assert_eq!(job.company, "NVIDIA");
+        assert_eq!(job.location.as_deref(), Some("Remote - Vietnam"));
+        assert_eq!(
+            job.department.as_deref(),
+            Some("Engineer, Product Development")
+        );
+        assert_eq!(job.employment_type.as_deref(), Some("Full time"));
+        assert!(job.raw_text.contains("network stack"));
+        assert_eq!(
+            job.source_url.as_str(),
+            "https://jobs.nvidia.com/careers/job/893394864453"
+        );
+    }
+
+    #[test]
+    fn a_detail_body_without_a_name_is_not_a_posting() {
+        let body = r#"{"status":200,"data":{"id":7,"jobDescription":"text"}}"#;
+
+        assert!(job_from_detail_body(body, "NVIDIA", "nvidia.com", &fallback_url()).is_none());
+    }
+
+    #[test]
+    fn a_detail_body_without_a_public_url_uses_the_pasted_url() {
+        let body = r#"{"status":200,"data":{"id":7,"name":"Engineer","jobDescription":"text"}}"#;
+        let pasted = Url::parse("https://jobs.nvidia.com/careers/job/7/engineer").expect("url");
+
+        let job = job_from_detail_body(body, "NVIDIA", "nvidia.com", &pasted).expect("posting");
+
+        assert_eq!(job.source_url, pasted);
+    }
+
+    #[test]
+    fn position_ids_are_read_from_urls() {
+        let cases = [
+            ("https://jobs.nvidia.com/careers/job/42", Some("42")),
+            (
+                "https://jobs.nvidia.com/careers/job/42/senior-engineer",
+                Some("42"),
+            ),
+            ("https://jobs.nvidia.com/careers/job/", None),
+            ("https://jobs.nvidia.com/careers", None),
+            ("https://jobs.nvidia.com/careers/42", Some("42")),
+        ];
+
+        for (raw, expected) in cases {
+            let url = Url::parse(raw).expect("url");
+            assert_eq!(position_id_from_url(&url).as_deref(), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_detail_url_needs_a_position_id() {
+        assert!(detail_url_for("jobs.nvidia.com", "nvidia.com", "").is_none());
+        assert!(detail_url_for("jobs.nvidia.com", "nvidia.com", "42").is_some());
     }
 
     #[test]
