@@ -4,11 +4,19 @@
 //! the async orchestration are tested separately, so these tests can focus on
 //! what the user can see and click.
 
-use career_ops_app::screens::lock::{self, FirstLaunchStep, LockView, ACK_PHRASE, RESET_PHRASE};
+use career_ops_app::screens::lock::{
+    self, FirstLaunchStep, LockAction, LockView, ACK_PHRASE, RESET_PHRASE,
+};
 use career_ops_app::state::Screen;
 use egui::accesskit::Role;
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
+
+#[derive(Default)]
+struct UnlockState {
+    view: LockView,
+    action: Option<LockAction>,
+}
 
 #[test]
 fn unlock_screen_exposes_the_passphrase_and_both_actions() {
@@ -27,6 +35,36 @@ fn unlock_screen_exposes_the_passphrase_and_both_actions() {
     let _passphrase = harness.get_by_label("Passphrase");
     let _unlock = harness.get_by_role_and_label(Role::Button, "Unlock");
     let _keychain = harness.get_by_role_and_label(Role::Button, "Try keychain");
+}
+
+#[test]
+fn enter_in_the_passphrase_field_requests_an_unlock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let screen = Screen::Unlocking;
+
+    let mut harness = Harness::new_ui_state(
+        |ui, state: &mut UnlockState| {
+            if let Some(action) = lock::show(ui, &screen, &mut state.view, dir.path()) {
+                state.action = Some(action);
+            }
+        },
+        UnlockState::default(),
+    );
+    harness.run();
+
+    let field = harness.get_by_label("Passphrase");
+    field.focus();
+    field.type_text("secret");
+    harness.run();
+
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+
+    assert_eq!(
+        harness.state().action,
+        Some(LockAction::TryPassphrase("secret".into())),
+        "Enter must request an unlock with the typed passphrase"
+    );
 }
 
 #[test]

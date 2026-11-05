@@ -18,6 +18,9 @@ pub struct PipelineView {
     pub delete: Option<DeleteJobModal>,
     /// Show the stored markup rather than the formatted text.
     pub show_raw: bool,
+    /// The list's vertical scroll offset, so returning from the detail view
+    /// restores where the user was.
+    pub list_scroll: f32,
 }
 
 /// The typed gate in front of a destructive delete.
@@ -87,6 +90,7 @@ pub fn show(
     ) {
         view.selected = None;
         view.show_raw = false;
+        view.list_scroll = 0.0;
     }
 
     if let Some(error) = state.error {
@@ -146,7 +150,15 @@ fn header(
         }
 
         ui.separator();
-        ui.label(RichText::new(format!("{} jobs", view_model.rows.len())).weak());
+        let total = view_model.rows.len();
+        if view_model.search.trim().is_empty() {
+            ui.label(RichText::new(format!("{total} jobs")).weak());
+        } else {
+            // The count follows the visible list, so a search that intersects a
+            // filter reads as what the user is actually looking at.
+            let shown = view_model.apply_filter().count();
+            ui.label(RichText::new(format!("{shown} of {total} jobs match")).weak());
+        }
     });
 
     if let Some(message) = state.message {
@@ -229,11 +241,14 @@ fn list(
         return;
     }
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for row in rows {
-            row_ui(ui, row, view);
-        }
-    });
+    let output = egui::ScrollArea::vertical()
+        .vertical_scroll_offset(view.list_scroll)
+        .show(ui, |ui| {
+            for row in rows {
+                row_ui(ui, row, view);
+            }
+        });
+    view.list_scroll = output.state.clamped_offset().y;
 }
 
 fn row_ui(ui: &mut Ui, row: &JobRow, view: &mut PipelineView) {

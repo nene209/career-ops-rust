@@ -227,6 +227,53 @@ fn a_search_with_no_matches_explains_itself() {
 }
 
 #[test]
+fn a_search_reports_how_many_rows_match() {
+    let mut other = row(2, "Designer", None, TierLabel::Ats);
+    other.company = "Globex".into();
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats), other],
+        JobFilter::All,
+        "engineer",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("1 of 2 jobs match");
+}
+
+#[test]
+fn the_list_scroll_offset_survives_a_detail_round_trip() {
+    let rows: Vec<JobRow> = (0..100)
+        .map(|id| row(id, &format!("Job {id}"), None, TierLabel::Ats))
+        .collect();
+    let view_model = view_model(rows, JobFilter::All, "");
+    let view = PipelineView {
+        list_scroll: 400.0,
+        ..PipelineView::default()
+    };
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let before = harness.state().view.list_scroll;
+    assert!(
+        before > 0.0,
+        "the stored offset must be applied to a scrollable list"
+    );
+
+    // Enter and leave the detail view without touching the list.
+    harness.state_mut().view.selected = Some(1);
+    harness.run();
+    harness.state_mut().view.selected = None;
+    harness.run();
+
+    assert_eq!(
+        harness.state().view.list_scroll,
+        before,
+        "returning to the list must not jump to the top"
+    );
+}
+
+#[test]
 fn clearing_the_search_emits_an_empty_query() {
     let view_model = view_model(
         vec![row(1, "Engineer", None, TierLabel::Ats)],

@@ -150,8 +150,11 @@ fn show_unlock(
 
                 let response = labelled_input(ui, "Passphrase", &mut view.passphrase, true);
                 let can_unlock = !view.passphrase.is_empty();
+                // A single-line `TextEdit` surrenders focus when Enter is
+                // pressed, so `has_focus()` is already false in this frame.
+                // `lost_focus()` is the signal that Enter was the last input.
                 let enter = can_unlock
-                    && response.has_focus()
+                    && response.lost_focus()
                     && ui.input(|input| input.key_pressed(egui::Key::Enter));
 
                 ui.add_space(8.0);

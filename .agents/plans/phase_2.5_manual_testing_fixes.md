@@ -1,7 +1,7 @@
 # Phase 2.5: Manual-Testing Fixes — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.10), §12
-**Status:** In progress — WS1–WS5 complete; manual verification of WS4–WS5 pending
+**Status:** Complete — all five workstreams implemented and manual script §6 verified; retrospective: `.agents/plans/phase_2.5_retrospective.md`
 **Last updated:** 2026-11-05
 **Duration:** 4–6 days
 **Depends on:** Phase 2.2 (pagination, detail enrichment), Phase 2.3 (providers, registry), Phase 2.4 (catalog UI)
@@ -20,6 +20,7 @@
 | v0.5 | Workstream 3 implemented: `Not a match` as an application status, its transition rules, the first production writer of `applications` (create-if-absent, idempotent), a filter that excludes it from **Not applied**, and the detail action. |
 | v0.6 | Workstream 4 implemented: `job_descriptions::delete` with cascading application/report/letter removal, a typed `delete me` gate for rows the user touched, a case-insensitive Pipeline search over title and company with its own empty state and **Clear**, and a search that survives a reload. The gate is view state, so only a confirmed delete reaches the app. |
 | v0.7 | Workstream 5 implemented: `core::text::plain_text` (idempotent, entity-safe, block-aware, char-boundary truncation, parsed with `scraper`), the Pipeline detail rendering the normalized text with paragraph breaks, and a **Raw text** toggle with the stored markup and its source note. Phase 3's plan points at the function instead of re-specifying it. |
+| v0.8 | Post-verification polish and close-out. Enter unlocks from the passphrase field (the old check read `has_focus`, which is already false in the Enter frame). Search reports `X of Y jobs match`. The list restores its scroll offset after a detail round trip. All live tests are indexed in `docs/LIVE_TESTS.md`, and the retrospective records the deferred bounded fetch-to-end design. |
 
 ---
 
