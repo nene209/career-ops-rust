@@ -74,6 +74,7 @@ pub enum StatusBadge {
     Interviewing,
     Rejected,
     Offer,
+    NotAMatch,
 }
 
 impl StatusBadge {
@@ -93,6 +94,7 @@ impl StatusBadge {
             Self::Interviewing => "Interviewing",
             Self::Rejected => "Rejected",
             Self::Offer => "Offer",
+            Self::NotAMatch => "Not a match",
         }
     }
 
@@ -107,6 +109,7 @@ impl StatusBadge {
             Self::Applied => Color32::from_rgb(0x0e, 0x7c, 0x86),
             Self::Interviewing => Color32::from_rgb(0x7c, 0x3a, 0xed),
             Self::Offer => Color32::from_rgb(0x2e, 0xa0, 0x43),
+            Self::NotAMatch => Color32::from_rgb(0x6b, 0x72, 0x80),
         }
     }
 
@@ -178,6 +181,7 @@ mod tests {
             StatusBadge::Interviewing,
             StatusBadge::Rejected,
             StatusBadge::Offer,
+            StatusBadge::NotAMatch,
         ];
 
         let labels: Vec<&str> = badges.iter().map(|badge| badge.label()).collect();

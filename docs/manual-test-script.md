@@ -140,13 +140,14 @@ otherwise.
 | # | Step | Expected |
 | :-- | :--- | :--- |
 | 6.1 | Look at the list after 5.5. | One row per job: `Title — Company`, a tier label (ATS / HTML / Tier 2 / Manual), the status badge when an application exists, and a relative time. The header shows "N jobs". |
-| 6.2 | Click each filter: All, Not applied, Applied, Rejected. | The list narrows without a reload. A filter with no matches shows "No jobs match this filter". |
+| 6.2 | Click each filter: All, Not applied, Applied, Rejected, Not a match. | The list narrows without a reload. A filter with no matches shows "No jobs match this filter". |
 | 6.3 | Click a row. | The detail view replaces the list: title, company, tier, status, "Fetched …", the source URL in monospace, and the raw description. |
 | 6.4 | Hover **Evaluate** and **Generate cover letter**. | Both are disabled and the tooltip says "Available in a later phase". |
 | 6.5 | Click **Back to list**. | The list returns with the filter you had selected. |
 | 6.6 | Open a detail view, then click a different filter. | The list returns (the filter applies to the list). |
 | 6.7 | Click **Refresh**. | The list reloads; the selected filter is still selected. |
 | 6.8 | Open a detail view and click **Refresh description**. 🌐 | A spinner appears on the button, the text is replaced with the posting's current description, and the header reports "Description refreshed: N bytes." A posting whose detail cannot be read keeps its old text and reports an error. |
+| 6.9 | In a detail view, click **Mark not a match**. | The badge changes to "Not a match", the header reports "Marked as not a match.", the job appears under the **Not a match** filter and disappears from **Not applied**. An application row is created if the job had none. The button disables once the application is applied, interviewing, offered, rejected, or already not a match. Clicking it twice is harmless. |
 
 ## 7. Idle behaviour
 

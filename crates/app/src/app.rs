@@ -57,7 +57,7 @@ use crate::screens::portals::{
     PortalsRenderState, PortalsView, PreviewInputs, PreviewSample,
 };
 use crate::state::{AppState, Screen};
-use crate::view_models::pipeline::PipelineViewModel;
+use crate::view_models::pipeline::{PipelineViewModel, StatusLabel};
 use crate::view_models::portals::{BatchProgress, PortalsViewModel};
 
 type StateTask = AsyncTask<(AppState, CoreResult<()>)>;
@@ -157,6 +157,8 @@ pub struct CareerOpsApp {
     pipeline_task: Option<AsyncTask<PipelineLoad>>,
     pipeline_refresh_task: Option<AsyncTask<CoreResult<JobDescription>>>,
     refreshing_job: Option<i64>,
+    pipeline_status_task: Option<AsyncTask<CoreResult<()>>>,
+    marking_job: Option<i64>,
 }
 
 impl CareerOpsApp {
@@ -208,6 +210,8 @@ impl CareerOpsApp {
             pipeline_task: None,
             pipeline_refresh_task: None,
             refreshing_job: None,
+            pipeline_status_task: None,
+            marking_job: None,
         }
     }
 
@@ -357,6 +361,7 @@ impl CareerOpsApp {
             PipelineAction::Reload => self.start_pipeline_load(),
             PipelineAction::SetFilter(filter) => self.pipeline.filter = filter,
             PipelineAction::RefreshJob(job_id) => self.start_job_refresh(job_id),
+            PipelineAction::MarkNotAMatch(job_id) => self.start_not_a_match(job_id),
         }
     }
 
@@ -558,6 +563,8 @@ impl CareerOpsApp {
         self.pipeline_task = None;
         self.pipeline_refresh_task = None;
         self.refreshing_job = None;
+        self.pipeline_status_task = None;
+        self.marking_job = None;
     }
 
     fn pool(&self) -> Option<sqlx::SqlitePool> {
@@ -1211,6 +1218,71 @@ impl CareerOpsApp {
         }
     }
 
+    /// Mark a job's application as not worth pursuing. Creates the application
+    /// row when the job has none, which is the first production writer.
+    fn start_not_a_match(&mut self, job_id: i64) {
+        if self.marking_job.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.pipeline_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let task = self.spawn(async move {
+            application_repo::mark_not_a_match(&pool, job_id)
+                .await
+                .map(|_| ())
+        });
+
+        self.pipeline_error = None;
+        self.pipeline_message = None;
+        self.marking_job = Some(job_id);
+        self.pipeline_status_task = Some(task);
+    }
+
+    fn poll_pipeline_status(&mut self, ctx: &egui::Context) {
+        let poll = match self.pipeline_status_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.pipeline_status_task = None;
+                let job_id = self.marking_job.take();
+                match result {
+                    Ok(()) => {
+                        if let Some(id) = job_id {
+                            if let Some(row) =
+                                self.pipeline.rows.iter_mut().find(|row| row.id == id)
+                            {
+                                row.status = Some(StatusLabel::NotAMatch);
+                            }
+                        }
+                        self.pipeline_message = Some("Marked as not a match.".into());
+                        self.pipeline_error = None;
+                    }
+                    Err(error) => {
+                        self.pipeline_message = None;
+                        self.pipeline_error = Some(format!("Could not update the status: {error}"));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.pipeline_status_task = None;
+                self.marking_job = None;
+                self.pipeline_error = Some("The status update was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // End Pipeline
     // ------------------------------------------------------------------
@@ -1222,6 +1294,7 @@ impl Drop for CareerOpsApp {
         self.portals_task = None;
         self.pipeline_task = None;
         self.pipeline_refresh_task = None;
+        self.pipeline_status_task = None;
         self.pending = None;
 
         if tokio::runtime::Handle::try_current().is_err() {
@@ -1378,6 +1451,7 @@ impl eframe::App for CareerOpsApp {
                 self.poll_portals_task(ui.ctx());
                 self.poll_pipeline_task(ui.ctx());
                 self.poll_pipeline_refresh(ui.ctx());
+                self.poll_pipeline_status(ui.ctx());
                 self.drain_batch_progress();
 
                 if self.navigation.current() == MainScreen::Portals
@@ -1409,6 +1483,7 @@ impl eframe::App for CareerOpsApp {
                     error: self.pipeline_error.as_deref(),
                     message: self.pipeline_message.as_deref(),
                     refreshing: self.refreshing_job,
+                    marking: self.marking_job,
                 };
 
                 let navigation = &mut self.navigation;
@@ -1848,6 +1923,7 @@ mod tests {
             app.poll_portals_task(ctx);
             app.poll_pipeline_task(ctx);
             app.poll_pipeline_refresh(ctx);
+            app.poll_pipeline_status(ctx);
             app.drain_batch_progress();
             if condition(app) {
                 return;
@@ -2309,6 +2385,85 @@ mod tests {
             "message: {:?}",
             app.pipeline_message
         );
+    }
+
+    /// Marking a job creates the application row and updates the pipeline in
+    /// place. This is the first production writer of `applications`.
+    #[test]
+    fn mark_not_a_match_updates_the_row_and_creates_the_application() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::default());
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        let pool = app.pool().expect("pool");
+        let stored = app
+            .runtime()
+            .block_on(job_repo::upsert(
+                &pool,
+                job_repo::NewJobDescription {
+                    title: "Engineer".into(),
+                    company: "Acme".into(),
+                    source_url: "https://example.com/jobs/1".into(),
+                    raw_text: "body".into(),
+                    fetch_tier: FetchTier::Tier1bHtml,
+                    external_id: None,
+                },
+            ))
+            .expect("store");
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+        assert_eq!(app.pipeline.rows[0].status, None);
+
+        app.handle_pipeline_action(PipelineAction::MarkNotAMatch(stored.id));
+        wait_until(&mut app, &ctx, |app| {
+            app.marking_job.is_none() && app.pipeline_message.is_some()
+        });
+
+        assert_eq!(app.pipeline.rows[0].status, Some(StatusLabel::NotAMatch));
+        assert_eq!(
+            app.pipeline_message.as_deref(),
+            Some("Marked as not a match.")
+        );
+
+        let applications = app
+            .runtime()
+            .block_on(application_repo::list(&pool))
+            .expect("list applications");
+        assert_eq!(applications.len(), 1);
+        assert_eq!(applications[0].job_description_id, stored.id);
+        assert_eq!(applications[0].status, "not_a_match");
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub enum PipelineAction {
     SetFilter(JobFilter),
     /// Re-fetch one posting's description in place.
     RefreshJob(i64),
+    /// Mark the job's application as not worth pursuing.
+    MarkNotAMatch(i64),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -32,6 +34,8 @@ pub struct PipelineRenderState<'a> {
     pub message: Option<&'a str>,
     /// The job whose description is being re-fetched.
     pub refreshing: Option<i64>,
+    /// The job whose status is being changed.
+    pub marking: Option<i64>,
 }
 
 pub fn show(
@@ -212,6 +216,22 @@ fn detail(
         if state.refreshing == Some(row.id) {
             LoadingSpinner::show(ui);
         }
+
+        let can_mark = match row.status {
+            None => true,
+            Some(status) => status.can_mark_not_a_match(),
+        };
+        let busy = state.refreshing == Some(row.id) || state.marking == Some(row.id);
+        if ui
+            .add_enabled(can_mark && !busy, Button::new("Mark not a match"))
+            .on_hover_text("Keep the posting but leave it out of the active pipeline")
+            .clicked()
+        {
+            *action = Some(PipelineAction::MarkNotAMatch(row.id));
+        }
+        if state.marking == Some(row.id) {
+            LoadingSpinner::show(ui);
+        }
     });
 
     ui.add_space(4.0);
@@ -251,6 +271,7 @@ fn status_badge(ui: &mut Ui, status: StatusLabel) {
         StatusLabel::Interviewing => StatusBadge::Interviewing,
         StatusLabel::Rejected => StatusBadge::Rejected,
         StatusLabel::Offer => StatusBadge::Offer,
+        StatusLabel::NotAMatch => StatusBadge::NotAMatch,
     };
     badge.show(ui);
 }

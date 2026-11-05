@@ -1,7 +1,7 @@
 # Phase 2.5: Manual-Testing Fixes — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.10), §12
-**Status:** In progress — WS1–WS2 complete; WS3–WS5 not started
+**Status:** In progress — WS1–WS3 complete; WS4–WS5 not started
 **Last updated:** 2026-11-03
 **Duration:** 4–6 days
 **Depends on:** Phase 2.2 (pagination, detail enrichment), Phase 2.3 (providers, registry), Phase 2.4 (catalog UI)
@@ -17,6 +17,7 @@
 | v0.2 | Decisions after review. Deletion needs no confirmation for a fetched-only row, but an evaluated (or otherwise user-touched) row is behind a typed `delete me` gate, because evaluations cost real tokens and are not re-fetchable. Waymo's production entry enriches **every posting on the pages it fetched**, not `max_jobs: 2`; the small caps stay in test configs only. WS1 starts. |
 | v0.3 | Workstream 1 implemented: canonical URL identity, migration 0003 with a guarded backfill, dedup rules that survive different extractions, never-clobber on update, provider-aware manual add, and the JSON-LD company fallback. The reported duplicate is reproduced by a test and fixed. |
 | v0.4 | Workstream 2 implemented: migration 0004 and `portals.last_page_fetched`, an explicit start page in both fetch paths, `FetchStart::{Beginning, Resume}` with **Fetch more**, a per-job **Refresh description**, and Waymo's production entry enriching every posting on its fetched pages. |
+| v0.5 | Workstream 3 implemented: `Not a match` as an application status, its transition rules, the first production writer of `applications` (create-if-absent, idempotent), a filter that excludes it from **Not applied**, and the detail action. |
 
 ---
 
@@ -337,6 +338,35 @@ case.
 | Invalid transitions are rejected | Unit test |
 | The filter shows exactly the not-a-match rows | Unit test |
 | Every status has a unique, non-empty label | Existing label test extended |
+
+**Implementation note (2026-11-03).** `ApplicationStatus::NotAMatch` serializes as
+`not_a_match`; the column is free text, so no migration was needed. It is
+reachable from `discovered`, `evaluating`, and `ready`, cannot be reached from
+`applied`, `interviewing`, `offer`, or `rejected`, and reopens to `discovered`
+like `rejected` does. The view mirrors it as `StatusLabel::NotAMatch` and
+`StatusBadge::NotAMatch` ("Not a match", muted slate).
+
+Until this phase nothing in production created an `applications` row — only a
+test did — so the status column was effectively unused. `applications::ensure`
+finds the row for a job or creates it, and `mark_not_a_match` uses it before
+transitioning; a second call is a no-op that returns the existing row rather
+than failing on `NotAMatch -> NotAMatch`.
+
+`JobFilter::NotAMatch` is the fifth filter, and **Not applied** now excludes the
+new status the same way it excludes `rejected`. The detail view offers **Mark
+not a match** whenever the status is absent or still `discovered`, `evaluating`,
+or `ready`; the app updates the row in place and reports
+`Marked as not a match.`
+
+Phase 3 can set the same status from `Recommendation::NoMatch` (Q-20); the manual
+action stays, because an evaluation is an opinion.
+
+Tests: repo unit tests for the transition predicate and reachability, a new
+`applications.rs` integration suite (create when absent, idempotent, refuses a
+submitted application), view-model tests for the mapping and the filter
+partition, `egui_kittest` for the action, its disabled states, and the filter
+button, and an app test that runs the action through the real storage and
+pipeline.
 
 ---
 

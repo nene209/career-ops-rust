@@ -23,6 +23,7 @@ fn idle_state() -> PipelineRenderState<'static> {
         error: None,
         message: None,
         refreshing: None,
+        marking: None,
     }
 }
 
@@ -231,6 +232,7 @@ fn refreshing_disables_the_button_and_reports_the_result() {
         error: None,
         message: Some("Description refreshed: 2048 bytes."),
         refreshing: Some(1),
+        marking: None,
     };
     let mut harness = test_harness(&view_model, view, render_state);
 
@@ -240,6 +242,61 @@ fn refreshing_disables_the_button_and_reports_the_result() {
     let button = harness.get_by_role_and_label(Role::Button, "Refresh description");
     assert!(button.accesskit_node().is_disabled());
     let _ = harness.get_by_label("Description refreshed: 2048 bytes.");
+}
+
+#[test]
+fn mark_not_a_match_emits_the_action() {
+    let view_model = PipelineViewModel {
+        rows: vec![row(1, "Engineer", None, TierLabel::Ats)],
+        filter: JobFilter::All,
+    };
+    let view = PipelineView { selected: Some(1) };
+    let mut harness = test_harness(&view_model, view, idle_state());
+
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Mark not a match")
+        .click();
+    harness.run();
+
+    assert!(harness
+        .state()
+        .actions
+        .contains(&PipelineAction::MarkNotAMatch(1)));
+}
+
+#[test]
+fn mark_not_a_match_is_disabled_once_the_application_is_decided() {
+    for status in [
+        StatusLabel::Applied,
+        StatusLabel::Interviewing,
+        StatusLabel::Offer,
+        StatusLabel::Rejected,
+        StatusLabel::NotAMatch,
+    ] {
+        let view_model = PipelineViewModel {
+            rows: vec![row(1, "Engineer", Some(status), TierLabel::Ats)],
+            filter: JobFilter::All,
+        };
+        let view = PipelineView { selected: Some(1) };
+        let mut harness = test_harness(&view_model, view, idle_state());
+        harness.run();
+
+        let button = harness.get_by_role_and_label(Role::Button, "Mark not a match");
+        assert!(button.accesskit_node().is_disabled(), "{status:?}");
+    }
+}
+
+#[test]
+fn the_not_a_match_filter_is_offered() {
+    let view_model = PipelineViewModel {
+        rows: vec![row(1, "Engineer", None, TierLabel::Ats)],
+        filter: JobFilter::All,
+    };
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("Not a match");
 }
 
 #[test]
@@ -269,6 +326,7 @@ fn first_load_shows_a_spinner_instead_of_the_empty_state() {
         error: None,
         message: None,
         refreshing: None,
+        marking: None,
     };
 
     let mut harness = test_harness(&view_model, PipelineView::default(), render_state);
@@ -287,6 +345,7 @@ fn an_error_offers_a_retry() {
         error: Some("database is locked"),
         message: None,
         refreshing: None,
+        marking: None,
     };
 
     let mut harness = test_harness(&view_model, PipelineView::default(), render_state);

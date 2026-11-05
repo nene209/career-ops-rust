@@ -194,19 +194,55 @@ fn is_valid_transition(from: ApplicationStatus, to: ApplicationStatus) -> bool {
         (Discovered, Evaluating)
             | (Discovered, Ready)
             | (Discovered, Rejected)
+            | (Discovered, NotAMatch)
             | (Evaluating, Discovered)
             | (Evaluating, Ready)
             | (Evaluating, Rejected)
+            | (Evaluating, NotAMatch)
             | (Ready, Discovered)
             | (Ready, Evaluating)
             | (Ready, Rejected)
+            | (Ready, NotAMatch)
             | (Applied, Ready)
             | (Applied, Interviewing)
             | (Applied, Rejected)
             | (Interviewing, Offer)
             | (Interviewing, Rejected)
             | (Rejected, Discovered)
+            | (NotAMatch, Discovered)
     )
+}
+
+/// The application for a job, creating it in `discovered` if absent.
+///
+/// Phase 2 never created one in production; this is the first writer. A second
+/// call returns the existing row rather than a second application.
+pub async fn ensure(pool: &SqlitePool, job_description_id: i64) -> Result<Application> {
+    let existing = sqlx::query_as::<_, Application>(
+        "SELECT * FROM applications
+         WHERE job_description_id = ?
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(job_description_id)
+    .fetch_optional(pool)
+    .await?;
+
+    match existing {
+        Some(application) => Ok(application),
+        None => create(pool, job_description_id).await,
+    }
+}
+
+/// Mark the job's application as `not_a_match`, creating the row if needed.
+///
+/// Idempotent: an application already in that state is returned unchanged.
+pub async fn mark_not_a_match(pool: &SqlitePool, job_description_id: i64) -> Result<Application> {
+    let application = ensure(pool, job_description_id).await?;
+    if application.status == ApplicationStatus::NotAMatch.as_str() {
+        return Ok(application);
+    }
+
+    transition(pool, application.id, ApplicationStatus::NotAMatch).await
 }
 
 #[cfg(test)]
@@ -229,6 +265,7 @@ mod tests {
             ApplicationStatus::Interviewing,
             ApplicationStatus::Rejected,
             ApplicationStatus::Offer,
+            ApplicationStatus::NotAMatch,
         ] {
             assert!(
                 !is_valid_transition(from, ApplicationStatus::Applied),
@@ -263,6 +300,22 @@ mod tests {
                 "Offer must be terminal; {to:?} should not be reachable"
             );
         }
+    }
+
+    #[test]
+    fn not_a_match_is_reachable_before_applying_and_reversible() {
+        use ApplicationStatus::*;
+
+        for from in [Discovered, Evaluating, Ready] {
+            assert!(is_valid_transition(from, NotAMatch), "{from:?}");
+        }
+        assert!(
+            !is_valid_transition(Applied, NotAMatch),
+            "a submitted application is not a mis-filed posting"
+        );
+        assert!(!is_valid_transition(Interviewing, NotAMatch));
+        assert!(!is_valid_transition(Offer, NotAMatch));
+        assert!(is_valid_transition(NotAMatch, Discovered));
     }
 
     #[test]

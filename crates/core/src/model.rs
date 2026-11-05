@@ -45,6 +45,9 @@ pub enum ApplicationStatus {
     Interviewing,
     Rejected,
     Offer,
+    /// The posting was reviewed and judged not worth pursuing. Reversible to
+    /// `discovered`; not reachable from a submitted or decided application.
+    NotAMatch,
 }
 
 impl ApplicationStatus {
@@ -57,6 +60,7 @@ impl ApplicationStatus {
             Self::Interviewing => "interviewing",
             Self::Rejected => "rejected",
             Self::Offer => "offer",
+            Self::NotAMatch => "not_a_match",
         }
     }
 
@@ -69,6 +73,7 @@ impl ApplicationStatus {
             "interviewing" => Self::Interviewing,
             "rejected" => Self::Rejected,
             "offer" => Self::Offer,
+            "not_a_match" => Self::NotAMatch,
             _ => return None,
         })
     }

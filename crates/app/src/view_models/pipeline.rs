@@ -74,6 +74,7 @@ pub enum StatusLabel {
     Interviewing,
     Rejected,
     Offer,
+    NotAMatch,
 }
 
 impl StatusLabel {
@@ -86,6 +87,7 @@ impl StatusLabel {
             ApplicationStatus::Interviewing => Self::Interviewing,
             ApplicationStatus::Rejected => Self::Rejected,
             ApplicationStatus::Offer => Self::Offer,
+            ApplicationStatus::NotAMatch => Self::NotAMatch,
         }
     }
 
@@ -98,7 +100,13 @@ impl StatusLabel {
             Self::Interviewing => "Interviewing",
             Self::Rejected => "Rejected",
             Self::Offer => "Offer",
+            Self::NotAMatch => "Not a match",
         }
+    }
+
+    /// The status can still be moved to `not_a_match`.
+    pub fn can_mark_not_a_match(self) -> bool {
+        matches!(self, Self::Discovered | Self::Evaluating | Self::Ready)
     }
 
     /// Post-submission statuses, used by the `Applied` filter.
@@ -114,6 +122,7 @@ pub enum JobFilter {
     NotApplied,
     Applied,
     Rejected,
+    NotAMatch,
 }
 
 impl JobFilter {
@@ -123,6 +132,7 @@ impl JobFilter {
             JobFilter::NotApplied,
             JobFilter::Applied,
             JobFilter::Rejected,
+            JobFilter::NotAMatch,
         ]
     }
 
@@ -132,6 +142,7 @@ impl JobFilter {
             Self::NotApplied => "Not applied",
             Self::Applied => "Applied",
             Self::Rejected => "Rejected",
+            Self::NotAMatch => "Not a match",
         }
     }
 
@@ -140,10 +151,15 @@ impl JobFilter {
             Self::All => true,
             Self::NotApplied => match row.status {
                 None => true,
-                Some(status) => !status.is_applied() && status != StatusLabel::Rejected,
+                Some(status) => {
+                    !status.is_applied()
+                        && status != StatusLabel::Rejected
+                        && status != StatusLabel::NotAMatch
+                }
             },
             Self::Applied => row.status.is_some_and(StatusLabel::is_applied),
             Self::Rejected => row.status == Some(StatusLabel::Rejected),
+            Self::NotAMatch => row.status == Some(StatusLabel::NotAMatch),
         }
     }
 }
@@ -243,6 +259,7 @@ mod tests {
             (ApplicationStatus::Interviewing, StatusLabel::Interviewing),
             (ApplicationStatus::Rejected, StatusLabel::Rejected),
             (ApplicationStatus::Offer, StatusLabel::Offer),
+            (ApplicationStatus::NotAMatch, StatusLabel::NotAMatch),
         ];
 
         for (status, expected) in cases {
@@ -301,6 +318,7 @@ mod tests {
             row(6, Some(StatusLabel::Interviewing)),
             row(7, Some(StatusLabel::Offer)),
             row(8, Some(StatusLabel::Rejected)),
+            row(9, Some(StatusLabel::NotAMatch)),
         ];
 
         let ids = |filter: JobFilter| {
@@ -314,10 +332,22 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert_eq!(ids(JobFilter::All), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(ids(JobFilter::All), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(ids(JobFilter::NotApplied), vec![1, 2, 3, 4]);
         assert_eq!(ids(JobFilter::Applied), vec![5, 6, 7]);
         assert_eq!(ids(JobFilter::Rejected), vec![8]);
+        assert_eq!(ids(JobFilter::NotAMatch), vec![9]);
+    }
+
+    #[test]
+    fn not_a_match_is_not_part_of_not_applied() {
+        assert!(!JobFilter::NotApplied.matches(&row(1, Some(StatusLabel::NotAMatch))));
+        assert!(JobFilter::NotAMatch.matches(&row(1, Some(StatusLabel::NotAMatch))));
+        assert!(!StatusLabel::NotAMatch.is_applied());
+        assert!(StatusLabel::Discovered.can_mark_not_a_match());
+        assert!(StatusLabel::Ready.can_mark_not_a_match());
+        assert!(!StatusLabel::Applied.can_mark_not_a_match());
+        assert!(!StatusLabel::NotAMatch.can_mark_not_a_match());
     }
 
     #[test]
