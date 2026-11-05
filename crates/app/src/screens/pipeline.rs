@@ -16,6 +16,8 @@ pub struct PipelineView {
     /// Open only for a job the user has touched; a fetched-only row deletes
     /// without a dialog.
     pub delete: Option<DeleteJobModal>,
+    /// Show the stored markup rather than the formatted text.
+    pub show_raw: bool,
 }
 
 /// The typed gate in front of a destructive delete.
@@ -84,6 +86,7 @@ pub fn show(
         Some(PipelineAction::SetFilter(_) | PipelineAction::SetSearch(_))
     ) {
         view.selected = None;
+        view.show_raw = false;
     }
 
     if let Some(error) = state.error {
@@ -106,6 +109,7 @@ pub fn show(
             // The row disappeared after a reload. Fall back to the list rather
             // than leaving the detail panel in an inconsistent state.
             view.selected = None;
+            view.show_raw = false;
         }
     }
 
@@ -238,6 +242,7 @@ fn row_ui(ui: &mut Ui, row: &JobRow, view: &mut PipelineView) {
         let label = format!("{} — {}", row.title, row.company);
         if ui.selectable_label(selected, label.as_str()).clicked() {
             view.selected = Some(row.id);
+            view.show_raw = false;
         }
 
         tier_label(ui, row.tier);
@@ -259,6 +264,7 @@ fn detail(
     ui.horizontal(|ui| {
         if ui.button("Back to list").clicked() {
             view.selected = None;
+            view.show_raw = false;
         }
 
         ui.separator();
@@ -354,7 +360,22 @@ fn detail(
         if row.raw_text.trim().is_empty() {
             ui.label(RichText::new("No description stored.").weak());
         } else {
-            ui.label(RichText::new(&row.raw_text).monospace());
+            if row.stored_is_markup {
+                ui.checkbox(&mut view.show_raw, "Raw text");
+                if view.show_raw {
+                    ui.label(
+                        RichText::new("Stored as HTML from the source.")
+                            .weak()
+                            .small(),
+                    );
+                }
+            }
+
+            if view.show_raw {
+                ui.label(RichText::new(&row.raw_text).monospace());
+            } else {
+                ui.label(RichText::new(&row.plain_text));
+            }
         }
     });
 }

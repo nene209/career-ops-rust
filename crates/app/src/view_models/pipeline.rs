@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use career_ops_core::model::{ApplicationStatus, JobDescription};
+use career_ops_core::text;
 use chrono::Utc;
 
 use super::portals::relative_time;
@@ -32,6 +33,12 @@ pub struct JobRow {
     /// database read.
     pub source_url: String,
     pub raw_text: String,
+    /// The stored description with markup removed, for the detail view. Kept
+    /// beside `raw_text` so the screen can toggle between them without
+    /// re-parsing every frame.
+    pub plain_text: String,
+    /// The stored text was markup, so the raw view is worth offering.
+    pub stored_is_markup: bool,
     /// The user has a status, evaluation, or cover letter for this job, so
     /// deleting it needs the typed confirmation.
     pub has_user_state: bool,
@@ -229,6 +236,11 @@ fn rows_from_jobs(
                 .map(StatusLabel::from_application_status);
             let has_user_state = touched.contains(&job.id)
                 || status.is_some_and(|status| status != StatusLabel::Discovered);
+            let description = text::plain_text(&job.raw_text, usize::MAX);
+            // Only markup deserves the raw toggle; a plain paste that merely
+            // collapsed blank lines has nothing to reveal.
+            let stored_is_markup =
+                job.raw_text.contains('<') && description.text.trim() != job.raw_text.trim();
 
             JobRow {
                 id: job.id,
@@ -239,6 +251,8 @@ fn rows_from_jobs(
                 status,
                 source_url: job.source_url,
                 raw_text: job.raw_text,
+                plain_text: description.text,
+                stored_is_markup,
                 has_user_state,
             }
         })
@@ -274,6 +288,8 @@ mod tests {
             status,
             source_url: format!("https://example.com/{id}"),
             raw_text: "body".into(),
+            plain_text: "body".into(),
+            stored_is_markup: false,
             has_user_state: status.is_some_and(|status| status != StatusLabel::Discovered),
         }
     }
@@ -334,6 +350,32 @@ mod tests {
         assert_eq!(view_model.rows[1].tier, TierLabel::Manual);
         assert!(view_model.rows[1].status.is_none());
         assert_eq!(view_model.filter, JobFilter::All);
+    }
+
+    #[test]
+    fn rows_carry_plain_text_and_a_markup_flag() {
+        let mut html_job = job(1, "Engineer", "tier1a:ats");
+        html_job.raw_text = "<p>Hello <b>world</b>.</p>".into();
+        let mut plain_job = job(2, "Other", "tier1a:ats");
+        plain_job.raw_text = "Just prose.".into();
+        let mut spaced_job = job(3, "Third", "tier1a:ats");
+        spaced_job.raw_text = "A\n\n\n\nB".into();
+
+        let view_model = PipelineViewModel::from_jobs(
+            vec![html_job, plain_job, spaced_job],
+            &HashMap::new(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(view_model.rows[0].plain_text, "Hello world.");
+        assert!(view_model.rows[0].stored_is_markup);
+        assert_eq!(view_model.rows[1].plain_text, "Just prose.");
+        assert!(!view_model.rows[1].stored_is_markup);
+        assert_eq!(view_model.rows[2].plain_text, "A\n\nB");
+        assert!(
+            !view_model.rows[2].stored_is_markup,
+            "collapsed blank lines are not markup, so there is no raw view"
+        );
     }
 
     #[test]

@@ -141,7 +141,7 @@ otherwise.
 | :-- | :--- | :--- |
 | 6.1 | Look at the list after 5.5. | One row per job: `Title — Company`, a tier label (ATS / HTML / Tier 2 / Manual), the status badge when an application exists, and a relative time. The header shows "N jobs". |
 | 6.2 | Click each filter: All, Not applied, Applied, Rejected, Not a match. | The list narrows without a reload. A filter with no matches shows "No jobs match this filter". |
-| 6.3 | Click a row. | The detail view replaces the list: title, company, tier, status, "Fetched …", the source URL in monospace, and the raw description. |
+| 6.3 | Click a row. | The detail view replaces the list: title, company, tier, status, "Fetched …", the source URL in monospace, and the description as plain text (HTML tags are not shown). |
 | 6.4 | Hover **Evaluate** and **Generate cover letter**. | Both are disabled and the tooltip says "Available in a later phase". |
 | 6.5 | Click **Back to list**. | The list returns with the filter you had selected. |
 | 6.6 | Open a detail view, then click a different filter. | The list returns (the filter applies to the list). |
@@ -150,7 +150,8 @@ otherwise.
 | 6.9 | In a detail view, click **Mark not a match**. | The badge changes to "Not a match", the header reports "Marked as not a match.", the job appears under the **Not a match** filter and disappears from **Not applied**. An application row is created if the job had none. The button disables once the application is applied, interviewing, offered, rejected, or already not a match. Clicking it twice is harmless. |
 | 6.10 | Type into **Search**. | The list narrows to rows whose title or company contains the text, without a reload; the status filter still applies. A query with no matches shows "No jobs match this search" with a **Clear search** button. |
 | 6.11 | Open the detail view of a job that was only fetched and click **Delete job**. | The row disappears without a dialog and the header reports "Job deleted." **Refresh** does not bring it back; only the portal fetching it again does. |
-| 6.12 | Open the detail view of a job with a saved status or an evaluation and click **Delete job...**. | A window names the job and says that its application, evaluation reports, and cover letters go with it. **Delete job** stays disabled until you type `delete me`; a wrong phrase keeps it disabled, and **Cancel** closes the window and leaves the job. |
+| 6.12 | Open the detail view of a job whose source stored HTML and tick **Raw text**. | The description switches to the stored markup in monospace and a note says "Stored as HTML from the source." Unticking returns to the formatted text. A manual paste with no markup has no toggle. |
+| 6.13 | Open the detail view of a job with a saved status or an evaluation and click **Delete job...**. | A window names the job and says that its application, evaluation reports, and cover letters go with it. **Delete job** stays disabled until you type `delete me`; a wrong phrase keeps it disabled, and **Cancel** closes the window and leaves the job. |
 
 ## 7. Idle behaviour
 

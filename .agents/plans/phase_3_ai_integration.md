@@ -306,6 +306,11 @@ pub struct PlainText {
    the existing `scraper`/html5ever dependency rather than a regex, so malformed
    provider markup does not produce tag soup in the prompt.
 
+   **Already implemented (Phase 2.5 WS5).** `core::text::plain_text` exists in
+   `crates/core/src/text.rs` with this signature and its own unit tests over a
+   real Waymo JSON-LD description. Phase 3 calls it; it must not add a second
+   normalizer. The acceptance criteria below are the regression suite for it.
+
 4. Prompt assembly: system prompt + variable substitution with CV summary and
    the **normalized** job description. `{{job_description}}` receives
    `plain_text(raw_text).text`; no raw markup reaches a prompt.

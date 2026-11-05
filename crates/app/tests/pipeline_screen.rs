@@ -58,6 +58,8 @@ fn row(id: i64, title: &str, status: Option<StatusLabel>, tier: TierLabel) -> Jo
         status,
         source_url: format!("https://example.com/jobs/{id}"),
         raw_text: "We are hiring.".into(),
+        plain_text: "We are hiring.".into(),
+        stored_is_markup: false,
         has_user_state: status.is_some_and(|status| status != StatusLabel::Discovered),
     }
 }
@@ -519,6 +521,65 @@ fn cancelling_the_gate_leaves_the_job_alone() {
         .state()
         .actions
         .contains(&PipelineAction::DeleteJob(1)));
+}
+
+#[test]
+fn the_detail_renders_plain_text_and_offers_the_raw_toggle() {
+    let mut html_row = row(1, "Engineer", None, TierLabel::Ats);
+    html_row.raw_text = "<p>Hello <strong>world</strong>.</p>".into();
+    html_row.plain_text = "Hello world.".into();
+    html_row.stored_is_markup = true;
+    let view_model = view_model(vec![html_row], JobFilter::All, "");
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("Hello world.");
+    assert!(
+        harness
+            .query_by_label("<p>Hello <strong>world</strong>.</p>")
+            .is_none(),
+        "the formatted view must not show markup"
+    );
+    let _ = harness.get_by_label("Raw text");
+}
+
+#[test]
+fn the_raw_toggle_shows_the_stored_markup() {
+    let mut html_row = row(1, "Engineer", None, TierLabel::Ats);
+    html_row.raw_text = "<p>Hello <strong>world</strong>.</p>".into();
+    html_row.plain_text = "Hello world.".into();
+    html_row.stored_is_markup = true;
+    let view_model = view_model(vec![html_row], JobFilter::All, "");
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
+    harness.run();
+
+    harness.get_by_label("Raw text").click();
+    harness.run();
+
+    assert!(harness.state().view.show_raw);
+    let _ = harness.get_by_label("<p>Hello <strong>world</strong>.</p>");
+    let _ = harness.get_by_label("Stored as HTML from the source.");
+    assert!(
+        harness.query_by_label("Hello world.").is_none(),
+        "the formatted text is replaced, not duplicated"
+    );
+}
+
+#[test]
+fn a_plain_description_has_no_raw_toggle() {
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("We are hiring.");
+    assert!(
+        harness.query_by_label("Raw text").is_none(),
+        "there is nothing to reveal"
+    );
 }
 
 #[test]

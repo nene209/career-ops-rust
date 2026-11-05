@@ -1,7 +1,7 @@
 # Phase 2.5: Manual-Testing Fixes — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.10), §12
-**Status:** In progress — WS1–WS4 complete; WS5 not started
+**Status:** In progress — WS1–WS5 complete; manual verification of WS4–WS5 pending
 **Last updated:** 2026-11-05
 **Duration:** 4–6 days
 **Depends on:** Phase 2.2 (pagination, detail enrichment), Phase 2.3 (providers, registry), Phase 2.4 (catalog UI)
@@ -19,6 +19,7 @@
 | v0.4 | Workstream 2 implemented: migration 0004 and `portals.last_page_fetched`, an explicit start page in both fetch paths, `FetchStart::{Beginning, Resume}` with **Fetch more**, a per-job **Refresh description**, and Waymo's production entry enriching every posting on its fetched pages. |
 | v0.5 | Workstream 3 implemented: `Not a match` as an application status, its transition rules, the first production writer of `applications` (create-if-absent, idempotent), a filter that excludes it from **Not applied**, and the detail action. |
 | v0.6 | Workstream 4 implemented: `job_descriptions::delete` with cascading application/report/letter removal, a typed `delete me` gate for rows the user touched, a case-insensitive Pipeline search over title and company with its own empty state and **Clear**, and a search that survives a reload. The gate is view state, so only a confirmed delete reaches the app. |
+| v0.7 | Workstream 5 implemented: `core::text::plain_text` (idempotent, entity-safe, block-aware, char-boundary truncation, parsed with `scraper`), the Pipeline detail rendering the normalized text with paragraph breaks, and a **Raw text** toggle with the stored markup and its source note. Phase 3's plan points at the function instead of re-specifying it. |
 
 ---
 
@@ -453,6 +454,30 @@ real storage and pipeline.
 | Plain text is unchanged and normalization is idempotent | Unit test |
 | The toggle reveals the stored markup unchanged | `egui_kittest` |
 | Phase 3 can call the same function | Function is `pub` with its plan's tests |
+
+**Implementation note (2026-11-05).** `core::text::plain_text(raw, max_chars)`
+returns `PlainText { text, truncated, source_chars }` exactly as Phase 3
+specifies. It parses the stored text with `scraper` (no regex), drops
+`script`/`style`/`noscript`/`head`, turns block boundaries into line breaks,
+renders list items as `"- "`, decodes entities through the parser, collapses
+runs of spaces and blank lines to at most one, and truncates with
+`chars().take(..)` so a multibyte character is never split. `source_chars` is
+the input's character count.
+
+The Pipeline computes the normalized text once per row when the view model is
+built (`rows_from_jobs`), so the detail view never re-parses on repaint, and
+records whether the stored text was markup (it contains `<` and normalization
+changed it). The detail shows the formatted text; a **Raw text** checkbox appears
+only when the row is markup, switches to the stored text in monospace, and shows
+`Stored as HTML from the source.` The toggle resets when the selection
+changes.
+
+Tests: unit tests for entity decoding, block boundaries, list bullets, dropped
+elements, whitespace collapsing, idempotence, and truncation on a character
+boundary, plus a real Waymo JSON-LD description from the existing fixture;
+view-model tests for the computed text and markup flag; `egui_kittest` for the
+formatted view, the toggle, the source note, and the absence of a toggle on a
+plain paste.
 
 ---
 
