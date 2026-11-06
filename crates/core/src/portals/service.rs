@@ -81,6 +81,158 @@ async fn report(
     Ok(FetchReport { portal, outcome })
 }
 
+/// Hard page budget for one **Fetch all pages** click.
+///
+/// The budget is a per-click policy, not a per-portal cap: `pagination.max_pages`
+/// stays the depth of a single Continue. Fifty pages on a ten-per-page board is
+/// five hundred postings, and a board that needs more is five clicks rather than
+/// one accidental crawl.
+pub const FETCH_ALL_PAGE_BUDGET: usize = 50;
+
+/// Why a Fetch-all-pages run stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchAllStop {
+    /// The portal reported the end of its list.
+    EndOfList,
+    /// The user pressed Stop.
+    Cancelled,
+    /// The per-click page budget ran out; more pages remain.
+    BudgetExhausted,
+    /// The provider cannot continue from a cursor (an adapter that pages
+    /// internally, or a config with no `pagination.url_template`). Repeating
+    /// would re-read the same page.
+    NoProgress,
+    /// A chunk failed. The pages already read are stored.
+    Failed(FetchError),
+}
+
+impl FetchAllStop {
+    /// A short noun phrase for the result message: "stopped at …".
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::EndOfList => "the end of the list",
+            Self::Cancelled => "Stop",
+            Self::BudgetExhausted => "the page budget",
+            Self::NoProgress => "a board that cannot continue",
+            Self::Failed(_) => "an error",
+        }
+    }
+
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+}
+
+/// Cumulative progress after each chunk of a Fetch-all-pages run.
+///
+/// The router reports pages per call, not per page, so the totals update once
+/// per chunk. They are cumulative rather than per-chunk, which is what the row's
+/// status line shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FetchAllProgress {
+    pub pages_fetched: usize,
+    pub jobs_stored: usize,
+    /// The budget for this click, so the UI can say "of 50".
+    pub budget: usize,
+}
+
+/// Result of a Fetch-all-pages run, plus the post-run portal row.
+#[derive(Debug, Clone)]
+pub struct FetchAllPagesReport {
+    pub portal: Portal,
+    pub pages_fetched: usize,
+    pub jobs_stored: usize,
+    pub stopped_reason: FetchAllStop,
+}
+
+/// Walk a portal's list from its cursor until the end, the budget, or Stop.
+///
+/// This is a bounded, cancellable loop over `fetch_portal_more`, not a new
+/// acquisition path: every chunk goes through the router, which owns the cursor
+/// and the storage. `cancel` is checked between chunks, so a Stop takes effect
+/// within one chunk rather than mid-request.
+///
+/// The loop also stops when a chunk cannot advance — an ATS adapter pages
+/// internally and reports no cursor, and a selector config without a
+/// `url_template` has no page to jump to. Without that guard the same request
+/// would repeat until the budget.
+pub async fn fetch_all_pages<F>(
+    pool: &SqlitePool,
+    portal_id: i64,
+    source: &dyn FetchSource,
+    browser: Option<&dyn BrowserBackend>,
+    cancel: &AtomicBool,
+    mut progress: F,
+) -> Result<FetchAllPagesReport>
+where
+    F: FnMut(&FetchAllProgress),
+{
+    let mut pages_fetched = 0;
+    let mut jobs_stored = 0;
+    let mut last_start = 0;
+
+    let stopped_reason = loop {
+        if cancel.load(Ordering::Relaxed) {
+            break FetchAllStop::Cancelled;
+        }
+
+        let outcome = match router::fetch_portal_more_cancellable(
+            pool,
+            portal_id,
+            source,
+            browser,
+            Some(cancel),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => break FetchAllStop::Failed(error),
+        };
+
+        // A run that starts where the last one started cannot make progress,
+        // which also covers a cursor write that failed silently.
+        if outcome.first_page <= last_start {
+            break FetchAllStop::NoProgress;
+        }
+        last_start = outcome.first_page;
+
+        let chunk_pages = outcome.pages_fetched.unwrap_or(0);
+        pages_fetched += chunk_pages;
+        jobs_stored += outcome.jobs_fetched;
+        progress(&FetchAllProgress {
+            pages_fetched,
+            jobs_stored,
+            budget: FETCH_ALL_PAGE_BUDGET,
+        });
+
+        if outcome.end_of_list {
+            break FetchAllStop::EndOfList;
+        }
+        if cancel.load(Ordering::Relaxed) {
+            break FetchAllStop::Cancelled;
+        }
+        if chunk_pages == 0 || outcome.next_page.is_none() {
+            break FetchAllStop::NoProgress;
+        }
+        // Checked between chunks, so a chunk that crosses the budget finishes:
+        // the total can exceed the budget by at most `max_pages - 1`.
+        if pages_fetched >= FETCH_ALL_PAGE_BUDGET {
+            break FetchAllStop::BudgetExhausted;
+        }
+    };
+
+    let portal = portals::get(pool, portal_id)
+        .await?
+        .ok_or_else(|| CoreError::Internal("portal vanished during fetch"))?;
+
+    Ok(FetchAllPagesReport {
+        portal,
+        pages_fetched,
+        jobs_stored,
+        stopped_reason,
+    })
+}
+
 /// Preview a draft portal configuration without writing anything.
 ///
 /// This is the "Test config" button's core path. It takes no pool: a preview

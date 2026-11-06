@@ -182,3 +182,22 @@ pub async fn set_last_page_fetched(pool: &SqlitePool, id: i64, page: i64) -> Res
         .await?;
     Ok(())
 }
+
+/// Raise the continuation cursor, never lower it.
+///
+/// A page-one fetch reads the top of the list and must not rewind a crawl that
+/// already reached deeper pages; only the pages it actually read beyond the
+/// stored cursor may move it. The comparison happens in SQL so two concurrent
+/// runs cannot lose the deeper value.
+pub async fn set_last_page_fetched_at_least(pool: &SqlitePool, id: i64, page: i64) -> Result<()> {
+    let page = page.max(0);
+    sqlx::query(
+        "UPDATE portals SET last_page_fetched = ?\n         WHERE id = ? AND last_page_fetched < ?",
+    )
+    .bind(page)
+    .bind(id)
+    .bind(page)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

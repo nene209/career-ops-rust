@@ -17,6 +17,7 @@ use url::Url;
 
 use career_ops_core::acquisition::config::{Provider, ScraperConfig};
 use career_ops_core::acquisition::known_sites::{self, KnownSite};
+use career_ops_core::portals::service::FetchAllProgress;
 
 use crate::view_models::portals::{
     BatchProgress, HealthBadge, PortalRow, PortalsViewModel, SidecarStatus,
@@ -172,6 +173,10 @@ pub struct PortalForm {
     /// Extra Eightfold JSON (pagination/detail caps). The provider and domain
     /// come from the fields above and are written on save.
     pub eightfold_config: String,
+    /// The user has typed in the config JSON since it was generated. The detail
+    /// toggle then defers to the text: two editable representations of one
+    /// field would drift.
+    pub detail_edited: bool,
     pub error: Option<String>,
     /// The result of the last "Test config" run for this form.
     pub preview: PreviewState,
@@ -190,6 +195,7 @@ impl Default for PortalForm {
             scraper_config: String::new(),
             domain: String::new(),
             eightfold_config: String::new(),
+            detail_edited: false,
             error: None,
             preview: PreviewState::default(),
             prefilled_for: None,
@@ -217,6 +223,7 @@ impl PortalForm {
             form.scraper_config.clear();
         }
 
+        form.reload_detail_state();
         form
     }
 
@@ -369,6 +376,62 @@ impl PortalForm {
         self.prefilled_for = Some(site.name.to_string());
         self.error = None;
         self.preview = PreviewState::default();
+        self.reload_detail_state();
+    }
+
+    /// The config text the detail toggle owns for the current provider.
+    fn detail_json(&self) -> &str {
+        match self.provider {
+            Provider::Selectors => &self.scraper_config,
+            Provider::Eightfold => &self.eightfold_config,
+        }
+    }
+
+    /// Whether the fetch will enrich this portal, read from the config text so
+    /// the toggle can never disagree with what Save stores.
+    pub fn detail_enabled(&self) -> bool {
+        detail_enabled_in(self.detail_json(), self.provider)
+    }
+
+    /// The JSON is the single source of truth again after a generated config.
+    fn reload_detail_state(&mut self) {
+        self.detail_edited = false;
+    }
+
+    /// Whether the toggle may be used: the text is still valid and unedited.
+    pub fn detail_toggle_available(&self) -> bool {
+        !self.detail_edited && self.valid_scraper_config()
+    }
+
+    /// Write the toggle into the config text.
+    ///
+    /// The JSON stays the single source of truth, so hand-editing the field and
+    /// flipping the toggle cannot disagree. Turning the toggle off keeps the
+    /// rest of the block (selectors, `max_jobs`) and only records `enabled`.
+    fn apply_detail_enabled(&mut self, enabled: bool) {
+        let mut value = match serde_json::from_str::<serde_json::Value>(self.detail_json().trim()) {
+            Ok(value @ serde_json::Value::Object(_)) => value,
+            _ => serde_json::Value::Object(serde_json::Map::new()),
+        };
+
+        let Some(object) = value.as_object_mut() else {
+            return;
+        };
+        let detail = object
+            .entry("detail")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !detail.is_object() {
+            *detail = serde_json::Value::Object(serde_json::Map::new());
+        }
+        if let Some(detail) = detail.as_object_mut() {
+            detail.insert("enabled".into(), serde_json::Value::Bool(enabled));
+        }
+
+        let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+        match self.provider {
+            Provider::Selectors => self.scraper_config = text,
+            Provider::Eightfold => self.eightfold_config = text,
+        }
     }
 
     /// Prefill a known site once, and only while the provider fields are empty.
@@ -388,6 +451,34 @@ impl PortalForm {
         self.scraper_config.trim().is_empty()
             && self.domain.trim().is_empty()
             && self.eightfold_config.trim().is_empty()
+    }
+}
+
+/// The detail toggle's label. Shared with the screen tests so a copy change
+/// cannot silently break the assertion.
+pub const DETAIL_TOGGLE_LABEL: &str =
+    "Fetch descriptions during fetch (slower, ~25 requests per page)";
+
+/// Whether a stored config enriches, matching the router's rule.
+///
+/// A `detail` block without `enabled` predates Phase 2.8 and enriches. A config
+/// with no `detail` block does not, except for Eightfold boards: their list
+/// carries no description, so the router fills that gap by default.
+fn detail_enabled_in(raw: &str, provider: Provider) -> bool {
+    let eightfold = provider == Provider::Eightfold;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return eightfold;
+    }
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => match value.get("detail") {
+            Some(detail) => detail
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+            None => eightfold,
+        },
+        Err(_) => false,
     }
 }
 
@@ -504,9 +595,16 @@ pub enum PortalsAction {
         data: PortalFormData,
     },
     DeletePortal(i64),
+    /// Read the first pages again. New postings appear at the top of the list;
+    /// the continuation cursor is never rewound.
     FetchOne(i64),
     /// Continue from the portal's stored page cursor.
     FetchMore(i64),
+    /// Walk the list from the cursor until it ends, the budget, or Stop.
+    FetchAllPages(i64),
+    /// Ask the running **Fetch all pages** walk to stop between chunks.
+    CancelFetchAllPages,
+    /// Fetch every portal once, in sequence.
     FetchAll,
     CancelBatch,
     DismissBatch,
@@ -526,8 +624,12 @@ pub struct PortalsRenderState<'a> {
     pub loading: bool,
     pub busy: bool,
     pub manual_busy: bool,
-    /// A single `Fetch now` request for this portal is in flight.
+    /// A single fetch (Refresh or Continue) for this portal is in flight.
     pub fetching_portal: Option<i64>,
+    /// The portal whose **Fetch all pages** walk is in flight.
+    pub fetch_all_portal: Option<i64>,
+    /// Cumulative progress for that walk; `None` until the first chunk lands.
+    pub fetch_all_progress: Option<FetchAllProgress>,
     pub error: Option<&'a str>,
     pub message: Option<&'a str>,
 }
@@ -616,13 +718,15 @@ fn header(
 
         let can_fetch_all = !state.busy && !view_model.rows.is_empty();
         if ui
-            .add_enabled(can_fetch_all, Button::new("Fetch all"))
+            .add_enabled(can_fetch_all, Button::new("Fetch all portals"))
+            .on_hover_text("Fetch every portal once, in sequence")
             .clicked()
         {
             *action = Some(PortalsAction::FetchAll);
         }
         if ui
-            .add_enabled(!state.busy, Button::new("Refresh"))
+            .add_enabled(!state.busy, Button::new("Reload list"))
+            .on_hover_text("Read the portal list and health from the database")
             .clicked()
         {
             *action = Some(PortalsAction::Reload);
@@ -731,6 +835,7 @@ fn row_ui(
         );
 
         let in_flight = state.fetching_portal == Some(row.id)
+            || state.fetch_all_portal == Some(row.id)
             || view_model.batch.as_ref().and_then(|batch| batch.in_flight) == Some(row.id);
 
         if in_flight {
@@ -745,22 +850,53 @@ fn row_ui(
         };
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // A walk owns the row while it runs: the progress line and Stop
+            // replace the actions, so a second click cannot start a second walk.
+            if state.fetch_all_portal == Some(row.id) {
+                if ui.button("Stop").clicked() {
+                    *action = Some(PortalsAction::CancelFetchAllPages);
+                }
+                match state.fetch_all_progress {
+                    Some(progress) => ui.label(
+                        RichText::new(format!(
+                            "Page {} of {} ({} jobs)",
+                            progress.pages_fetched, progress.budget, progress.jobs_stored
+                        ))
+                        .weak(),
+                    ),
+                    None => ui.label(RichText::new("Starting...").weak()),
+                };
+                return;
+            }
+
             if ui.add_enabled(!state.busy, Button::new("Delete")).clicked() {
                 *action = Some(PortalsAction::OpenDelete(row.id));
             }
             if ui.add_enabled(!state.busy, Button::new("Edit")).clicked() {
                 *action = Some(PortalsAction::OpenEdit(row.id));
             }
-            if ui.add_enabled(!state.busy, Button::new("Fetch")).clicked() {
+            if ui
+                .add_enabled(!state.busy, Button::new("Refresh"))
+                .on_hover_text("Read the first pages again; new postings appear at the top")
+                .clicked()
+            {
                 *action = Some(PortalsAction::FetchOne(row.id));
             }
-            if can_fetch_more(row)
-                && ui
-                    .add_enabled(!state.busy, Button::new("Fetch more"))
-                    .on_hover_text("Continue after the last page this portal read")
+            if can_fetch_more(row) {
+                if ui
+                    .add_enabled(!state.busy, Button::new("Continue"))
+                    .on_hover_text("Read the pages after the last one this portal read")
                     .clicked()
-            {
-                *action = Some(PortalsAction::FetchMore(row.id));
+                {
+                    *action = Some(PortalsAction::FetchMore(row.id));
+                }
+                if ui
+                    .add_enabled(!state.busy, Button::new("Fetch all pages"))
+                    .on_hover_text("Walk the list until it ends, up to 50 pages")
+                    .clicked()
+                {
+                    *action = Some(PortalsAction::FetchAllPages(row.id));
+                }
             }
         });
     });
@@ -771,7 +907,7 @@ fn row_ui(
     ui.separator();
 }
 
-/// Whether **Fetch more** can continue this portal's list.
+/// Whether **Continue** and **Fetch all pages** can advance this portal's list.
 ///
 /// Only a provider with an explicit page has a cursor: Eightfold offsets, or a
 /// selector config with a URL template. A chain of next links cannot be jumped
@@ -995,6 +1131,7 @@ fn portal_form_modal(
                 }
             }
 
+            let provider_before = form.provider;
             egui::ComboBox::from_label("Provider")
                 .selected_text(form.provider.label())
                 .show_ui(ui, |ui| {
@@ -1002,16 +1139,24 @@ fn portal_form_modal(
                         ui.selectable_value(&mut form.provider, provider, provider.label());
                     }
                 });
+            if form.provider != provider_before {
+                // The other field carries its own `detail` block; re-read it
+                // rather than showing the previous provider's answer.
+                form.reload_detail_state();
+            }
 
             ui.add_space(4.0);
             match form.provider {
                 Provider::Selectors => {
-                    labelled_multiline(
+                    let response = labelled_multiline(
                         ui,
                         "Scraper config (JSON, optional)",
                         &mut form.scraper_config,
                         5,
                     );
+                    if response.changed() {
+                        form.detail_edited = true;
+                    }
                     ui.label(
                         RichText::new(
                             "CSS selectors for a career page that has no JSON-LD JobPosting. \
@@ -1044,12 +1189,15 @@ fn portal_form_modal(
                             "Domain cannot be empty.",
                         );
                     }
-                    labelled_multiline(
+                    let response = labelled_multiline(
                         ui,
                         "Advanced options (JSON, optional)",
                         &mut form.eightfold_config,
                         3,
                     );
+                    if response.changed() {
+                        form.detail_edited = true;
+                    }
                     ui.label(
                         RichText::new(
                             "Optional pagination/detail caps. Provider and domain come from \
@@ -1065,6 +1213,28 @@ fn portal_form_modal(
                         );
                     }
                 }
+            }
+
+            ui.add_space(4.0);
+            let mut enabled = form.detail_enabled();
+            let toggle = ui
+                .add_enabled(
+                    form.detail_toggle_available(),
+                    egui::Checkbox::new(&mut enabled, DETAIL_TOGGLE_LABEL),
+                )
+                .on_hover_text("Saved as detail.enabled in the provider config");
+            if toggle.changed() {
+                form.apply_detail_enabled(enabled);
+            }
+            if form.detail_edited {
+                ui.label(
+                    RichText::new(
+                        "This config was edited by hand; set `detail.enabled` in the JSON to \
+                         change enrichment.",
+                    )
+                    .weak()
+                    .small(),
+                );
             }
 
             // A report describes the inputs it was run with. Editing the URL,
@@ -1574,5 +1744,110 @@ mod tests {
         };
 
         assert!(!form.matches_known_site(site));
+    }
+
+    // -----------------------------------------------------------------
+    // Detail enrichment toggle (Phase 2.8)
+    // -----------------------------------------------------------------
+
+    fn selectors_form(config: &str) -> PortalForm {
+        PortalForm {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            scraper_config: config.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_fresh_selector_portal_does_not_enrich() {
+        assert!(!selectors_form("").detail_enabled());
+        assert!(!selectors_form(r#"{"list":"article.job"}"#).detail_enabled());
+    }
+
+    /// A `detail` block written before the toggle keeps enriching: Waymo's and
+    /// Ubisoft's registry entries are this shape.
+    #[test]
+    fn an_old_detail_block_shows_the_toggle_on() {
+        assert!(selectors_form(r#"{"detail":{"max_jobs":25}}"#).detail_enabled());
+        assert!(!selectors_form(r#"{"detail":{"enabled":false}}"#).detail_enabled());
+    }
+
+    /// Eightfold's list carries no text, so the router enriches unless the
+    /// config says otherwise; the toggle must show that, not "off".
+    #[test]
+    fn an_eightfold_portal_shows_the_toggle_on() {
+        let form = PortalForm {
+            provider: Provider::Eightfold,
+            domain: "nvidia.com".into(),
+            ..Default::default()
+        };
+        assert!(form.detail_enabled());
+    }
+
+    #[test]
+    fn turning_the_toggle_on_writes_enabled_into_the_config() {
+        let mut form = selectors_form(r#"{"list":"article.job"}"#);
+        form.apply_detail_enabled(true);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&form.scraper_config).expect("config json");
+        assert_eq!(parsed["detail"]["enabled"], serde_json::json!(true));
+        assert_eq!(parsed["list"], serde_json::json!("article.job"));
+        assert!(form.detail_enabled());
+    }
+
+    #[test]
+    fn turning_the_toggle_off_keeps_the_rest_of_the_block() {
+        let mut form = selectors_form(r#"{"detail":{"max_jobs":25}}"#);
+        form.apply_detail_enabled(false);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&form.scraper_config).expect("config json");
+        assert_eq!(parsed["detail"]["enabled"], serde_json::json!(false));
+        assert_eq!(
+            parsed["detail"]["max_jobs"],
+            serde_json::json!(25),
+            "the cap survives the toggle"
+        );
+        assert!(!form.detail_enabled());
+    }
+
+    #[test]
+    fn turning_the_toggle_off_on_eightfold_records_it() {
+        let mut form = PortalForm {
+            provider: Provider::Eightfold,
+            domain: "nvidia.com".into(),
+            ..Default::default()
+        };
+        form.apply_detail_enabled(false);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&form.eightfold_config).expect("extras json");
+        assert_eq!(parsed["detail"]["enabled"], serde_json::json!(false));
+        assert!(!form.detail_enabled());
+    }
+
+    #[test]
+    fn a_hand_edited_config_disables_the_toggle() {
+        let mut form = selectors_form(r#"{"list":"article.job"}"#);
+        assert!(form.detail_toggle_available());
+
+        form.detail_edited = true;
+        assert!(!form.detail_toggle_available());
+
+        // Restoring a generated config hands the toggle back.
+        form.apply_known_site(&known_sites::WAYMO);
+        assert!(form.detail_toggle_available());
+        assert!(
+            form.detail_enabled(),
+            "Waymo's entry carries a detail block"
+        );
+    }
+
+    #[test]
+    fn invalid_json_disables_the_toggle() {
+        let form = selectors_form("not json");
+        assert!(!form.detail_toggle_available());
     }
 }

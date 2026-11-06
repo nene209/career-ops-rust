@@ -1,7 +1,8 @@
 # Phase 2.8: Portal Fetch Controls — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.14), §12
-**Status:** Planned — not started
+**Status:** In progress — WS1 (backend) and WS2 (UI) implemented; WS3 (manual
+script, docs, retrospective) pending
 **Last updated:** 2026-11-06
 **Duration:** 2–3 days
 **Depends on:** Phase 2.5 (the page cursor, `fetch_portal_more`, `fetch_batch_cancellable`, `refresh_job`)
@@ -15,6 +16,7 @@
 | :--- | :--- |
 | v0.1 | Initial plan. Splits the current `Fetch` / `Fetch more` into three actions with explicit names, and makes detail enrichment a per-portal opt-in. The intent is to keep the app's fetch semantics legible as the triage agent (Phase 3.2) starts to reason about jobs the user has not looked at. No schema change. |
 | v0.2 | Review decisions recorded. **Naming:** the per-portal actions are **Refresh** / **Continue** / **Fetch all pages**; the screen already has a header **Refresh** (reload the list) and **Fetch all** (every portal), so those become **Reload list** and **Fetch all portals**, and the new action type is `FetchAllPages` because `PortalsAction::FetchAll` already means the batch. Also corrects the variant name (`FetchOne`, not `Fetch`). **Cursor:** Refresh never touches `portals.last_page_fetched`; today a page-1 fetch rewinds a deeper cursor (40 → 5), so this is a behavior change, and the `end_of_list` reset moves to Continue exclusively. **Loop safety:** Fetch all pages is gated on the existing `can_fetch_more` and stops when a chunk makes no progress, because a portal without a cursor never reports `end_of_list`. **Progress:** cumulative pages/jobs after each chunk, since `fetch_portal_more` returns per chunk. **Toggle:** it applies only while the config JSON is unedited; hand-editing the field disables it and points at `detail.enabled`. |
+| v0.3 | WS1 and WS2 implemented. Two refinements the code forced, both recorded here rather than left as drift. **Cursor:** Refresh is *monotonic*, not inert — it raises the cursor to the deepest page it read and never lowers it. Writing nothing at all would break the Phase 2.5 flow (Refresh pages 1–5, then Continue would re-read 1–5), while the rewind it fixes is the lowering half. Continue remains the only run that clears the cursor on `end_of_list`. **Eightfold default:** a board with no `detail` block still enriches, because that has always been its only source of descriptions; the toggle therefore shows *on* for a fresh Eightfold portal and writes `enabled: false` when turned off. Selector portals default to off, as designed. |
 
 ---
 
@@ -55,7 +57,7 @@ The phase is deliberately small. It changes the app's fetch affordance and its e
 | Rename the header **Refresh** → **Reload list** and **Fetch all** → **Fetch all portals** | A change to the header's reload or batch behavior |
 | Per-portal **Fetch descriptions during fetch** toggle, default off | LLM-assisted portal suggestions (Phase 3.2) |
 | Progress and cancel for **Fetch all pages** | Aggregator or web search (out of scope entirely) |
-| Refresh no longer moves the continuation cursor | A change to list-fetch semantics, pagination caps, or the cursor itself |
+| Refresh never rewinds the continuation cursor | A change to list-fetch semantics, pagination caps, or the cursor itself |
 | Tests, docs, retrospective | A change to the router's tiers or failure classification |
 
 ---
@@ -66,7 +68,7 @@ The phase is deliberately small. It changes the app's fetch affordance and its e
 
 | Button | What it does | Cursor effect |
 | :--- | :--- | :--- |
-| **Refresh** | Reads pages 1..=`pagination.max_pages`, updates existing rows, inserts new ones. | **None.** The cursor tracks the deepest page ever fetched; Refresh neither advances nor rewinds it. A returning user gets new top-of-list postings without losing their crawl position. |
+| **Refresh** | Reads pages 1..=`pagination.max_pages`, updates existing rows, inserts new ones. | **Never lowered.** The cursor tracks the deepest page ever fetched: a page-one fetch raises it to the deepest page it read and leaves a deeper value alone. A returning user gets new top-of-list postings without losing their crawl position, and Continue still picks up where the first Refresh ended. |
 | **Continue** | Reads pages `cursor + 1`..=`cursor + pagination.max_pages`, advances the cursor. Disabled when the portal cannot paginate (`can_fetch_more`); after `end_of_list` the cursor resets, so the next Continue starts from page one. | Advances to the highest page read; cleared to 0 on `end_of_list`. |
 | **Fetch all pages** | Repeats Continue in-process until `end_of_list`, the user cancels, no progress is made, or the per-click budget is exhausted. | Advanced by each chunk through Continue; cleared to 0 on `end_of_list`, unchanged on cancel, no-progress, or budget hit. |
 
@@ -76,9 +78,10 @@ Two consequences worth stating: Refresh is the "get me new jobs" action a return
 currently derives the cursor from `next_page` whatever the run's start was, so a
 page-1 fetch on a portal at cursor 40 with `max_pages: 5` writes `5` back: the
 next Continue re-reads pages 6–10. `record_fetch_outcome` therefore takes the
-start kind (`Beginning` / `Resume`), and only a `Resume` run may advance the
-cursor or reset it on `end_of_list`. This is the one behavior change in the
-phase, and it is the reason the phase is worth doing.
+start kind (`Beginning` / `Resume`): a `Beginning` run raises the cursor with
+`portals::set_last_page_fetched_at_least` and never lowers it, and only a
+`Resume` run may clear it on `end_of_list`. This is the one behavior change in
+the phase, and it is the reason the phase is worth doing.
 
 ### 2. Naming: no two buttons share a label
 
@@ -188,18 +191,20 @@ Three buttons is right at the boundary where a toolbar becomes clutter. They ren
 
 1. `portals::service::fetch_all_pages(pool, portal_id, source, browser, cancel, progress) -> Result<FetchAllPagesReport>`. Loops `router::fetch_portal_more` until `end_of_list`, the cancel flag is set, a chunk makes no progress, or 50 pages have been read. Progress is reported after each chunk with cumulative totals; the function never writes the cursor itself.
 2. `DetailConfig` (in `acquisition::html::detail`, shared by `SelectorConfig` and `EightfoldConfig`) gains `enabled: bool` with `#[serde(default = "enabled_by_default")]` returning `true`. `fetch_static_jobs`, `fetch_pages`, and `eightfold::fetch` honor it: `enabled` runs the existing enrichment pass; `enabled == false` or an absent `detail` skips it entirely. Existing `detail` blocks without the field keep enriching.
-3. `record_fetch_outcome` takes the run's `FetchStart`. A `Beginning` run never advances or clears the cursor; only `Resume` may write it. `fetch_portal` (Refresh) and `fetch_portal_more` (Continue) otherwise keep their current behavior.
+3. `record_fetch_outcome` takes the run's `FetchStart`. A `Beginning` run raises the cursor to the deepest page it read (`set_last_page_fetched_at_least`) and never lowers it; only a `Resume` run clears it on `end_of_list`. `fetch_portal` (Refresh) and `fetch_portal_more` (Continue) otherwise keep their current behavior.
 4. Unit tests:
    - `fetch_all_pages` stops at `end_of_list`.
    - `fetch_all_pages` stops when the cancel flag is set.
    - `fetch_all_pages` stops at the per-click budget with `BudgetExhausted`.
    - `fetch_all_pages` stops with `NoProgress` for a portal that cannot paginate.
    - `fetch_all_pages` reports cumulative `pages_fetched` and `jobs_stored`.
-   - Refresh leaves `portals.last_page_fetched` unchanged when it hits `LimitReached` (the regression this phase fixes).
+   - Refresh never lowers `portals.last_page_fetched` (the regression this phase fixes).
+   - Refresh still raises it when it reads deeper, so Refresh → Continue works.
    - A Refresh that reaches the list end does not clear the cursor.
    - Continue still advances the cursor and clears it on `end_of_list`.
    - A `detail` block without `enabled` still enriches (regression test for existing configs).
    - A `detail` block with `enabled: false` skips enrichment.
+   - An Eightfold board with no `detail` block still enriches.
 5. An integration test: seed a portal and a `MockFetchSource` producing 5 pages, run Refresh then Continue then Fetch all pages, and assert the cursor, row count, and enrichment calls follow the table in design decision 1.
 
 ### Acceptance criteria
@@ -210,7 +215,7 @@ Three buttons is right at the boundary where a toolbar becomes clutter. They ren
 | Cancel stops between chunks | Core test with a pre-set flag |
 | Budget stops at 50 pages | Core test |
 | A portal that cannot paginate stops immediately instead of repeating | Core test (`NoProgress`) |
-| Refresh leaves `last_page_fetched` unchanged, in both stop cases | Core test |
+| Refresh never lowers `last_page_fetched`, and still raises it when it reads deeper | Core test |
 | `detail.enabled` gates enrichment without breaking old configs | Unit + integration tests |
 
 ---
@@ -278,7 +283,7 @@ No network for any new test. No new dependency. No migration.
 | P2.8-R2 | **Fetch all pages runs into a WAF.** A 50-page walk is many requests. | Medium | Bounded per click, cancellable, honest result message. The WAF already skips and reports; no new evasion. |
 | P2.8-R3 | **Refresh unexpectedly skips new jobs.** Some boards reorder on each fetch. | Low | Refresh reads from page 1 every time; the new-postings case is exactly what it is for. |
 | P2.8-R4 | **Old `detail` blocks silently start enriching.** | Low | Backward-compatible default is `true` when `detail` exists; a regression test pins it. |
-| P2.8-R5 | **Refresh's cursor rule changes existing behavior.** A deep crawl is no longer rewound by a page-1 fetch. | Medium | It is the bug being fixed, not a side effect: tests pin both stop cases, and Continue remains the only writer. |
+| P2.8-R5 | **Refresh's cursor rule changes existing behavior.** A deep crawl is no longer rewound by a page-1 fetch. | Medium | It is the bug being fixed, not a side effect: the write is monotonic, tests pin both halves (raise, never lower), and only Continue clears the cursor. |
 | P2.8-R6 | **Two "Fetch all" meanings confuse the user.** The header batch and the per-row walk. | Low | Labels are distinct ("Fetch all portals" vs "Fetch all pages") and the row action is the one with a budget and a Stop. |
 
 ---
@@ -288,7 +293,7 @@ No network for any new test. No new dependency. No migration.
 1. **Refresh**, **Continue**, and **Fetch all pages** are present, distinct, and behave per design decision 1; the header actions read **Reload list** and **Fetch all portals**.
 2. **Fetch all pages** stops at end-of-list, cancel, no progress, or 50 pages, and reports which.
 3. **Fetch all pages** is cancellable and shows cumulative per-chunk progress.
-4. Refresh never writes `portals.last_page_fetched`; Continue is its only writer.
+4. Refresh never lowers `portals.last_page_fetched`; Continue is the only run that clears it.
 5. The per-portal detail toggle exists, defaults off for new configs, is disabled after a hand edit, and is honored by all fetch paths.
 6. Existing `detail` blocks (Waymo, Ubisoft) continue to enrich without changes.
 7. No schema change and no new dependency.
@@ -311,6 +316,6 @@ No network for any new test. No new dependency. No migration.
 
 - Not a triage phase (Phase 3.2).
 - Not a preference or queue layer (Phase 2.9).
-- Not a change to list-fetch semantics: the tiers, the caps, and the failure classification are untouched. The one acquisition change is the cursor rule (Refresh stops writing it), which is the bug this phase exists to fix.
+- Not a change to list-fetch semantics: the tiers, the caps, and the failure classification are untouched. The one acquisition change is the cursor rule (Refresh stops lowering it), which is the bug this phase exists to fix.
 - Not a change to the pipeline limit.
 - Not a UI redesign of the Portals screen beyond the fetch row and the two header labels.

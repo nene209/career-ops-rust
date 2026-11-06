@@ -7,12 +7,13 @@
 use career_ops_app::screens::portals::{
     self, ConfigPreview, ManualEntryView, ManualTab, PortalForm, PortalFormData, PortalModal,
     PortalsAction, PortalsRenderState, PortalsView, PreviewInputs, PreviewSample, PreviewState,
-    RenderModeChoice,
+    RenderModeChoice, DETAIL_TOGGLE_LABEL,
 };
 use career_ops_app::view_models::portals::{
     BatchProgress, HealthBadge, PortalRow, PortalsViewModel, SidecarStatus,
 };
 use career_ops_core::acquisition::config::{Provider, ScraperConfig};
+use career_ops_core::portals::service::FetchAllProgress;
 use egui::accesskit::Role;
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
@@ -28,6 +29,8 @@ fn idle_state<'a>() -> PortalsRenderState<'a> {
         busy: false,
         manual_busy: false,
         fetching_portal: None,
+        fetch_all_portal: None,
+        fetch_all_progress: None,
         error: None,
         message: None,
     }
@@ -121,7 +124,7 @@ fn empty_state_opens_the_add_portal_action() {
 }
 
 #[test]
-fn row_fetch_returns_the_portal_id() {
+fn row_refresh_returns_the_portal_id() {
     let view_model = PortalsViewModel {
         rows: vec![row(1, "Acme", HealthBadge::NeverFetched)],
         ..Default::default()
@@ -129,7 +132,9 @@ fn row_fetch_returns_the_portal_id() {
     let mut harness = test_harness(&view_model, PortalsView::default(), idle_state());
 
     harness.run();
-    harness.get_by_role_and_label(Role::Button, "Fetch").click();
+    harness
+        .get_by_role_and_label(Role::Button, "Refresh")
+        .click();
     harness.run();
 
     assert!(harness
@@ -962,7 +967,7 @@ fn cancelling_the_chooser_closes_it() {
 }
 
 #[test]
-fn fetch_more_is_offered_for_an_offset_provider() {
+fn paginated_actions_are_offered_for_an_offset_provider() {
     let view_model = PortalsViewModel {
         rows: vec![PortalRow {
             scraper_config: Some(r#"{"provider":"eightfold","domain":"nvidia.com"}"#.into()),
@@ -974,11 +979,12 @@ fn fetch_more_is_offered_for_an_offset_provider() {
     let mut harness = test_harness(&view_model, PortalsView::default(), idle_state());
     harness.run();
 
-    let _ = harness.get_by_role_and_label(Role::Button, "Fetch more");
+    let _ = harness.get_by_role_and_label(Role::Button, "Continue");
+    let _ = harness.get_by_role_and_label(Role::Button, "Fetch all pages");
 }
 
 #[test]
-fn fetch_more_is_absent_for_a_next_link_portal() {
+fn paginated_actions_are_absent_for_a_next_link_portal() {
     let view_model = PortalsViewModel {
         rows: vec![PortalRow {
             scraper_config: Some(r#"{"next":"a[rel=next]"}"#.into()),
@@ -990,13 +996,15 @@ fn fetch_more_is_absent_for_a_next_link_portal() {
     let mut harness = test_harness(&view_model, PortalsView::default(), idle_state());
     harness.run();
 
-    assert!(
-        harness
-            .query_by_role_and_label(Role::Button, "Fetch more")
-            .is_none(),
-        "a next-link chain cannot be jumped into"
-    );
-    let _ = harness.get_by_role_and_label(Role::Button, "Fetch");
+    for label in ["Continue", "Fetch all pages"] {
+        assert!(
+            harness
+                .query_by_role_and_label(Role::Button, label)
+                .is_none(),
+            "a next-link chain cannot be jumped into, so {label} must not be offered"
+        );
+    }
+    let _ = harness.get_by_role_and_label(Role::Button, "Refresh");
 }
 
 #[test]
@@ -1011,6 +1019,166 @@ fn header_offers_add_and_fetch_all_when_portals_exist() {
 
     let _add_portal = harness.get_by_role_and_label(Role::Button, "Add portal");
     let _add_job = harness.get_by_role_and_label(Role::Button, "Add job");
-    let _fetch_all = harness.get_by_role_and_label(Role::Button, "Fetch all");
-    let _refresh = harness.get_by_role_and_label(Role::Button, "Refresh");
+    let _fetch_all = harness.get_by_role_and_label(Role::Button, "Fetch all portals");
+    let _reload = harness.get_by_role_and_label(Role::Button, "Reload list");
+}
+
+// -----------------------------------------------------------------
+// Fetch controls (Phase 2.8)
+// -----------------------------------------------------------------
+
+fn eightfold_row(id: i64) -> PortalRow {
+    PortalRow {
+        scraper_config: Some(r#"{"provider":"eightfold","domain":"nvidia.com"}"#.into()),
+        ..row(id, "NVIDIA", HealthBadge::Healthy)
+    }
+}
+
+#[test]
+fn a_paginated_row_offers_three_distinct_actions() {
+    let view_model = PortalsViewModel {
+        rows: vec![eightfold_row(1)],
+        ..Default::default()
+    };
+
+    let mut harness = test_harness(&view_model, PortalsView::default(), idle_state());
+    harness.run();
+
+    for label in ["Refresh", "Continue", "Fetch all pages"] {
+        let _ = harness.get_by_role_and_label(Role::Button, label);
+    }
+}
+
+#[test]
+fn fetch_all_pages_emits_the_portal_id() {
+    let view_model = PortalsViewModel {
+        rows: vec![eightfold_row(1)],
+        ..Default::default()
+    };
+
+    let mut harness = test_harness(&view_model, PortalsView::default(), idle_state());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Fetch all pages")
+        .click();
+    harness.run();
+
+    assert!(harness
+        .state()
+        .actions
+        .contains(&PortalsAction::FetchAllPages(1)));
+}
+
+#[test]
+fn a_running_walk_shows_cumulative_progress_and_stop() {
+    let view_model = PortalsViewModel {
+        rows: vec![eightfold_row(1)],
+        ..Default::default()
+    };
+    let state = PortalsRenderState {
+        busy: true,
+        fetch_all_portal: Some(1),
+        fetch_all_progress: Some(FetchAllProgress {
+            pages_fetched: 10,
+            jobs_stored: 200,
+            budget: 50,
+        }),
+        ..idle_state()
+    };
+
+    let mut harness = test_harness(&view_model, PortalsView::default(), state);
+    // The row shows a spinner while the walk runs, so the frame never settles.
+    harness.run_steps(2);
+
+    let _progress = harness.get_by_label("Page 10 of 50 (200 jobs)");
+
+    // The row's other actions are replaced by the walk's own controls, so a
+    // second click cannot start a second walk.
+    for label in ["Edit", "Refresh", "Continue", "Fetch all pages"] {
+        assert!(
+            harness
+                .query_by_role_and_label(Role::Button, label)
+                .is_none(),
+            "{label} must be hidden while the walk runs"
+        );
+    }
+
+    harness.get_by_role_and_label(Role::Button, "Stop").click();
+    harness.run_steps(2);
+
+    assert!(harness
+        .state()
+        .actions
+        .contains(&PortalsAction::CancelFetchAllPages));
+}
+
+#[test]
+fn the_detail_toggle_is_off_and_usable_for_a_fresh_portal() {
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            ..Default::default()
+        })),
+    };
+    let view_model = PortalsViewModel::default();
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let toggle = harness.get_by_label(DETAIL_TOGGLE_LABEL);
+    assert!(!toggle.accesskit_node().is_disabled());
+    assert_eq!(
+        toggle.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::False)
+    );
+}
+
+#[test]
+fn the_detail_toggle_is_on_for_an_old_config() {
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            scraper_config: r#"{"detail":{"max_jobs":25}}"#.into(),
+            ..Default::default()
+        })),
+    };
+    let view_model = PortalsViewModel::default();
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let toggle = harness.get_by_label(DETAIL_TOGGLE_LABEL);
+    assert_eq!(
+        toggle.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::True)
+    );
+}
+
+#[test]
+fn a_hand_edited_config_disables_the_detail_toggle() {
+    let view = PortalsView {
+        modal: Some(PortalModal::Add(PortalForm {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            scraper_config: r#"{"list":"article.job"}"#.into(),
+            detail_edited: true,
+            ..Default::default()
+        })),
+    };
+    let view_model = PortalsViewModel::default();
+
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let toggle = harness.get_by_label(DETAIL_TOGGLE_LABEL);
+    assert!(
+        toggle.accesskit_node().is_disabled(),
+        "a hand-written config owns its own detail block"
+    );
+    let _ = harness.get_by_label(
+        "This config was edited by hand; set `detail.enabled` in the JSON to change enrichment.",
+    );
 }

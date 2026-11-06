@@ -28,7 +28,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use career_ops_core::acquisition::http;
 use career_ops_core::acquisition::manual;
@@ -39,7 +39,10 @@ use career_ops_core::acquisition::router::{
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
 use career_ops_core::model::{ApplicationStatus, CvEntry, FetchTier, JobDescription, Profile};
 use career_ops_core::portals::health::suggested_action;
-use career_ops_core::portals::service::{self, BatchEntry, BatchReport, PortalWithHealth};
+use career_ops_core::portals::service::{
+    self, BatchEntry, BatchReport, FetchAllPagesReport, FetchAllProgress, FetchAllStop,
+    PortalWithHealth,
+};
 use career_ops_core::repo::applications as application_repo;
 use career_ops_core::repo::cv_entries as cv_entry_repo;
 use career_ops_core::repo::job_descriptions as job_repo;
@@ -186,6 +189,12 @@ pub struct CareerOpsApp {
     batch_cancel: Arc<AtomicBool>,
     batch_ids: Vec<i64>,
     fetching_portal: Option<i64>,
+    /// A **Fetch all pages** walk: the task, the portal it belongs to, and the
+    /// shared progress cell the task writes after each chunk.
+    fetch_all_task: Option<AsyncTask<CoreResult<FetchAllPagesReport>>>,
+    fetch_all_portal: Option<i64>,
+    fetch_all_progress: Arc<Mutex<Option<FetchAllProgress>>>,
+    fetch_all_cancel: Arc<AtomicBool>,
 
     pipeline: PipelineViewModel,
     pipeline_view: PipelineView,
@@ -252,6 +261,10 @@ impl CareerOpsApp {
             batch_cancel: Arc::new(AtomicBool::new(false)),
             batch_ids: Vec::new(),
             fetching_portal: None,
+            fetch_all_task: None,
+            fetch_all_portal: None,
+            fetch_all_progress: Arc::new(Mutex::new(None)),
+            fetch_all_cancel: Arc::new(AtomicBool::new(false)),
             pipeline: PipelineViewModel::default(),
             pipeline_view: PipelineView::default(),
             pipeline_loaded: false,
@@ -386,6 +399,13 @@ impl CareerOpsApp {
             PortalsAction::DeletePortal(id) => self.start_portal_delete(id),
             PortalsAction::FetchOne(id) => self.start_portal_fetch(id, false),
             PortalsAction::FetchMore(id) => self.start_portal_fetch(id, true),
+            PortalsAction::FetchAllPages(id) => self.start_fetch_all_pages(id),
+            PortalsAction::CancelFetchAllPages => {
+                // A walk finishes the chunk it is in; the flag is checked before
+                // the next one, so Stop means "within one chunk", not "now".
+                self.fetch_all_cancel.store(true, Ordering::Relaxed);
+                self.portals_message = Some("Stopping after the current page...".into());
+            }
             PortalsAction::FetchAll => self.start_portal_batch(),
             PortalsAction::CancelBatch => {
                 self.batch_cancel.store(true, Ordering::Relaxed);
@@ -646,6 +666,10 @@ impl CareerOpsApp {
         self.batch_cancel = Arc::new(AtomicBool::new(false));
         self.batch_ids.clear();
         self.fetching_portal = None;
+        self.fetch_all_task = None;
+        self.fetch_all_portal = None;
+        self.fetch_all_progress = Arc::new(Mutex::new(None));
+        self.fetch_all_cancel = Arc::new(AtomicBool::new(false));
 
         self.pipeline = PipelineViewModel::default();
         self.pipeline_view = PipelineView::default();
@@ -779,6 +803,94 @@ impl CareerOpsApp {
 
         self.fetching_portal = Some(id);
         self.portals_task = Some(PortalsTask::Fetch(task));
+    }
+
+    /// Walk a portal's list until it ends, the budget, or Stop.
+    ///
+    /// Unlike `start_portal_fetch`, this is not a `PortalsTask`: it reports
+    /// cumulative progress instead of a single outcome, so it keeps its own
+    /// shared cell that the UI reads each frame.
+    fn start_fetch_all_pages(&mut self, portal_id: i64) {
+        if self.fetch_all_task.is_some() || !self.begin_portals_task() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.portals_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let source = Arc::clone(&self.fetch_source);
+        let browser = Arc::clone(&self.browser);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(Mutex::new(None));
+
+        let task_cancel = Arc::clone(&cancel);
+        let task_progress = Arc::clone(&progress);
+        let task = self.spawn(async move {
+            service::fetch_all_pages(
+                &pool,
+                portal_id,
+                source.as_ref(),
+                Some(browser.as_ref()),
+                &task_cancel,
+                |chunk| {
+                    if let Ok(mut slot) = task_progress.lock() {
+                        *slot = Some(*chunk);
+                    }
+                },
+            )
+            .await
+        });
+
+        self.fetch_all_cancel = cancel;
+        self.fetch_all_progress = progress;
+        self.fetch_all_portal = Some(portal_id);
+        self.fetch_all_task = Some(task);
+    }
+
+    fn poll_fetch_all_pages(&mut self, ctx: &egui::Context) {
+        let poll = match self.fetch_all_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Ready(result) => {
+                self.fetch_all_task = None;
+                self.fetch_all_portal = None;
+                self.fetch_all_progress = Arc::new(Mutex::new(None));
+
+                match result {
+                    Ok(report) => {
+                        self.portals.apply_portal(&report.portal);
+                        self.portals_message = Some(fetch_all_summary(&report));
+                        self.portals_error = match &report.stopped_reason {
+                            FetchAllStop::Failed(error) => {
+                                Some(format!("The walk stopped: {}", error.detail))
+                            }
+                            _ => None,
+                        };
+                    }
+                    Err(error) => {
+                        self.portals_message = None;
+                        self.portals_error = Some(error.to_string());
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Pending => {
+                // The progress cell changes without the task finishing.
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            TaskPoll::Cancelled => {
+                self.fetch_all_task = None;
+                self.fetch_all_portal = None;
+                self.fetch_all_progress = Arc::new(Mutex::new(None));
+                self.portals_error = Some("The fetch was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
     }
 
     fn start_portal_batch(&mut self) {
@@ -1686,6 +1798,7 @@ impl Drop for CareerOpsApp {
         self.cv_profile_task = None;
         self.cv_profile_save_task = None;
         self.cv_profile_entry_task = None;
+        self.fetch_all_task = None;
         self.pending = None;
 
         if tokio::runtime::Handle::try_current().is_err() {
@@ -1733,6 +1846,29 @@ fn friendly_error(error: &CoreError) -> String {
                 .into()
         }
         other => other.to_string(),
+    }
+}
+
+/// The one-line result shown after a **Fetch all pages** walk.
+///
+/// Every stop reason names itself, because "Fetched 240 jobs" without saying
+/// why it stopped reads like the board ended when it did not.
+fn fetch_all_summary(report: &FetchAllPagesReport) -> String {
+    let jobs = count_with_noun(report.jobs_stored, "job");
+    let pages = count_with_noun(report.pages_fetched, "page");
+
+    match &report.stopped_reason {
+        FetchAllStop::EndOfList => format!("Fetched {jobs} across {pages}; end of list."),
+        FetchAllStop::BudgetExhausted => format!(
+            "Fetched {jobs} across {pages}. There is more; Continue or Fetch all pages again."
+        ),
+        FetchAllStop::Cancelled => format!("Stopped after {jobs} across {pages}."),
+        FetchAllStop::NoProgress => {
+            format!("Fetched {jobs}; this board has no page to continue from.")
+        }
+        FetchAllStop::Failed(error) => {
+            format!("Stopped after {jobs} across {pages}: {}", error.detail)
+        }
     }
 }
 
@@ -1840,6 +1976,7 @@ impl eframe::App for CareerOpsApp {
         match screen {
             Screen::Ready => {
                 self.poll_portals_task(ui.ctx());
+                self.poll_fetch_all_pages(ui.ctx());
                 self.poll_pipeline_task(ui.ctx());
                 self.poll_pipeline_refresh(ui.ctx());
                 self.poll_pipeline_status(ui.ctx());
@@ -1875,9 +2012,15 @@ impl eframe::App for CareerOpsApp {
 
                 let render_state = PortalsRenderState {
                     loading: matches!(&self.portals_task, Some(PortalsTask::List { .. })),
-                    busy: self.portals_task.is_some(),
+                    busy: self.portals_task.is_some() || self.fetch_all_task.is_some(),
                     manual_busy: matches!(&self.portals_task, Some(PortalsTask::Manual(_))),
                     fetching_portal: self.fetching_portal,
+                    fetch_all_portal: self.fetch_all_portal,
+                    fetch_all_progress: self
+                        .fetch_all_progress
+                        .lock()
+                        .ok()
+                        .and_then(|progress| *progress),
                     error: self.portals_error.as_deref(),
                     message: self.portals_message.as_deref(),
                 };
@@ -2549,6 +2692,7 @@ mod tests {
         while Instant::now() < deadline {
             app.poll_pending(ctx);
             app.poll_portals_task(ctx);
+            app.poll_fetch_all_pages(ctx);
             app.poll_pipeline_task(ctx);
             app.poll_pipeline_refresh(ctx);
             app.poll_pipeline_status(ctx);
@@ -2856,6 +3000,78 @@ mod tests {
             self.page_calls.lock().unwrap().push(url.to_string());
             Ok(r#"<html><body><div class="job-description">Full description from the detail page.</div></body></html>"#.into())
         }
+    }
+
+    /// The Fetch-all-pages task path: the walk runs through the app, updates the
+    /// portal row it touched, and lands a message naming the stop reason.
+    #[test]
+    fn fetch_all_pages_runs_through_the_app() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::with_eightfold_jobs(vec![NormalizedJob {
+            external_id: "eightfold:nvidia.com:1".into(),
+            title: "Engineer".into(),
+            company: "NVIDIA".into(),
+            location: Some("Remote".into()),
+            department: None,
+            employment_type: None,
+            workplace_type: None,
+            source_url: url::Url::parse("https://jobs.nvidia.com/careers/job/1").expect("url"),
+            raw_text: String::new(),
+            posted_at: None,
+        }]));
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
+            company_name: "NVIDIA".into(),
+            url: "https://jobs.nvidia.com/careers".into(),
+            render_mode: "static".into(),
+            scraper_config: Some(r#"{"provider":"eightfold","domain":"nvidia.com"}"#.into()),
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals.rows.len() == 1 && app.portals_task.is_none()
+        });
+
+        let id = app.portals.rows[0].id;
+        app.handle_portals_action(PortalsAction::FetchAllPages(id));
+        wait_until(&mut app, &ctx, |app| {
+            app.fetch_all_task.is_none() && app.portals_message.is_some()
+        });
+
+        assert!(app.fetch_all_portal.is_none(), "the row is handed back");
+        assert_eq!(
+            app.portals_message.as_deref(),
+            Some("Fetched 1 job across 1 page; end of list.")
+        );
+        assert!(app.portals_error.is_none());
+        assert_eq!(app.portals.rows[0].health, HealthBadge::Healthy);
     }
 
     /// Drives a portal fetch through the app with a scripted HTTP source, then

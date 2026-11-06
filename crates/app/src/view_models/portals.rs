@@ -92,6 +92,18 @@ impl PortalsViewModel {
         self.rows.iter().find(|row| row.id == id)
     }
 
+    /// Apply a portal row that changed without a single-fetch outcome (a
+    /// **Fetch all pages** run reports its own result).
+    ///
+    /// The sidecar indicator is left alone: a walk is a Tier 1 operation and does
+    /// not tell us anything about the browser backend.
+    pub fn apply_portal(&mut self, portal: &Portal) {
+        if let Some(row) = self.rows.iter_mut().find(|row| row.id == portal.id) {
+            row.apply_portal(portal);
+            row.apply_health(&PortalHealth::from_portal(portal));
+        }
+    }
+
     /// Apply the post-fetch portal row and update the sidecar indicator.
     pub fn apply_fetch_result(&mut self, portal_id: i64, report: &FetchReport) {
         if let Some(row) = self.rows.iter_mut().find(|row| row.id == portal_id) {

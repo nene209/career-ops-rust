@@ -803,6 +803,7 @@ fn the_real_waymo_detail_page_yields_its_description() {
     let config = DetailConfig {
         fields: None,
         max_jobs: None,
+        ..DetailConfig::default()
     };
     let title = "2027 Summer Intern, BS, Depot Automation";
 

@@ -841,6 +841,115 @@ async fn no_detail_config_means_no_detail_requests() {
 }
 
 // -----------------------------------------------------------------
+// Detail opt-in (Phase 2.8)
+// -----------------------------------------------------------------
+
+/// Every `detail` block written before Phase 2.8 lacks `enabled`; those must
+/// keep enriching. Waymo's and Ubisoft's registry entries are exactly this
+/// shape, and silently turning them off would be a data regression.
+#[tokio::test]
+async fn a_detail_block_without_enabled_still_enriches() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal("https://example.com/careers", detail_config(5)),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(
+        MockFetchSource::with_html(Ok(vec![sample_job("engineer")]))
+            .pages([Ok(detail_html("Full description."))]),
+    );
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.details_attempted, 1);
+    assert_eq!(outcome.details_enriched, 1);
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_disabled_detail_block_skips_enrichment() {
+    let db = common::TestDb::new_raw().await;
+    let mut config = detail_config(5);
+    config["detail"]["enabled"] = serde_json::json!(false);
+    let portal = portals::create(
+        &db.pool,
+        detail_portal("https://example.com/careers", config),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(
+        MockFetchSource::with_html(Ok(vec![sample_job("engineer")]))
+            .pages([Ok(detail_html("Full description."))]),
+    );
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.details_attempted, 0);
+    assert_eq!(outcome.details_enriched, 0);
+    assert!(
+        source.page_calls().is_empty(),
+        "a disabled block must not request any detail page"
+    );
+    assert_eq!(
+        stored_texts(&db.pool).await,
+        vec![sample_job("engineer").raw_text]
+    );
+
+    db.close().await;
+}
+
+/// The Eightfold list carries no description, so an Eightfold portal with no
+/// `detail` block still enriches. This is the one provider whose default is
+/// "on", and the portal form shows the toggle accordingly.
+#[tokio::test]
+async fn an_eightfold_board_enriches_without_a_detail_block() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://jobs.nvidia.com/careers",
+            serde_json::json!({
+                "provider": "eightfold",
+                "domain": "nvidia.com",
+                "pagination": { "max_pages": 1 }
+            }),
+        ),
+    )
+    .await
+    .expect("create portal");
+
+    let source = Arc::new(
+        MockFetchSource::with_eightfold(Ok(PageReport {
+            jobs: vec![eightfold_job("A", "1")],
+            pages_fetched: 1,
+            stop: PaginationStop::EndOfList,
+        }))
+        .pages([Ok("<html></html>".to_string())]),
+    );
+
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(
+        outcome.details_attempted, 1,
+        "an Eightfold board enriches unless its detail block says otherwise"
+    );
+    assert_eq!(source.page_calls().len(), 1);
+
+    db.close().await;
+}
+
+// -----------------------------------------------------------------
 // SmartRecruiters detail endpoint
 // -----------------------------------------------------------------
 
@@ -1332,6 +1441,96 @@ async fn fetch_more_resumes_after_the_last_page() {
         0,
         "the end of the list clears the cursor"
     );
+
+    db.close().await;
+}
+
+/// The cursor as stored, for the assertions below.
+async fn cursor_of(pool: &sqlx::SqlitePool, portal_id: i64) -> i64 {
+    portals::get(pool, portal_id)
+        .await
+        .expect("portal")
+        .expect("row")
+        .last_page_fetched
+}
+
+/// Phase 2.8: a page-one fetch must not rewind a crawl that already reached
+/// deeper pages. Before this rule, a portal at page 40 with `max_pages: 2` was
+/// pushed back to 2 by clicking Refresh, and the next Continue re-read 3–4.
+#[tokio::test]
+async fn refresh_does_not_rewind_a_deep_cursor() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://jobs.nvidia.com/careers",
+            serde_json::json!({
+                "provider": "eightfold",
+                "domain": "nvidia.com",
+                "pagination": { "max_pages": 2 }
+            }),
+        ),
+    )
+    .await
+    .expect("portal");
+    portals::set_last_page_fetched(&db.pool, portal.id, 40)
+        .await
+        .expect("seed cursor");
+
+    let source = Arc::new(MockFetchSource::with_eightfold(Ok(PageReport {
+        jobs: vec![eightfold_job("A", "1")],
+        pages_fetched: 2,
+        stop: PaginationStop::LimitReached,
+    })));
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert_eq!(outcome.first_page, 1);
+    assert_eq!(outcome.next_page, Some(3));
+    assert_eq!(
+        cursor_of(&db.pool, portal.id).await,
+        40,
+        "Refresh raises the cursor at most; it never lowers it"
+    );
+
+    db.close().await;
+}
+
+/// A refresh that reaches the list end learned nothing about the deep end of
+/// the list, so it leaves the stored cursor alone. Clearing it is Continue's
+/// job.
+#[tokio::test]
+async fn a_refresh_that_reaches_the_end_leaves_the_cursor_alone() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        detail_portal(
+            "https://jobs.nvidia.com/careers",
+            serde_json::json!({
+                "provider": "eightfold",
+                "domain": "nvidia.com",
+                "pagination": { "max_pages": 2 }
+            }),
+        ),
+    )
+    .await
+    .expect("portal");
+    portals::set_last_page_fetched(&db.pool, portal.id, 6)
+        .await
+        .expect("seed cursor");
+
+    let source = Arc::new(MockFetchSource::with_eightfold(Ok(PageReport {
+        jobs: vec![eightfold_job("A", "1")],
+        pages_fetched: 1,
+        stop: PaginationStop::EndOfList,
+    })));
+    let outcome = fetch_portal(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("fetch");
+
+    assert!(outcome.end_of_list);
+    assert_eq!(cursor_of(&db.pool, portal.id).await, 6);
 
     db.close().await;
 }

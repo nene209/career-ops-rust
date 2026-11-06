@@ -10,9 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use career_ops_core::acquisition::error::{AtsError, FailureCause};
+use career_ops_core::acquisition::report::{PageReport, PaginationStop};
 use career_ops_core::model::FetchTier;
 use career_ops_core::portals::health::HealthState;
-use career_ops_core::portals::service::{self, BatchEntry};
+use career_ops_core::portals::service::{self, BatchEntry, FetchAllStop};
 use career_ops_core::repo::portals::{self, NewPortal, RenderMode};
 
 use common::{sample_job, MockFetchSource};
@@ -382,6 +383,195 @@ async fn portal_lifecycle_never_fetched_to_broken_to_healthy() {
     assert!(entries[0].health.failure_cause.is_none());
     assert!(entries[0].health.suggested_action.is_none());
     assert!(entries[0].health.last_success_at.is_some());
+
+    db.close().await;
+}
+
+// -----------------------------------------------------------------
+// fetch_all_pages
+// -----------------------------------------------------------------
+
+fn eightfold_portal(name: &str, max_pages: usize) -> NewPortal {
+    NewPortal {
+        company_name: name.into(),
+        url: "https://jobs.nvidia.com/careers".into(),
+        render_mode: RenderMode::Static,
+        scraper_config: Some(serde_json::json!({
+            "provider": "eightfold",
+            "domain": "nvidia.com",
+            "pagination": { "max_pages": max_pages }
+        })),
+    }
+}
+
+fn chunk(title: &str, pages: usize, stop: PaginationStop) -> Result<PageReport, AtsError> {
+    Ok(PageReport {
+        jobs: vec![sample_job(title)],
+        pages_fetched: pages,
+        stop,
+    })
+}
+
+async fn cursor_of(pool: &sqlx::SqlitePool, portal_id: i64) -> i64 {
+    portals::get(pool, portal_id)
+        .await
+        .expect("portal")
+        .expect("row")
+        .last_page_fetched
+}
+
+/// The walk reads chunk after chunk until the board ends, reports it, and
+/// leaves the cursor cleared so the next Continue starts over.
+#[tokio::test]
+async fn fetch_all_pages_stops_at_the_end_of_the_list() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(&db.pool, eightfold_portal("Acme", 2))
+        .await
+        .unwrap();
+
+    let source = Arc::new(MockFetchSource::sequence_eightfold([
+        chunk("a", 2, PaginationStop::LimitReached),
+        chunk("b", 2, PaginationStop::LimitReached),
+        chunk("c", 1, PaginationStop::EndOfList),
+    ]));
+
+    let cancel = AtomicBool::new(false);
+    let mut progress = Vec::new();
+    let report =
+        service::fetch_all_pages(&db.pool, portal.id, source.as_ref(), None, &cancel, |p| {
+            progress.push(*p)
+        })
+        .await
+        .expect("fetch_all_pages");
+
+    assert_eq!(report.stopped_reason, FetchAllStop::EndOfList);
+    assert_eq!(report.pages_fetched, 5);
+    assert_eq!(report.jobs_stored, 3);
+    assert_eq!(source.eightfold_calls().len(), 3);
+    assert_eq!(
+        cursor_of(&db.pool, portal.id).await,
+        0,
+        "the end of the list clears the cursor"
+    );
+    assert!(report.portal.last_verified_at.is_some());
+
+    // Progress is cumulative and reported once per chunk.
+    let pages: Vec<usize> = progress.iter().map(|p| p.pages_fetched).collect();
+    assert_eq!(pages, vec![2, 4, 5]);
+    assert_eq!(progress.len(), 3);
+    assert!(progress.iter().all(|p| p.budget == 50));
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn fetch_all_pages_stops_when_the_user_cancels() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(&db.pool, eightfold_portal("Acme", 2))
+        .await
+        .unwrap();
+    let source = Arc::new(MockFetchSource::sequence_eightfold([chunk(
+        "a",
+        2,
+        PaginationStop::LimitReached,
+    )]));
+
+    // Set before the first chunk: nothing is requested at all.
+    let cancel = AtomicBool::new(true);
+    let report =
+        service::fetch_all_pages(&db.pool, portal.id, source.as_ref(), None, &cancel, |_| {})
+            .await
+            .expect("fetch_all_pages");
+
+    assert_eq!(report.stopped_reason, FetchAllStop::Cancelled);
+    assert_eq!(report.pages_fetched, 0);
+    assert!(source.eightfold_calls().is_empty());
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn fetch_all_pages_stops_at_the_page_budget() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(&db.pool, eightfold_portal("Acme", 5))
+        .await
+        .unwrap();
+
+    // Ten chunks of five pages reach the fifty-page budget exactly.
+    let source =
+        Arc::new(MockFetchSource::sequence_eightfold((0..10).map(|index| {
+            chunk(&format!("job-{index}"), 5, PaginationStop::LimitReached)
+        })));
+
+    let cancel = AtomicBool::new(false);
+    let report =
+        service::fetch_all_pages(&db.pool, portal.id, source.as_ref(), None, &cancel, |_| {})
+            .await
+            .expect("fetch_all_pages");
+
+    assert_eq!(report.stopped_reason, FetchAllStop::BudgetExhausted);
+    assert_eq!(report.pages_fetched, service::FETCH_ALL_PAGE_BUDGET);
+    assert_eq!(source.eightfold_calls().len(), 10);
+
+    db.close().await;
+}
+
+/// An ATS adapter pages internally and reports no cursor. Without the
+/// no-progress guard the loop would repeat the same request fifty times.
+#[tokio::test]
+async fn fetch_all_pages_stops_when_the_provider_cannot_continue() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        static_portal("Acme", "https://boards.greenhouse.io/acme/jobs/1"),
+    )
+    .await
+    .unwrap();
+    let source = Arc::new(MockFetchSource::with_ats(Ok(vec![sample_job("engineer")])));
+
+    let cancel = AtomicBool::new(false);
+    let report =
+        service::fetch_all_pages(&db.pool, portal.id, source.as_ref(), None, &cancel, |_| {})
+            .await
+            .expect("fetch_all_pages");
+
+    assert_eq!(report.stopped_reason, FetchAllStop::NoProgress);
+    assert_eq!(report.pages_fetched, 0);
+    assert_eq!(report.jobs_stored, 1);
+    assert_eq!(
+        source.ats_calls().len(),
+        1,
+        "the walk must not repeat a request that cannot advance"
+    );
+
+    db.close().await;
+}
+
+/// A failing chunk stops the walk and keeps the pages already stored.
+#[tokio::test]
+async fn fetch_all_pages_reports_a_failed_chunk() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(&db.pool, eightfold_portal("Acme", 2))
+        .await
+        .unwrap();
+    let source = Arc::new(MockFetchSource::sequence_eightfold([
+        chunk("a", 2, PaginationStop::LimitReached),
+        Err(AtsError::Transport("boom".into())),
+    ]));
+
+    let cancel = AtomicBool::new(false);
+    let report =
+        service::fetch_all_pages(&db.pool, portal.id, source.as_ref(), None, &cancel, |_| {})
+            .await
+            .expect("fetch_all_pages");
+
+    assert!(report.stopped_reason.is_failure());
+    assert_eq!(report.pages_fetched, 2);
+    assert_eq!(report.jobs_stored, 1);
+    match report.stopped_reason {
+        FetchAllStop::Failed(error) => assert_eq!(error.cause, FailureCause::Transport),
+        other => panic!("expected a failed chunk, got {other:?}"),
+    }
 
     db.close().await;
 }

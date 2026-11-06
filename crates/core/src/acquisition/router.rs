@@ -56,9 +56,23 @@ type FetchResult<T> = std::result::Result<T, FetchError>;
 /// If the portal row no longer exists (deleted mid-fetch), the UPDATE
 /// affects zero rows and returns `Ok`. That is fine: there is nothing
 /// to record against.
+///
+/// ## The continuation cursor
+///
+/// `start` decides how the cursor moves, because the two buttons mean
+/// different things:
+///
+/// - **Refresh** (`Beginning`) raises the cursor to the deepest page it read
+///   and never lowers it. A page-one fetch on a portal already crawled to page
+///   40 must not rewind to 5, and must not clear the cursor either: it did not
+///   learn anything about the deep end of the list.
+/// - **Continue** (`Resume`) owns the cursor: it advances to the highest page
+///   read and clears it to zero at the end of the list, so the next Continue
+///   starts over.
 async fn record_fetch_outcome(
     pool: &SqlitePool,
     portal_id: i64,
+    start: FetchStart,
     result: &FetchResult<FetchOutcome>,
 ) {
     let cause = match result {
@@ -73,24 +87,46 @@ async fn record_fetch_outcome(
         );
     }
 
-    // Advance the continuation cursor only for outcomes that say where the
-    // next run should start. A partial failure leaves it alone, so the next
-    // attempt retries the range that failed.
+    // Advance the continuation cursor according to the run's start. A partial
+    // failure leaves it alone, so the next attempt retries the range that
+    // failed.
     let Ok(outcome) = result else {
         return;
     };
-    let cursor = if outcome.end_of_list {
-        Some(0)
-    } else {
-        outcome.next_page.map(|page| page.saturating_sub(1) as i64)
-    };
-    if let Some(cursor) = cursor {
-        if let Err(e) = portals::set_last_page_fetched(pool, portal_id, cursor).await {
-            tracing::warn!(
-                portal = portal_id,
-                error = %e,
-                "could not record the fetch cursor"
-            );
+
+    match start {
+        FetchStart::Beginning => {
+            if let Some(page) = outcome.next_page {
+                if let Err(e) = portals::set_last_page_fetched_at_least(
+                    pool,
+                    portal_id,
+                    page.saturating_sub(1) as i64,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        portal = portal_id,
+                        error = %e,
+                        "could not raise the fetch cursor"
+                    );
+                }
+            }
+        }
+        FetchStart::Resume => {
+            let cursor = if outcome.end_of_list {
+                Some(0)
+            } else {
+                outcome.next_page.map(|page| page.saturating_sub(1) as i64)
+            };
+            if let Some(cursor) = cursor {
+                if let Err(e) = portals::set_last_page_fetched(pool, portal_id, cursor).await {
+                    tracing::warn!(
+                        portal = portal_id,
+                        error = %e,
+                        "could not record the fetch cursor"
+                    );
+                }
+            }
         }
     }
 }
@@ -335,7 +371,22 @@ pub async fn fetch_portal_more(
     source: &dyn FetchSource,
     browser: Option<&dyn BrowserBackend>,
 ) -> FetchResult<FetchOutcome> {
-    fetch_portal_starting_at(pool, portal_id, source, browser, None, FetchStart::Resume).await
+    fetch_portal_more_cancellable(pool, portal_id, source, browser, None).await
+}
+
+/// As `fetch_portal_more`, stopping detail enrichment between jobs when
+/// `cancel` is set.
+///
+/// **Fetch all pages** passes its shared flag so a long walk can be stopped
+/// between chunks.
+pub async fn fetch_portal_more_cancellable(
+    pool: &SqlitePool,
+    portal_id: i64,
+    source: &dyn FetchSource,
+    browser: Option<&dyn BrowserBackend>,
+    cancel: Option<&AtomicBool>,
+) -> FetchResult<FetchOutcome> {
+    fetch_portal_starting_at(pool, portal_id, source, browser, cancel, FetchStart::Resume).await
 }
 
 /// As `fetch_portal`, but stops detail enrichment between jobs when `cancel`
@@ -371,7 +422,7 @@ async fn fetch_portal_starting_at(
     start: FetchStart,
 ) -> FetchResult<FetchOutcome> {
     let result = fetch_portal_inner(pool, portal_id, source, browser, cancel, start).await;
-    record_fetch_outcome(pool, portal_id, &result).await;
+    record_fetch_outcome(pool, portal_id, start, &result).await;
     result
 }
 
@@ -547,9 +598,12 @@ pub async fn fetch_portal_inner(
 
     // A selector portal opts into descriptions with a `detail` block. An
     // Eightfold board has no list description at all, so it enriches by default
-    // under the same Phase 2.2 cap.
+    // under the same Phase 2.2 cap. Since Phase 2.8 the block also carries an
+    // explicit `enabled` switch, which the portal form writes and which turns a
+    // stored block off without deleting its selectors.
     let detail = match config.as_ref().and_then(ScraperConfig::detail) {
-        Some(detail) => Some(detail.clone()),
+        Some(detail) if detail.enabled => Some(detail.clone()),
+        Some(_) => None,
         None if matches!(detail_source, Some(DetailSource::Eightfold { .. })) => {
             Some(DetailConfig::default())
         }
@@ -936,9 +990,11 @@ pub async fn preview(
     };
 
     // Eightfold's list has no description, so it enriches by default; selector
-    // portals stay opt-in through the `detail` block.
+    // portals stay opt-in through the `detail` block, whose `enabled` switch
+    // (Phase 2.8) can turn a stored block off.
     let detail = match config.as_ref().and_then(ScraperConfig::detail) {
-        Some(detail) => Some(detail.clone()),
+        Some(detail) if detail.enabled => Some(detail.clone()),
+        Some(_) => None,
         None if matches!(detail_source, Some(DetailSource::Eightfold { .. })) => {
             Some(DetailConfig::default())
         }
@@ -968,6 +1024,7 @@ pub async fn preview(
                 .and_then(ScraperConfig::detail)
                 .and_then(|detail| detail.fields.clone()),
             max_jobs: Some(PREVIEW_MAX_DETAILS),
+            ..DetailConfig::default()
         };
 
         // Stop at the first description: the report needs one length, and each

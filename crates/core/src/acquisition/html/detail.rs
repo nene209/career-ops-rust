@@ -30,7 +30,7 @@ pub const MAX_DESCRIPTION_BYTES: usize = 200 * 1024;
 ///
 /// `fields` is optional: a site whose detail pages emit JSON-LD needs no
 /// selectors at all, so `{"detail": {}}` is a valid config.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DetailConfig {
     /// Selector fallback for pages without JSON-LD.
     #[serde(default)]
@@ -40,6 +40,33 @@ pub struct DetailConfig {
     /// `1..=MAX_JOBS_CEILING`.
     #[serde(default)]
     pub max_jobs: Option<usize>,
+
+    /// Whether the fetch enriches descriptions.
+    ///
+    /// Absent means "as before Phase 2.8": a `detail` block that predates the
+    /// field keeps enriching. The portal form writes the field explicitly, so a
+    /// portal configured by the app states its intent. A config with no
+    /// `detail` block at all does not enrich, except for Eightfold boards,
+    /// whose list carries no description (the router fills that gap).
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+}
+
+/// A `detail` block without `enabled` predates the toggle; keep enriching.
+fn enabled_by_default() -> bool {
+    true
+}
+
+impl Default for DetailConfig {
+    fn default() -> Self {
+        Self {
+            fields: None,
+            max_jobs: None,
+            // The router's Eightfold fallback constructs this by hand; it must
+            // mean "enrich", not the bool default.
+            enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -255,5 +282,28 @@ mod tests {
         let zero: DetailConfig =
             serde_json::from_value(serde_json::json!({"max_jobs": 0})).expect("config");
         assert_eq!(zero.max_jobs(), 1, "a config can never mean zero jobs");
+    }
+
+    /// A `detail` block written before Phase 2.8 has no `enabled` field; it must
+    /// keep enriching. Waymo's and Ubisoft's registry entries are this shape.
+    #[test]
+    fn a_detail_block_without_enabled_is_on() {
+        let config: DetailConfig =
+            serde_json::from_value(serde_json::json!({"max_jobs": 5})).expect("config");
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn an_explicitly_disabled_detail_block_is_off() {
+        let config: DetailConfig =
+            serde_json::from_value(serde_json::json!({"enabled": false})).expect("config");
+        assert!(!config.enabled);
+    }
+
+    /// The router builds this by hand for Eightfold boards that carry no
+    /// `detail` block; the bool default would silently disable them.
+    #[test]
+    fn the_default_detail_config_enriches() {
+        assert!(DetailConfig::default().enabled);
     }
 }

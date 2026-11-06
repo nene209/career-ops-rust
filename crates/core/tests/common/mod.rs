@@ -185,6 +185,16 @@ impl MockFetchSource {
         mock
     }
 
+    /// A scripted sequence of Eightfold list fetches, for cursor and
+    /// Fetch-all-pages tests.
+    pub fn sequence_eightfold(
+        results: impl IntoIterator<Item = Result<PageReport, AtsError>>,
+    ) -> Self {
+        let mock = Self::default();
+        mock.eightfold_queue.lock().unwrap().extend(results);
+        mock
+    }
+
     pub fn sequence_html(
         results: impl IntoIterator<Item = Result<Vec<NormalizedJob>, AtsError>>,
     ) -> Self {
