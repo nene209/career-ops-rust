@@ -24,7 +24,7 @@ Phase 2.8 makes the fetch actions honest. Phase 3 makes evaluation possible. Nei
 1. **"Which of these 200 new postings do I care about?"** — a preference layer that lets the user say "fintech, remote, staff-or-above" and see the pipeline sorted and badged accordingly, without hiding anything.
 2. **"Do I have to look at every one of them?"** — a manual queue where the user marks a row for details, for evaluation, or dismisses it, and a batch action to fetch the descriptions for everything they flagged.
 
-The second is what Phase 3.2's triage will fill in automatically. Building it manually first means the triage agent has a well-defined state machine to write into, and it means the user can already steer without an LLM.
+The second is what Phase 3.2's triage will fill in automatically. Building it manually first means the assisted triage has a well-defined state machine to write into, and it means the user can already steer without an LLM.
 
 The phase adds three things:
 
@@ -37,7 +37,7 @@ The phase adds three things:
 - `profile.preferences` exists in the schema (Phase 1) and is unused. It is the natural home for the preference layer.
 - `job_descriptions` has no queue state; the Pipeline filters by application status only.
 - `manual::refresh_job` (Phase 2.5) exists for one-row description refresh.
-- The triage agent (Phase 3.2) will need a state to write into. If that state does not exist, triage decisions land in a new table or a new column, which is more churn than creating the queue now.
+- The assisted triage (Phase 3.2) will need a state to write into. If that state does not exist, triage decisions land in a new table or a new column, which is more churn than creating the queue now.
 
 ---
 
@@ -298,7 +298,6 @@ No network for any new test. No new dependency. One migration (0006).
 
 ## What Phase 3.1 Is Not
 
-- Not a triage agent (Phase 3.2).
 - Not a change to fetch semantics (Phase 2.8 owns those).
 - Not an evaluation pipeline (Phase 3 owns that).
 - Not a preference-inference system; the user types their preferences.

@@ -1,4 +1,4 @@
-# Phase 3.2: Triage Agent — Detailed Execution Plan
+# Phase 3.2: Assisted Triage — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.14), §12
 **Status:** Planned — not started
@@ -27,8 +27,6 @@ Phase 3.2 adds two LLM-driven conveniences on top of Phase 3.1's structure:
 2. **Portal suggestions.** One LLM call over the user's `cv_summary` and preferences, producing a short list of companies to consider. The user reviews and approves; nothing is added or fetched automatically.
 
 The distinction is deliberate and comes from Phase 2's trust model: every fetch has been on a user-configured portal, and the app makes requests to URLs the user chose. That property is worth keeping. The agent proposes, the user approves, the app fetches.
-
-The phase is called "Triage Agent" because that is the vocabulary the user used. Internally the code says "triage" and "suggestion," not "agent," because there is no autonomy: single call, structured output, recorded decision, user review.
 
 ### Evidence
 
