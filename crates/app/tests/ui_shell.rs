@@ -67,6 +67,14 @@ fn sidebar_navigation_switches_the_rendered_screen() {
     // the central panel re-rendered, not just the sidebar selection.
     let _placeholder = harness.get_by_label("No portals configured yet");
 
+    // The CV / Profile content is rendered by `CareerOpsApp` (it needs the
+    // database); here the sidebar only has to select it.
+    harness
+        .get_by_role_and_label(Role::Button, "CV / Profile")
+        .click();
+    harness.run();
+    assert_eq!(harness.state().current(), MainScreen::CvProfile);
+
     harness
         .get_by_role_and_label(Role::Button, "Settings")
         .click();

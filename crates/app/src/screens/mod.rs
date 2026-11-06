@@ -10,6 +10,7 @@
 //! the same shell.
 
 pub mod components;
+pub mod cv_profile;
 pub mod lock;
 pub mod pipeline;
 pub mod portals;

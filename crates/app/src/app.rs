@@ -37,12 +37,14 @@ use career_ops_core::acquisition::router::{
     FetchError, FetchOutcome, FetchSource, HttpFetchSource, PreviewReport,
 };
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
-use career_ops_core::model::{ApplicationStatus, FetchTier, JobDescription};
+use career_ops_core::model::{ApplicationStatus, CvEntry, FetchTier, JobDescription, Profile};
 use career_ops_core::portals::health::suggested_action;
 use career_ops_core::portals::service::{self, BatchEntry, BatchReport, PortalWithHealth};
 use career_ops_core::repo::applications as application_repo;
+use career_ops_core::repo::cv_entries as cv_entry_repo;
 use career_ops_core::repo::job_descriptions as job_repo;
 use career_ops_core::repo::portals::{self as portal_repo, NewPortal, RenderMode};
+use career_ops_core::repo::profile::{self as profile_repo, ProfileDetails};
 use career_ops_core::{CoreError, Result as CoreResult};
 use tokio::runtime::Runtime;
 
@@ -50,6 +52,7 @@ use crate::async_bridge::{AsyncTask, TaskPoll};
 use crate::navigation::{MainScreen, NavigationState};
 use crate::recovery;
 use crate::screens;
+use crate::screens::cv_profile::{CvProfileAction, CvProfileRenderState, CvProfileView};
 use crate::screens::lock::{LockAction, LockView, RESET_PHRASE};
 use crate::screens::pipeline::{PipelineAction, PipelineRenderState, PipelineView};
 use crate::screens::portals::{
@@ -57,6 +60,7 @@ use crate::screens::portals::{
     PortalsRenderState, PortalsView, PreviewInputs, PreviewSample,
 };
 use crate::state::{AppState, Screen};
+use crate::view_models::cv_profile::{CvEntryDraft, CvProfileViewModel};
 use crate::view_models::pipeline::{PipelineViewModel, StatusLabel};
 use crate::view_models::portals::{BatchProgress, PortalsViewModel};
 
@@ -69,6 +73,10 @@ type PipelineLoad = CoreResult<(
     HashMap<i64, ApplicationStatus>,
     HashSet<i64>,
 )>;
+
+/// The profile singleton and its CV entries, loaded together so the editor can
+/// render both from one task.
+type CvProfileLoad = CoreResult<(Profile, Vec<CvEntry>)>;
 
 /// How many recent jobs the Pipeline loads at once.
 ///
@@ -83,6 +91,32 @@ const PIPELINE_LIMIT: i64 = 500;
 enum ScreenAction {
     Portals(PortalsAction),
     Pipeline(PipelineAction),
+    CvProfile(CvProfileAction),
+}
+
+/// One write against the CV entry table.
+///
+/// Every write reloads the list afterwards, so the task returns the fresh
+/// entries rather than the one row it touched.
+enum EntryWrite {
+    Create(CvEntryDraft),
+    Update { id: i64, draft: CvEntryDraft },
+    Delete(i64),
+    Reorder(Vec<i64>),
+}
+
+/// What the finished write did, so the completion message is accurate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryWriteOutcome {
+    Created,
+    Updated,
+    Deleted,
+    Reordered,
+}
+
+struct EntryTask {
+    task: AsyncTask<CoreResult<Vec<CvEntry>>>,
+    outcome: EntryWriteOutcome,
 }
 
 enum PortalsTask {
@@ -165,6 +199,16 @@ pub struct CareerOpsApp {
     marking_job: Option<i64>,
     pipeline_delete_task: Option<AsyncTask<CoreResult<()>>>,
     deleting_job: Option<i64>,
+
+    cv_profile: CvProfileViewModel,
+    cv_profile_view: CvProfileView,
+    cv_profile_loaded: bool,
+    cv_profile_error: Option<String>,
+    cv_profile_message: Option<String>,
+    cv_profile_task: Option<AsyncTask<CvProfileLoad>>,
+    cv_profile_save_task: Option<AsyncTask<CoreResult<Profile>>>,
+    cv_profile_entry_task: Option<EntryTask>,
+    cv_profile_deleting: Option<i64>,
 }
 
 impl CareerOpsApp {
@@ -220,6 +264,15 @@ impl CareerOpsApp {
             marking_job: None,
             pipeline_delete_task: None,
             deleting_job: None,
+            cv_profile: CvProfileViewModel::default(),
+            cv_profile_view: CvProfileView::default(),
+            cv_profile_loaded: false,
+            cv_profile_error: None,
+            cv_profile_message: None,
+            cv_profile_task: None,
+            cv_profile_save_task: None,
+            cv_profile_entry_task: None,
+            cv_profile_deleting: None,
         }
     }
 
@@ -372,6 +425,35 @@ impl CareerOpsApp {
             PipelineAction::RefreshJob(job_id) => self.start_job_refresh(job_id),
             PipelineAction::MarkNotAMatch(job_id) => self.start_not_a_match(job_id),
             PipelineAction::DeleteJob(job_id) => self.start_job_delete(job_id),
+        }
+    }
+
+    /// Execute an intent emitted by the CV / Profile screen.
+    ///
+    /// Public so tests can drive the same path the UI uses without rendering.
+    pub fn handle_cv_profile_action(&mut self, action: CvProfileAction) {
+        match action {
+            CvProfileAction::Reload => {
+                self.cv_profile_view = CvProfileView::default();
+                self.cv_profile_loaded = false;
+                self.start_cv_profile_load();
+            }
+            CvProfileAction::SaveProfile(details) => self.start_profile_save(details),
+            CvProfileAction::CreateEntry(draft) => {
+                self.start_entry_write(EntryWrite::Create(draft));
+            }
+            CvProfileAction::UpdateEntry { id, draft } => {
+                self.start_entry_write(EntryWrite::Update { id, draft });
+            }
+            CvProfileAction::DeleteEntry(id) => self.start_entry_write(EntryWrite::Delete(id)),
+            CvProfileAction::MoveEntry { id, direction } => {
+                // The move is a pure reordering of the loaded rows. It returns
+                // the order to persist, or `None` when the row is already at
+                // the edge of its group and nothing should be written.
+                if let Some(order) = self.cv_profile.move_entry(id, direction) {
+                    self.start_entry_write(EntryWrite::Reorder(order));
+                }
+            }
         }
     }
 
@@ -577,6 +659,16 @@ impl CareerOpsApp {
         self.marking_job = None;
         self.pipeline_delete_task = None;
         self.deleting_job = None;
+
+        self.cv_profile = CvProfileViewModel::default();
+        self.cv_profile_view = CvProfileView::default();
+        self.cv_profile_loaded = false;
+        self.cv_profile_error = None;
+        self.cv_profile_message = None;
+        self.cv_profile_task = None;
+        self.cv_profile_save_task = None;
+        self.cv_profile_entry_task = None;
+        self.cv_profile_deleting = None;
     }
 
     fn pool(&self) -> Option<sqlx::SqlitePool> {
@@ -1364,6 +1456,223 @@ impl CareerOpsApp {
     // ------------------------------------------------------------------
     // End Pipeline
     // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // CV / Profile
+    // ------------------------------------------------------------------
+
+    fn start_cv_profile_load(&mut self) {
+        if self.cv_profile_task.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.cv_profile_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.cv_profile_error = None;
+        let task = self.spawn(async move {
+            // This screen is the first thing that touches the profile, so it
+            // creates the singleton instead of leaving the row to Phase 3.
+            let profile = profile_repo::ensure_singleton(&pool).await?;
+            let entries = cv_entry_repo::list_for_profile(&pool, profile.id).await?;
+            Ok((profile, entries))
+        });
+        self.cv_profile_task = Some(task);
+    }
+
+    fn poll_cv_profile_task(&mut self, ctx: &egui::Context) {
+        let poll = match self.cv_profile_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Ready(result) => {
+                self.cv_profile_task = None;
+                match result {
+                    Ok((profile, entries)) => {
+                        self.cv_profile = CvProfileViewModel::from_profile(profile, entries);
+                        self.cv_profile_loaded = true;
+                        self.cv_profile_error = None;
+                    }
+                    Err(error) => self.cv_profile_error = Some(error.to_string()),
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Cancelled => {
+                self.cv_profile_task = None;
+                self.cv_profile_error = Some("The operation was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn start_profile_save(&mut self, details: ProfileDetails) {
+        if self.cv_profile_save_task.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.cv_profile_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.cv_profile_error = None;
+        self.cv_profile_message = None;
+        let task = self.spawn(async move { profile_repo::update_details(&pool, &details).await });
+        self.cv_profile_save_task = Some(task);
+    }
+
+    fn poll_cv_profile_save(&mut self, ctx: &egui::Context) {
+        let poll = match self.cv_profile_save_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Ready(result) => {
+                self.cv_profile_save_task = None;
+                match result {
+                    Ok(profile) => {
+                        // The stored row is the trimmed one, so adopting it is
+                        // what clears the dirty state.
+                        self.cv_profile.apply_saved_profile(profile);
+                        self.cv_profile_message = Some("Profile saved.".into());
+                        self.cv_profile_error = None;
+                    }
+                    Err(error) => {
+                        // The form keeps the user's text; the error says why it
+                        // was not stored.
+                        self.cv_profile_message = None;
+                        self.cv_profile_error =
+                            Some(format!("Could not save the profile: {error}"));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Cancelled => {
+                self.cv_profile_save_task = None;
+                self.cv_profile_error = Some("The save was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn start_entry_write(&mut self, write: EntryWrite) {
+        if self.cv_profile_entry_task.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.cv_profile_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let profile_id = self.cv_profile.profile.id;
+        let outcome = match &write {
+            EntryWrite::Create(_) => EntryWriteOutcome::Created,
+            EntryWrite::Update { .. } => EntryWriteOutcome::Updated,
+            EntryWrite::Delete(_) => EntryWriteOutcome::Deleted,
+            EntryWrite::Reorder(_) => EntryWriteOutcome::Reordered,
+        };
+        self.cv_profile_error = None;
+        self.cv_profile_message = None;
+        self.cv_profile_deleting = match &write {
+            EntryWrite::Delete(id) => Some(*id),
+            _ => None,
+        };
+
+        let task = self.spawn(async move {
+            match write {
+                EntryWrite::Create(draft) => {
+                    cv_entry_repo::create(&pool, draft.to_new_entry(profile_id, None)).await?;
+                }
+                EntryWrite::Update { id, draft } => {
+                    // The editor does not own `metadata`; carry whatever the
+                    // stored row has so an edit never clears it.
+                    let metadata = cv_entry_repo::get(&pool, id)
+                        .await?
+                        .and_then(|entry| entry.metadata);
+                    let input = draft.to_new_entry(profile_id, metadata.as_deref());
+                    cv_entry_repo::update(&pool, id, input).await?;
+                }
+                EntryWrite::Delete(id) => cv_entry_repo::delete(&pool, id).await?,
+                EntryWrite::Reorder(order) => {
+                    cv_entry_repo::reorder(&pool, profile_id, &order).await?;
+                }
+            }
+            // Reload rather than patch the list: `reorder` renumbers the whole
+            // table, and the reloaded rows are the canonical order.
+            cv_entry_repo::list_for_profile(&pool, profile_id).await
+        });
+
+        self.cv_profile_entry_task = Some(EntryTask { task, outcome });
+    }
+
+    fn poll_cv_profile_entry(&mut self, ctx: &egui::Context) {
+        let poll = match self.cv_profile_entry_task.as_mut() {
+            Some(entry_task) => entry_task.task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Ready(result) => {
+                let Some(entry_task) = self.cv_profile_entry_task.take() else {
+                    return;
+                };
+                self.cv_profile_deleting = None;
+                match result {
+                    Ok(entries) => {
+                        self.cv_profile.replace_entries(entries);
+                        match entry_task.outcome {
+                            EntryWriteOutcome::Created | EntryWriteOutcome::Updated => {
+                                self.cv_profile_view.adding = None;
+                                self.cv_profile_view.editing = None;
+                                self.cv_profile_message = Some("Entry saved.".into());
+                            }
+                            EntryWriteOutcome::Deleted => {
+                                self.cv_profile_view.deleting = None;
+                                self.cv_profile_message = Some("Entry deleted.".into());
+                            }
+                            EntryWriteOutcome::Reordered => {
+                                self.cv_profile_message = Some("Order updated.".into());
+                            }
+                        }
+                        self.cv_profile_error = None;
+                    }
+                    Err(error) => {
+                        // A failed write keeps the form and the confirmation on
+                        // screen so the user can retry or cancel.
+                        self.cv_profile_message = None;
+                        self.cv_profile_error =
+                            Some(format!("Could not update the CV entry: {error}"));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Cancelled => {
+                self.cv_profile_entry_task = None;
+                self.cv_profile_deleting = None;
+                self.cv_profile_error = Some("The operation was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // End CV / Profile
+    // ------------------------------------------------------------------
 }
 
 impl Drop for CareerOpsApp {
@@ -1374,6 +1683,9 @@ impl Drop for CareerOpsApp {
         self.pipeline_refresh_task = None;
         self.pipeline_status_task = None;
         self.pipeline_delete_task = None;
+        self.cv_profile_task = None;
+        self.cv_profile_save_task = None;
+        self.cv_profile_entry_task = None;
         self.pending = None;
 
         if tokio::runtime::Handle::try_current().is_err() {
@@ -1532,6 +1844,9 @@ impl eframe::App for CareerOpsApp {
                 self.poll_pipeline_refresh(ui.ctx());
                 self.poll_pipeline_status(ui.ctx());
                 self.poll_pipeline_delete(ui.ctx());
+                self.poll_cv_profile_task(ui.ctx());
+                self.poll_cv_profile_save(ui.ctx());
+                self.poll_cv_profile_entry(ui.ctx());
                 self.drain_batch_progress();
 
                 if self.navigation.current() == MainScreen::Portals
@@ -1550,6 +1865,14 @@ impl eframe::App for CareerOpsApp {
                     self.start_pipeline_load();
                 }
 
+                if self.navigation.current() == MainScreen::CvProfile
+                    && self.cv_profile_task.is_none()
+                    && !self.cv_profile_loaded
+                    && self.cv_profile_error.is_none()
+                {
+                    self.start_cv_profile_load();
+                }
+
                 let render_state = PortalsRenderState {
                     loading: matches!(&self.portals_task, Some(PortalsTask::List { .. })),
                     busy: self.portals_task.is_some(),
@@ -1566,11 +1889,21 @@ impl eframe::App for CareerOpsApp {
                     marking: self.marking_job,
                     deleting: self.deleting_job,
                 };
+                let cv_profile_state = CvProfileRenderState {
+                    loading: self.cv_profile_task.is_some(),
+                    error: self.cv_profile_error.as_deref(),
+                    message: self.cv_profile_message.as_deref(),
+                    saving: self.cv_profile_save_task.is_some()
+                        || self.cv_profile_entry_task.is_some(),
+                    deleting: self.cv_profile_deleting,
+                };
 
                 let navigation = &mut self.navigation;
                 let portals = &self.portals;
                 let pipeline = &self.pipeline;
                 let pipeline_view = &mut self.pipeline_view;
+                let cv_profile = &mut self.cv_profile;
+                let cv_profile_view = &mut self.cv_profile_view;
 
                 let action = screens::shell::show_with(ui, navigation, |ui, screen| match screen {
                     MainScreen::Portals => {
@@ -1579,6 +1912,10 @@ impl eframe::App for CareerOpsApp {
                     MainScreen::Pipeline => {
                         screens::pipeline::show(ui, pipeline, pipeline_view, pipeline_state)
                             .map(ScreenAction::Pipeline)
+                    }
+                    MainScreen::CvProfile => {
+                        screens::cv_profile::show(ui, cv_profile, cv_profile_view, cv_profile_state)
+                            .map(ScreenAction::CvProfile)
                     }
                     other => {
                         screens::shell::placeholder(ui, other);
@@ -1597,6 +1934,7 @@ impl eframe::App for CareerOpsApp {
                 match action {
                     Some(ScreenAction::Portals(action)) => self.handle_portals_action(action),
                     Some(ScreenAction::Pipeline(action)) => self.handle_pipeline_action(action),
+                    Some(ScreenAction::CvProfile(action)) => self.handle_cv_profile_action(action),
                     None => {}
                 }
 
@@ -1621,6 +1959,7 @@ mod tests {
 
     use super::*;
     use crate::async_bridge::TaskPoll;
+    use crate::view_models::cv_profile::MoveDirection;
     use crate::view_models::pipeline::{JobFilter, StatusLabel, TierLabel};
     use crate::view_models::portals::{HealthBadge, PortalRow};
 
@@ -1631,6 +1970,7 @@ mod tests {
     use career_ops_core::acquisition::known_sites;
     use career_ops_core::acquisition::known_sites::SiteEngine;
     use career_ops_core::acquisition::report::PageReport;
+    use career_ops_core::repo::cv_entries::CvEntryKind;
 
     /// Serializes the tests that create a vault. The test keychain uses one
     /// fixed service/account pair for the whole process, so two first-launch
@@ -1988,6 +2328,209 @@ mod tests {
         assert!(!app.pipeline_loaded, "changing a filter must not load");
     }
 
+    /// Create a vault in `dir` and return an app that has unlocked it.
+    ///
+    /// The caller holds `KEYCHAIN_TEST_LOCK`; the helper does not, so the guard
+    /// outlives the app it protects.
+    fn unlocked_app(dir: &Path) -> (CareerOpsApp, egui::Context) {
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut app = CareerOpsApp::new(state, runtime);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        (app, ctx)
+    }
+
+    /// The titles in the Experience group, in display order.
+    fn experience_titles(app: &CareerOpsApp) -> Vec<String> {
+        app.cv_profile.groups()[0]
+            .rows
+            .iter()
+            .map(|row| row.title.clone())
+            .collect()
+    }
+
+    /// The CV screen's database path: the load creates the singleton, the
+    /// profile saves, an entry round-trips, and the stored `cv_summary` is the
+    /// editor's preview.
+    #[test]
+    fn cv_profile_saves_entries_and_reloads_through_the_app() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+
+        app.handle_cv_profile_action(CvProfileAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.cv_profile_loaded && app.cv_profile_task.is_none()
+        });
+        assert_eq!(app.cv_profile.profile.id, 1, "the load creates the row");
+        assert!(!app.cv_profile.is_dirty());
+
+        app.handle_cv_profile_action(CvProfileAction::SaveProfile(ProfileDetails {
+            name: "Ada Lovelace".into(),
+            email: "ada@example.com".into(),
+            phone: Some("+44 20 0000 0000".into()),
+            location: Some("London".into()),
+            summary: Some("Mathematician.".into()),
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.cv_profile_save_task.is_none() && !app.cv_profile.is_dirty()
+        });
+        assert_eq!(app.cv_profile.profile.name, "Ada Lovelace");
+        assert_eq!(app.cv_profile_message.as_deref(), Some("Profile saved."));
+
+        let mut draft = CvEntryDraft::new(CvEntryKind::Experience);
+        draft.title = "Analytical Engine".into();
+        draft.organization = "Babbage".into();
+        draft.start_date = "1842".into();
+        app.handle_cv_profile_action(CvProfileAction::CreateEntry(draft));
+        wait_until(&mut app, &ctx, |app| {
+            app.cv_profile_entry_task.is_none() && app.cv_profile.entries.len() == 1
+        });
+        assert_eq!(app.cv_profile_message.as_deref(), Some("Entry saved."));
+
+        let entry_id = app.cv_profile.entries[0].id;
+
+        // A reload is what a restart would do: everything comes from the
+        // database, not from the in-memory view model.
+        app.handle_cv_profile_action(CvProfileAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.cv_profile_loaded && app.cv_profile_task.is_none()
+        });
+
+        assert_eq!(app.cv_profile.form.name, "Ada Lovelace");
+        assert_eq!(app.cv_profile.form.summary, "Mathematician.");
+        assert_eq!(app.cv_profile.entries.len(), 1);
+        assert_eq!(app.cv_profile.entries[0].title, "Analytical Engine");
+        assert_eq!(
+            app.cv_profile.entries[0].organization.as_deref(),
+            Some("Babbage")
+        );
+
+        // The preview and Phase 3's helper are the same renderer.
+        let preview = app.cv_profile.preview().expect("preview");
+        let pool = app.pool().expect("pool");
+        let stored = app
+            .runtime()
+            .block_on(profile_repo::cv_summary(&pool))
+            .expect("cv_summary")
+            .expect("a populated profile has a summary");
+        assert_eq!(stored, preview);
+        assert!(
+            stored.starts_with("Ada Lovelace\nLondon | ada@example.com | +44 20 0000 0000"),
+            "{stored}"
+        );
+
+        app.handle_cv_profile_action(CvProfileAction::DeleteEntry(entry_id));
+        wait_until(&mut app, &ctx, |app| {
+            app.cv_profile_entry_task.is_none() && app.cv_profile.entries.is_empty()
+        });
+        assert!(app.cv_profile_view.deleting.is_none());
+    }
+
+    /// A move rewrites the stored order, not just the loaded rows. A reload is
+    /// the only way to tell the difference.
+    #[test]
+    fn moving_a_cv_entry_persists_the_display_order() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+
+        app.handle_cv_profile_action(CvProfileAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.cv_profile_loaded && app.cv_profile_task.is_none()
+        });
+
+        for title in ["First", "Second"] {
+            let mut draft = CvEntryDraft::new(CvEntryKind::Experience);
+            draft.title = title.into();
+            app.handle_cv_profile_action(CvProfileAction::CreateEntry(draft));
+            wait_until(&mut app, &ctx, |app| app.cv_profile_entry_task.is_none());
+        }
+        assert_eq!(experience_titles(&app), vec!["First", "Second"]);
+
+        let first_id = app.cv_profile.entries[0].id;
+        app.handle_cv_profile_action(CvProfileAction::MoveEntry {
+            id: first_id,
+            direction: MoveDirection::Down,
+        });
+        wait_until(&mut app, &ctx, |app| app.cv_profile_entry_task.is_none());
+        assert_eq!(experience_titles(&app), vec!["Second", "First"]);
+
+        app.handle_cv_profile_action(CvProfileAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.cv_profile_loaded && app.cv_profile_task.is_none()
+        });
+        assert_eq!(
+            experience_titles(&app),
+            vec!["Second", "First"],
+            "the stored sort order must match what the screen showed"
+        );
+    }
+
+    /// A failed save keeps the user's text and surfaces the error, so nothing
+    /// typed is lost and a retry is possible.
+    #[test]
+    fn a_failed_profile_save_keeps_the_edits() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+
+        app.handle_cv_profile_action(CvProfileAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.cv_profile_loaded && app.cv_profile_task.is_none()
+        });
+
+        // Closing the pool makes the next write fail without breaking the
+        // schema or the rows.
+        let pool = app.pool().expect("pool");
+        app.runtime().block_on(pool.close());
+
+        app.cv_profile.form.name = "  Grace Hopper  ".into();
+        app.handle_cv_profile_action(CvProfileAction::SaveProfile(app.cv_profile.details()));
+        wait_until(&mut app, &ctx, |app| {
+            app.cv_profile_save_task.is_none() && app.cv_profile_error.is_some()
+        });
+
+        assert_eq!(app.cv_profile.form.name, "  Grace Hopper  ");
+        assert!(app.cv_profile.is_dirty());
+        assert!(
+            app.cv_profile_error
+                .as_deref()
+                .is_some_and(|error| error.contains("Could not save the profile")),
+            "{:?}",
+            app.cv_profile_error
+        );
+    }
+
     fn wait_until(
         app: &mut CareerOpsApp,
         ctx: &egui::Context,
@@ -2010,6 +2553,9 @@ mod tests {
             app.poll_pipeline_refresh(ctx);
             app.poll_pipeline_status(ctx);
             app.poll_pipeline_delete(ctx);
+            app.poll_cv_profile_task(ctx);
+            app.poll_cv_profile_save(ctx);
+            app.poll_cv_profile_entry(ctx);
             app.drain_batch_progress();
             if condition(app) {
                 return;

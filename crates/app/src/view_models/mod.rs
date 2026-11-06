@@ -7,5 +7,6 @@
 //! The view layer (in `crate::screens`) renders these view-models. The view
 //! code is replaceable; the view-model code is the application.
 
+pub mod cv_profile;
 pub mod pipeline;
 pub mod portals;

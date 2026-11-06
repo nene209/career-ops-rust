@@ -20,7 +20,7 @@ use super::cv_entries::{self, CvEntryKind};
 ///
 /// Optional fields that are `None` or blank are stored as `NULL`; `name` and
 /// `email` are stored trimmed (an empty email is allowed).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProfileDetails {
     pub name: String,
     pub email: String,
