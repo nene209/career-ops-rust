@@ -1,10 +1,10 @@
 # Phase 3: AI Integration — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.12), §12
-**Status:** Draft v0.5 — decisions recorded; Phase 2.7 (CV/Profile editor) precedes WS1
-**Last updated:** 2026-11-05
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.13), §12
+**Status:** Draft v0.6 — decisions recorded; Phase 2.7 is complete, so WS1 can start
+**Last updated:** 2026-11-06
 **Duration:** 3–4 weeks
-**Depends on:** Phase 2 completion and Phase 2.7 (CV/Profile editor); see Entry Conditions
+**Depends on:** Phase 2 completion and Phase 2.7 (CV/Profile editor, complete); see Entry Conditions
 
 ---
 
@@ -17,6 +17,7 @@
 | v0.3 | Phase 2.3 closed, so the input shape is now known: every provider stores `job_descriptions.raw_text` as **HTML**, measured at 3.6–7.7 KB per posting live. Phase 3 no longer assumes prose. Workstream 3 gains a deterministic `core::text::plain_text` normalizer and an `input_chars` audit field; the plan states why stripping at acquisition was rejected; normalization gets fixtures, unit tests, an acceptance criterion, and an exit criterion. |
 | v0.4 | Revised after Phases 2.5 and 2.6 closed. Records what the codebase already provides (seeded prompts with versioning, `core::text::plain_text`, `applications::ensure` and `Not a match`, the Pipeline search/detail/delete UI, `docs/LIVE_TESTS.md` gating). Corrects three stale assumptions: API keys get their own keychain namespace rather than using `core::keystore`; the original `modes/*.md` prompts cannot be sent verbatim (27–93 KB of tool-oriented instructions); and prompt versioning must be scoped by `is_system` so a user copy and a shipped system update cannot collide. Adds migration 0005 for report provenance, a job-id-based evaluation API that ensures the application, compact embedded prompts derived from the originals, and the current UI integration points. Open questions Q-24–Q-29 need owner decisions before WS1. |
 | v0.5 | Owner decisions recorded. **Q-29:** Phase 2.7 (CV/Profile editor) precedes Phase 3 and provides the canonical `cv_summary`. **Q-25:** DeepSeek is the first provider, through its OpenAI-compatible API; the abstraction stays open for a second. **Q-24, Q-26, Q-27, Q-28, Q-5:** confirmed as recommended. WS1 is now DeepSeek-first; WS2 consumes the Phase 2.7 summary renderer; the exit criterion allows closing with DeepSeek if a second provider would delay the core flows. |
+| v0.6 | Phase 2.7 closed, so the candidate-context dependency is a shipped function rather than an assumption: `repo::profile::cv_summary(&SqlitePool) -> Result<Option<String>>` for production and the pure `render_cv_summary(&Profile, &[CvEntry]) -> Option<String>` for tests, both in `crates/core/src/repo/profile.rs`. The format is fixed and documented in the renderer's doc comment; `None` for an empty profile is covered by `an_empty_profile_has_no_summary`. Phase 3 substitutes the string verbatim into `{{cv_summary}}` and must not re-format. |
 
 ---
 
@@ -87,11 +88,22 @@ paste may be plain text. The pipeline therefore treats normalization as a step
 with fixtures and tests, not as an instruction to the model. The Phase 2.3
 retrospective records the same conclusion under "What to carry into Phase 3".
 
-**Candidate data comes from Phase 2.7.** That phase ships the CV / Profile editor
-and a canonical `cv_summary` renderer in core. Phase 3 calls
-`profile::cv_summary`; it does not format `profile`/`cv_entries` itself. An empty
-profile returns `None`, which Phase 3 turns into an actionable "add your CV"
-error before assembling a prompt.
+**Candidate data comes from Phase 2.7 (complete).** That phase ships the CV /
+Profile editor and the canonical `cv_summary` renderer in
+`crates/core/src/repo/profile.rs`:
+
+- `profile::cv_summary(pool) -> Result<Option<String>>` — loads the singleton
+  (`ensure_singleton`) and its entries, then renders. This is what Phase 3 calls
+  at evaluation time.
+- `profile::render_cv_summary(&Profile, &[CvEntry]) -> Option<String>` — the pure
+  function both `cv_summary` and the screen's preview use. Phase 3 tests can call
+  it with fixtures.
+
+Phase 3 must not format `profile` / `cv_entries` itself: it substitutes the
+returned string verbatim into `{{cv_summary}}`. The format (header, contact line,
+then `Summary:`, `Experience:`, `Education:`, `Skills:` in that order) is
+documented on the renderer. An empty profile returns `None`, which Phase 3 turns
+into an actionable "add your CV" error before assembling a prompt.
 
 ---
 

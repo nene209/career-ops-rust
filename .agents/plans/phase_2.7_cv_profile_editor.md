@@ -1,8 +1,8 @@
 # Phase 2.7: CV / Profile Editor — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.12), §12
-**Status:** In progress — WS1 and WS2 implemented, WS3 (docs, verification,
-retrospective) pending
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.13), §12
+**Status:** Complete — retrospective recorded in
+`.agents/plans/phase_2.7_retrospective.md`
 **Last updated:** 2026-11-06
 **Duration:** 3–5 days
 **Depends on:** Phase 1 (profile and `cv_entries` schema/repositories), Phase 2.1 (shell, components, `async_bridge`)
@@ -17,6 +17,7 @@ retrospective) pending
 | v0.1 | Initial plan. Phase 3 needs candidate context, but the CV / Profile screen is still a placeholder and first launch never creates a profile row. This phase ships the editor, ensures the singleton lazily, and defines one canonical `cv_summary` renderer in core so the UI preview and Phase 3 cannot drift. No schema change, no new dependency. |
 | v0.2 | WS1 implemented: `ProfileDetails` (with `PartialEq` for action comparisons) and `update_details`; `render_cv_summary` / `cv_summary`; ten renderer unit tests in `profile.rs` and six integration tests in `crates/core/tests/cv_profile.rs`, which also give the `cv_entries` CRUD and reorder paths their first coverage. Every kind shares one entry line, so a title-only skill renders as `- Kubernetes`. |
 | v0.3 | WS2 implemented: `view_models/cv_profile.rs` (form, rows, drafts, grouping, move arithmetic, preview through the renderer) and `screens/cv_profile.rs` (identity grid, summary, gated **Save profile**, three entry groups with add/edit forms, two-step inline delete, move gating, preview). `app.rs` loads the singleton on first visit, runs save and entry writes as tasks, and resets the screen on unlock. 10 kittest cases in `crates/app/tests/cv_profile_screen.rs`, three app-level database tests, and the sidebar test now reaches **CV / Profile**. |
+| v0.4 | WS3 implemented: manual script §6a (twelve steps, fresh and populated), the retrospective, and the parent-plan close-out. Phase complete: no migration, no new dependency. |
 
 ---
 
