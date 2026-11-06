@@ -35,8 +35,32 @@ does not know use the same form with no attribution.
 
 Caps are the embedded values, not universal defaults: `pagination.max_pages`
 includes the first page (hard ceiling 20), and `detail.max_jobs` falls back to 40
-(capped at 200). Eightfold descriptions are enabled by default because its list
-carries none; the `detail` block only lowers the cap.
+(capped at 200).
+
+## Enrichment is opt-in (Phase 2.8)
+
+A fetch enriches descriptions only when the portal asks it to, through
+`scraper_config.detail.enabled`. The rules, in order:
+
+1. **A `detail` block without `enabled` keeps enriching.** Waymo's and
+   Ubisoft's entries are this shape and were deliberately **not rewritten**: a
+   stored portal keeps behaving exactly as it did, and the form shows the
+   toggle on.
+2. **`"enabled": false` turns a stored block off** without deleting its
+   selectors, so a portal can be paused and resumed without losing `fields` or
+   `max_jobs`.
+3. **A config with no `detail` block does not enrich**, except for Eightfold
+   boards (NVIDIA): their list carries no description, so the router fills that
+   gap by default. The form shows the toggle on for them and writes
+   `"enabled": false` when it is turned off.
+4. **The form's toggle writes the field into the JSON.** It applies only while
+   the JSON is unedited; after a hand edit it steps aside and points at
+   `detail.enabled`, because two editable representations of one field would
+   drift.
+
+`pagination.max_pages` still bounds one **Refresh** or one **Continue**.
+**Fetch all pages** repeats Continue up to its own 50-page per-click budget, and
+stops early at the end of the list, at Stop, or when a board cannot continue.
 
 ### Adapter entries
 

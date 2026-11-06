@@ -1,8 +1,9 @@
 # Phase 2.8: Portal Fetch Controls — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.14), §12
-**Status:** In progress — WS1 (backend) and WS2 (UI) implemented; WS3 (manual
-script, docs, retrospective) pending
+**Status:** Complete — retrospective recorded in
+`.agents/plans/phase_2.8_retrospective.md`. Manual script §4.3e and §4.4a–c are
+written and await the owner's pass.
 **Last updated:** 2026-11-06
 **Duration:** 2–3 days
 **Depends on:** Phase 2.5 (the page cursor, `fetch_portal_more`, `fetch_batch_cancellable`, `refresh_job`)
@@ -17,6 +18,7 @@ script, docs, retrospective) pending
 | v0.1 | Initial plan. Splits the current `Fetch` / `Fetch more` into three actions with explicit names, and makes detail enrichment a per-portal opt-in. The intent is to keep the app's fetch semantics legible as the triage agent (Phase 3.2) starts to reason about jobs the user has not looked at. No schema change. |
 | v0.2 | Review decisions recorded. **Naming:** the per-portal actions are **Refresh** / **Continue** / **Fetch all pages**; the screen already has a header **Refresh** (reload the list) and **Fetch all** (every portal), so those become **Reload list** and **Fetch all portals**, and the new action type is `FetchAllPages` because `PortalsAction::FetchAll` already means the batch. Also corrects the variant name (`FetchOne`, not `Fetch`). **Cursor:** Refresh never touches `portals.last_page_fetched`; today a page-1 fetch rewinds a deeper cursor (40 → 5), so this is a behavior change, and the `end_of_list` reset moves to Continue exclusively. **Loop safety:** Fetch all pages is gated on the existing `can_fetch_more` and stops when a chunk makes no progress, because a portal without a cursor never reports `end_of_list`. **Progress:** cumulative pages/jobs after each chunk, since `fetch_portal_more` returns per chunk. **Toggle:** it applies only while the config JSON is unedited; hand-editing the field disables it and points at `detail.enabled`. |
 | v0.3 | WS1 and WS2 implemented. Two refinements the code forced, both recorded here rather than left as drift. **Cursor:** Refresh is *monotonic*, not inert — it raises the cursor to the deepest page it read and never lowers it. Writing nothing at all would break the Phase 2.5 flow (Refresh pages 1–5, then Continue would re-read 1–5), while the rewind it fixes is the lowering half. Continue remains the only run that clears the cursor on `end_of_list`. **Eightfold default:** a board with no `detail` block still enriches, because that has always been its only source of descriptions; the toggle therefore shows *on* for a fresh Eightfold portal and writes `enabled: false` when turned off. Selector portals default to off, as designed. |
+| v0.4 | WS3 implemented: manual script §4.3e (toggle, including the hand-edit case) and §4.4/§4.4a–c rewritten for the new labels, `docs/known-sites.md` gains the enrichment rules, the retrospective, and the parent-plan close-out. Phase complete; the manual pass is the owner's. |
 
 ---
 
