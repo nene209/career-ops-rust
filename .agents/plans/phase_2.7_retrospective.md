@@ -6,7 +6,7 @@
 **Period:** 2026-11-06
 **Estimate:** 3–5 days
 **Actual:** one session across three workstreams
-**Status:** Complete against the automated criteria; manual script §6a is ready for the owner's pass.
+**Status:** Complete — the automated criteria pass and manual script §6a is verified (2026-11-06).
 
 ---
 
@@ -47,7 +47,7 @@ what keeps the persisted `sort_order` identical to what the screen shows.
 | 5 | An empty profile returns `None`; the format is documented and tested | ✅ | `an_empty_profile_has_no_summary`, `contact_details_alone_are_not_candidate_data`, `an_empty_editor_has_no_preview`; format in the renderer's doc comment |
 | 6 | No schema change and no new dependency | ✅ | `migrations/` unchanged; `crates/app/Cargo.toml` unchanged |
 | 7 | Offline suite, fmt, and clippy are clean | ✅ | See the command table below |
-| 8 | Manual script §6a, the parent plan, and a short retrospective are updated | ✅ | `docs/manual-test-script.md` §6a, `main.md` v0.13, this document |
+| 8 | Manual script §6a, the parent plan, and a short retrospective are updated | ✅ | `docs/manual-test-script.md` §6a (verified 2026-11-06), `main.md` v0.13, this document |
 
 **Verification commands and results (2026-11-06):**
 

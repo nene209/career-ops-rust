@@ -107,7 +107,7 @@ otherwise.
 | :-- | :--- | :--- |
 | 4.1 | Select **Portals** in the sidebar. | Empty state "No portals configured yet" with **Add your first portal**; header shows "Sidecar: Not started". |
 | 4.2 | Click **Add portal**, choose **Other site**, and enter `not a url` in the URL field. | "Enter a valid http(s) URL." appears under the field and **Save portal** is disabled. |
-| 4.2a | Cancel the dialog and click **Add portal**. | A chooser lists all six known boards with their engine and verification date, each with an explanatory hover text, plus **Other site** and **Cancel**. Type in **Filter sites**: the list narrows by company, host, or engine (for example `lever` shows only Spotify, `greenhouse` shows Figma); a query with no matches says "No sites match this filter." and **Other site** still opens the blank form. **Clear** restores the full list. |
+| 4.2a | ✅ Cancel the dialog and click **Add portal**. | A chooser lists all six known boards with their engine and verification date, each with an explanatory hover text, plus **Other site** and **Cancel**. Type in **Filter sites**: the list narrows by company, host, or engine (for example `lever` shows only Spotify, `greenhouse` shows Figma); a query with no matches says "No sites match this filter." and **Other site** still opens the blank form. **Clear** restores the full list. |
 | 4.3 | Choose **Other site**, enter a company name and a real job-board URL, keep **Static (Tier 1)**, save. | The modal closes and the row appears with "Never fetched". |
 | 4.3a | Click **Add portal** and choose **NVIDIA (Eightfold) - verified <date>** from the list. | The add form opens with the URL, company name, provider, and domain already filled, and "Known site: NVIDIA (Eightfold) - verified <date>" above the provider selector. It is the same form typing the URL produces. |
 | 4.3a.1 | Click **Add portal** and choose **Figma (Greenhouse) - verified <date>**. | The URL is `https://job-boards.greenhouse.io/figma`, the company is Figma, the provider is Selectors, and the scraper config is `{"provider":"selectors"}`. **Fetch** 🌐 stores Greenhouse jobs through the adapter; no HTML selectors are needed. The same form results from typing the URL. |
@@ -155,22 +155,22 @@ otherwise.
 | 6.12 | ✅ Open the detail view of a job whose source stored HTML and tick **Raw text**. | The description switches to the stored markup in monospace and a note says "Stored as HTML from the source." Unticking returns to the formatted text. A manual paste with no markup has no toggle. |
 | 6.13 | ✅ Open the detail view of a job with a saved status or an evaluation and click **Delete job...**. | A window names the job and says that its application, evaluation reports, and cover letters go with it. **Delete job** stays disabled until you type `delete me`; a wrong phrase keeps it disabled, and **Cancel** closes the window and leaves the job. |
 
-## 6a. CV / Profile
+## 6a. ✅ CV / Profile
 
 | # | Step | Expected |
 | :-- | :--- | :--- |
-| 6a.1 | With a fresh data directory, select **CV / Profile** in the sidebar. | The editor renders (no placeholder): empty **Name**, **Email**, **Phone**, **Location**, and **Summary** fields, the three groups Experience, Education, and Skills each saying "No entries yet.", and the preview reading "Add a name, a summary, or a CV entry and the summary will appear here." **Save profile** is disabled. |
-| 6a.2 | Fill in a name, email, phone, location, and a short summary. | **Save profile** enables and "Unsaved changes" appears; the preview updates as you type and shows the name, the contact line `location \| email \| phone` (empty parts omitted), and a `Summary:` section. |
-| 6a.3 | Click **Save profile**. | A spinner runs, the header reports "Profile saved.", **Save profile** disables, and the preview is unchanged. Leaving the screen and returning keeps the values. |
-| 6a.4 | Click **Add experience** and fill in only an organization. | "A title is required." appears and **Save entry** stays disabled. |
-| 6a.5 | Add a title, dates (`2020` / `Present`), and a two-line description, then click **Save entry**. | The form closes, the row appears under Experience with its title, organization, and `2020 - Present`, and the header reports "Entry saved." The preview gains `Experience:` with a bullet and the description indented under it. |
-| 6a.6 | Add one education entry and one skill entry. | Each appears under its own group, sections keep the fixed order Experience, Education, Skills, and the skill renders as a bare `- <title>` bullet. |
-| 6a.7 | Click **Edit** on the experience row, change the title, and click **Save entry**. | The row and the preview show the new title and the entry keeps its position. **Cancel** in the form discards the edit. |
-| 6a.8 | With two entries in one group, click **Move down** on the first. | The two rows swap, the header reports "Order updated.", and the preview's bullet order follows. **Move up** on the first row and **Move down** on the last row are disabled, and a row never moves into another group. |
-| 6a.9 | Quit the app, restart it, unlock, and open **CV / Profile**. | The identity, the summary, the entries, and their order are all restored from the database and the preview matches. |
-| 6a.10 | Click **Delete** on an entry, then **Cancel**. | "Delete this entry?" disappears, the row stays, and nothing is written. |
-| 6a.11 | Click **Delete** again and then **Confirm delete**. | The row and its trailing separator disappear, the header reports "Entry deleted.", and the preview drops the entry. |
-| 6a.12 | Delete every entry, clear the fields, and click **Save profile**. | The preview returns to the placeholder sentence: an empty profile is `None`, not an empty section. Reopening the screen shows the empty editor, not a spinner or an error. |
+| 6a.1 | ✅ With a fresh data directory, select **CV / Profile** in the sidebar. | The editor renders (no placeholder): empty **Name**, **Email**, **Phone**, **Location**, and **Summary** fields, the three groups Experience, Education, and Skills each saying "No entries yet.", and the preview reading "Add a name, a summary, or a CV entry and the summary will appear here." **Save profile** is disabled. |
+| 6a.2 | ✅ Fill in a name, email, phone, location, and a short summary. | **Save profile** enables and "Unsaved changes" appears; the preview updates as you type and shows the name, the contact line `location \| email \| phone` (empty parts omitted), and a `Summary:` section. |
+| 6a.3 | ✅ Click **Save profile**. | A spinner runs, the header reports "Profile saved.", **Save profile** disables, and the preview is unchanged. Leaving the screen and returning keeps the values. |
+| 6a.4 | ✅ Click **Add experience** and fill in only an organization. | "A title is required." appears and **Save entry** stays disabled. |
+| 6a.5 | ✅ Add a title, dates (`2020` / `Present`), and a two-line description, then click **Save entry**. | The form closes, the row appears under Experience with its title, organization, and `2020 - Present`, and the header reports "Entry saved." The preview gains `Experience:` with a bullet and the description indented under it. |
+| 6a.6 | ✅ Add one education entry and one skill entry. | Each appears under its own group, sections keep the fixed order Experience, Education, Skills, and the skill renders as a bare `- <title>` bullet. |
+| 6a.7 | ✅ Click **Edit** on the experience row, change the title, and click **Save entry**. | The row and the preview show the new title and the entry keeps its position. **Cancel** in the form discards the edit. |
+| 6a.8 | ✅ With two entries in one group, click **Move down** on the first. | The two rows swap, the header reports "Order updated.", and the preview's bullet order follows. **Move up** on the first row and **Move down** on the last row are disabled, and a row never moves into another group. |
+| 6a.9 | ✅ Quit the app, restart it, unlock, and open **CV / Profile**. | The identity, the summary, the entries, and their order are all restored from the database and the preview matches. |
+| 6a.10 | ✅ Click **Delete** on an entry, then **Cancel**. | "Delete this entry?" disappears, the row stays, and nothing is written. |
+| 6a.11 | ✅ Click **Delete** again and then **Confirm delete**. | The row and its trailing separator disappear, the header reports "Entry deleted.", and the preview drops the entry. |
+| 6a.12 | ✅ Delete every entry, clear the fields, and click **Save profile**. | The preview returns to the placeholder sentence: an empty profile is `None`, not an empty section. Reopening the screen shows the empty editor, not a spinner or an error. |
 
 ## 7. Idle behaviour
 
