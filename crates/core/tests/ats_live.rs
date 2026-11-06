@@ -103,7 +103,11 @@ fn live_board_urls_match_adapter_detection() {
     let adapters = ats::adapters();
 
     let boards = [
-        ("https://boards.greenhouse.io/figma", "greenhouse", "figma"),
+        (
+            "https://job-boards.greenhouse.io/figma",
+            "greenhouse",
+            "figma",
+        ),
         ("https://jobs.lever.co/spotify", "lever", "spotify"),
         ("https://jobs.ashbyhq.com/linear", "ashby", "linear"),
         (

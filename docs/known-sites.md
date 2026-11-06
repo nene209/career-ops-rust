@@ -1,10 +1,10 @@
 # Known Sites
 
-A **known site** is a profile, not an engine: a host, the provider engine that
-can fetch it, the payload that engine needs, and the date its live check last
-passed. The entries are typed constants in
-`crates/core/src/acquisition/known_sites.rs` and ship inside the binary, so a
-wrong entry is fixed by a release rather than a migration.
+A **known site** is a profile, not an engine: a host, the engine that can fetch
+it (a config-selected provider or a URL-selected ATS adapter), the payload that
+engine needs, and the date its live check last passed. The entries are typed
+constants in `crates/core/src/acquisition/known_sites.rs` and ship inside the
+binary, so a wrong entry is fixed by a release rather than a migration.
 
 The registry is a convenience, never a gate. In the app:
 
@@ -24,15 +24,38 @@ does not know use the same form with no attribution.
 
 ## Entries
 
-| Board | Name | Provider | Verified | Caps | Notes |
+| Board | Name | Engine | Verified | Caps | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `https://careers.withwaymo.com/jobs/search` | Waymo | `selectors` | 2026-11-03 | `pagination.max_pages: 3`, `detail.max_jobs: 90` | Rails + Stimulus, server-rendered, no `JobPosting` JSON-LD. 30 cards per page, so 90 covers every posting on the three fetched pages. AWS WAF intermittently answers `202` with an empty body; a challenged detail keeps the card teaser. Detail pages do carry `JobPosting` JSON-LD. |
 | `https://jobs.nvidia.com/careers` | NVIDIA | `eightfold` | 2026-11-03 | `pagination.max_pages` default (5), `detail.max_jobs` default (40) | Client-rendered Eightfold shell; postings come from `/api/pcsx/*`. The board reports ~2,750 positions and returns 10 per request, so the page cap is what bounds a fetch. The `pcsx` endpoints are not a public contract. Descriptions are stored as HTML. |
+| `https://job-boards.greenhouse.io/figma` | Figma | `greenhouse` (ATS) | 2026-11-05 | none | Greenhouse board; the list carries descriptions. The board page redirects to `figma.com/careers`; the adapter fetches the Greenhouse API. Other Greenhouse boards work through **Other site**. Greenhouse's old host (`boards.greenhouse.io`) redirects here and is still detected. |
+| `https://jobs.lever.co/spotify` | Spotify | `lever` (ATS) | 2026-11-05 | none | Lever board; the list carries descriptions. Other Lever boards work through **Other site**. |
+| `https://jobs.ashbyhq.com/linear` | Linear | `ashby` (ATS) | 2026-11-05 | none | Ashby board; the list carries descriptions. Other Ashby boards work through **Other site**. |
+| `https://jobs.smartrecruiters.com/Ubisoft2` | Ubisoft | `smartrecruiters` (ATS) | 2026-11-05 | `detail.max_jobs: 25` | SmartRecruiters carries no descriptions in its list; the first 25 postings are enriched, one request each. Other boards work through **Other site**. |
 
 Caps are the embedded values, not universal defaults: `pagination.max_pages`
 includes the first page (hard ceiling 20), and `detail.max_jobs` falls back to 40
 (capped at 200). Eightfold descriptions are enabled by default because its list
 carries none; the `detail` block only lowers the cap.
+
+### Adapter entries
+
+An entry whose engine is an ATS adapter (`greenhouse`, `lever`, `ashby`,
+`smartrecruiters`) is a **board**, not a platform. Its stored config is
+`{"provider":"selectors"}` with no `list` or `fields`: the router detects the
+adapter from the board URL, so there is nothing to scrape. The chooser and the
+attribution line show the adapter name (`Figma (Greenhouse) - verified …`).
+
+Three rules keep these entries honest, and all three are offline tests:
+
+1. The config parses and names the same provider the engine stores.
+2. The entry's `url()` is detected by the adapter whose name the engine carries.
+3. The entry has no selector `list`, so it cannot fall back to scraping the
+   board page as HTML.
+
+The SmartRecruiters cap is an upper bound: a board with fewer than 25 postings
+enriches all of them, and a larger board enriches the first 25. Raise the cap in
+the portal form if a specific board needs more.
 
 ## What "verified" means
 
@@ -93,8 +116,11 @@ run; only the first step differs.
 **An existing engine can fetch it** (the Waymo case):
 
 1. Probe the board and confirm which engine reads it (`selectors` for
-   server-rendered HTML, `eightfold` for the `pcsx` API).
+   server-rendered HTML, `eightfold` for the `pcsx` API, or an ATS adapter for a
+   recognised board host).
 2. Add the `KnownSite` constant with the embedded config and `verified_at: None`.
+   For an ATS board use `SiteEngine::Ats("greenhouse")` (and so on) with
+   `{"provider":"selectors"}`; the URL selects the adapter.
 3. Add or refresh a fixture for its payload, so a parser change fails a test
    instead of silently returning zero jobs.
 4. Add the docs row above with the caps and any block or rate limit observed.

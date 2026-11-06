@@ -90,8 +90,12 @@ impl AtsAdapter for GreenhouseAdapter {
     }
 
     fn detect(&self, url: &Url) -> Option<String> {
-        if url.host_str()? != "boards.greenhouse.io" {
-            return None;
+        // Greenhouse serves the same board from both hosts. The old
+        // `boards.greenhouse.io` now 301s to `job-boards.greenhouse.io`, so a
+        // pasted link may be either.
+        match url.host_str()? {
+            "boards.greenhouse.io" | "job-boards.greenhouse.io" => {}
+            _ => return None,
         }
         url.path_segments()?.next().map(str::to_string)
     }

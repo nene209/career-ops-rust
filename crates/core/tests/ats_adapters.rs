@@ -427,6 +427,12 @@ fn detection_identifies_each_supported_ats() {
             "greenhouse",
             "acme",
         ),
+        (
+            // The host Greenhouse now redirects to.
+            "https://job-boards.greenhouse.io/acme/jobs/123",
+            "greenhouse",
+            "acme",
+        ),
         ("https://jobs.lever.co/acme/abc-123", "lever", "acme"),
         ("https://jobs.ashbyhq.com/acme/xyz-789", "ashby", "acme"),
         (

@@ -1629,6 +1629,7 @@ mod tests {
     use career_ops_core::acquisition::error::AtsResult;
     use career_ops_core::acquisition::html::selectors::SelectorConfig;
     use career_ops_core::acquisition::known_sites;
+    use career_ops_core::acquisition::known_sites::SiteEngine;
     use career_ops_core::acquisition::report::PageReport;
 
     /// Serializes the tests that create a vault. The test keychain uses one
@@ -2886,10 +2887,10 @@ mod tests {
 
     /// Every registry entry takes the same path: form -> stored JSON -> router.
     ///
-    /// Waymo is a `selectors` profile and NVIDIA an `eightfold` one, so this
-    /// also proves the dispatch follows the stored config rather than the host:
-    /// both are created from a `KnownSite` and both fetch without a special
-    /// case in between.
+    /// Waymo is a `selectors` profile, NVIDIA an `eightfold` one, and the ATS
+    /// entries store an empty selectors config whose board URL select the
+    /// adapter. This proves the dispatch follows the stored URL and config rather
+    /// than a special case for the host.
     #[test]
     fn every_known_site_fetches_through_its_provider() {
         let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
@@ -2939,7 +2940,7 @@ mod tests {
         let mut waymo_url = String::new();
         for (index, site) in known_sites::all().iter().enumerate() {
             let url = site.url();
-            if site.provider == Provider::Selectors {
+            if site.engine == SiteEngine::Provider(Provider::Selectors) {
                 waymo_url = url.clone();
             }
 
@@ -2966,7 +2967,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} row", site.name));
             let stored = row.scraper_config.as_deref().expect("stored config");
             let parsed = ScraperConfig::parse(stored).expect("stored config parses");
-            assert_eq!(parsed.provider(), site.provider, "{}", site.name);
+            assert_eq!(parsed.provider(), site.engine.provider(), "{}", site.name);
         }
 
         let ids: Vec<i64> = app.portals.rows.iter().map(|row| row.id).collect();
@@ -3128,7 +3129,7 @@ mod tests {
     const LIVE_PORTAL_URLS: &[&str] = &[
         "https://jobs.ashbyhq.com/linear",
         "https://jobs.lever.co/spotify",
-        "https://boards.greenhouse.io/figma",
+        "https://job-boards.greenhouse.io/figma",
         "https://jobs.smartrecruiters.com/Ubisoft2",
     ];
 

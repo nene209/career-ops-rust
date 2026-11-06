@@ -327,7 +327,7 @@ impl PortalForm {
 
     /// True when the form's effective config is exactly the registry entry's.
     pub fn matches_known_site(&self, site: &KnownSite) -> bool {
-        if self.provider != site.provider {
+        if self.provider != site.engine.provider() {
             return false;
         }
         let Some(current) = self.data().scraper_config else {
@@ -345,12 +345,12 @@ impl PortalForm {
     /// Apply a registry entry. Called explicitly, or by auto-prefill while the
     /// provider fields are untouched.
     pub fn apply_known_site(&mut self, site: &KnownSite) {
-        self.provider = site.provider;
+        self.provider = site.engine.provider();
         if self.company_name.trim().is_empty() {
             self.company_name = site.name.to_string();
         }
 
-        match site.provider {
+        match site.engine.provider() {
             Provider::Selectors => {
                 self.scraper_config = site.config.to_string();
             }
