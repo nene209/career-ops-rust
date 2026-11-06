@@ -752,12 +752,18 @@ fn save_is_gated_on_an_eightfold_domain() {
     assert!(!save.accesskit_node().is_disabled());
 }
 
+fn choose_site_view() -> PortalsView {
+    PortalsView {
+        modal: Some(PortalModal::ChooseSite {
+            filter: String::new(),
+        }),
+    }
+}
+
 #[test]
 fn the_add_chooser_lists_known_sites_and_other() {
     let view_model = PortalsViewModel::default();
-    let view = PortalsView {
-        modal: Some(PortalModal::ChooseSite),
-    };
+    let view = choose_site_view();
 
     let mut harness = test_harness(&view_model, view, idle_state());
     harness.run();
@@ -766,16 +772,136 @@ fn the_add_chooser_lists_known_sites_and_other() {
         harness.get_by_role_and_label(Role::Button, "NVIDIA (Eightfold) - verified 2026-11-03");
     let _waymo =
         harness.get_by_role_and_label(Role::Button, "Waymo (Selectors) - verified 2026-11-03");
+    let _figma =
+        harness.get_by_role_and_label(Role::Button, "Figma (Greenhouse) - verified 2026-11-05");
+    let _spotify =
+        harness.get_by_role_and_label(Role::Button, "Spotify (Lever) - verified 2026-11-05");
+    let _linear =
+        harness.get_by_role_and_label(Role::Button, "Linear (Ashby) - verified 2026-11-05");
+    let _ubisoft = harness.get_by_role_and_label(
+        Role::Button,
+        "Ubisoft (SmartRecruiters) - verified 2026-11-05",
+    );
+    let _filter = harness.get_by_label("Filter sites");
     let _other = harness.get_by_role_and_label(Role::Button, "Other site");
     let _cancel = harness.get_by_role_and_label(Role::Button, "Cancel");
 }
 
 #[test]
+fn the_site_filter_narrows_by_name_and_engine() {
+    let view_model = PortalsViewModel::default();
+    let mut harness = test_harness(&view_model, choose_site_view(), idle_state());
+    harness.run();
+
+    let field = harness.get_by_label("Filter sites");
+    field.focus();
+    field.type_text("lever");
+    harness.run();
+
+    let _spotify =
+        harness.get_by_role_and_label(Role::Button, "Spotify (Lever) - verified 2026-11-05");
+    assert!(
+        harness
+            .query_by_label("Figma (Greenhouse) - verified 2026-11-05")
+            .is_none(),
+        "a non-matching board must be hidden"
+    );
+    assert!(
+        harness
+            .query_by_label("Waymo (Selectors) - verified 2026-11-03")
+            .is_none(),
+        "the filter applies to the whole list"
+    );
+    let _clear = harness.get_by_role_and_label(Role::Button, "Clear");
+}
+
+#[test]
+fn the_site_filter_matches_the_host() {
+    let view_model = PortalsViewModel::default();
+    let mut harness = test_harness(&view_model, choose_site_view(), idle_state());
+    harness.run();
+
+    let field = harness.get_by_label("Filter sites");
+    field.focus();
+    field.type_text("ashby");
+    harness.run();
+
+    let _linear =
+        harness.get_by_role_and_label(Role::Button, "Linear (Ashby) - verified 2026-11-05");
+    assert!(harness
+        .query_by_label("Spotify (Lever) - verified 2026-11-05")
+        .is_none());
+}
+
+#[test]
+fn a_filter_with_no_matches_still_offers_other_site() {
+    let view_model = PortalsViewModel::default();
+    let mut harness = test_harness(&view_model, choose_site_view(), idle_state());
+    harness.run();
+
+    let field = harness.get_by_label("Filter sites");
+    field.focus();
+    field.type_text("zzzz");
+    harness.run();
+
+    let _empty = harness.get_by_label("No sites match this filter.");
+    harness
+        .get_by_role_and_label(Role::Button, "Other site")
+        .click();
+    harness.run();
+
+    let form = harness.state().view.form().expect("the blank form is open");
+    assert!(form.url.is_empty());
+}
+
+#[test]
+fn clearing_the_site_filter_restores_the_list() {
+    let view_model = PortalsViewModel::default();
+    let mut harness = test_harness(&view_model, choose_site_view(), idle_state());
+    harness.run();
+
+    let field = harness.get_by_label("Filter sites");
+    field.focus();
+    field.type_text("lever");
+    harness.run();
+
+    harness.get_by_role_and_label(Role::Button, "Clear").click();
+    harness.run();
+
+    let _nvidia =
+        harness.get_by_role_and_label(Role::Button, "NVIDIA (Eightfold) - verified 2026-11-03");
+    let _waymo =
+        harness.get_by_role_and_label(Role::Button, "Waymo (Selectors) - verified 2026-11-03");
+}
+
+#[test]
+fn choosing_a_filtered_site_prefills_the_form() {
+    let view_model = PortalsViewModel::default();
+    let mut harness = test_harness(&view_model, choose_site_view(), idle_state());
+    harness.run();
+
+    let field = harness.get_by_label("Filter sites");
+    field.focus();
+    field.type_text("spot");
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Spotify (Lever) - verified 2026-11-05")
+        .click();
+    harness.run();
+
+    let form = harness.state().view.form().expect("the add form is open");
+    assert_eq!(form.url, "https://jobs.lever.co/spotify");
+    assert_eq!(form.company_name, "Spotify");
+    assert_eq!(form.provider, Provider::Selectors);
+    assert_eq!(form.scraper_config, r#"{"provider":"selectors"}"#);
+    let _source = harness.get_by_label("Known site: Spotify (Lever) - verified 2026-11-05");
+}
+
+#[test]
 fn choosing_a_known_site_prefills_the_form() {
     let view_model = PortalsViewModel::default();
-    let view = PortalsView {
-        modal: Some(PortalModal::ChooseSite),
-    };
+    let view = choose_site_view();
 
     let mut harness = test_harness(&view_model, view, idle_state());
     harness.run();
@@ -798,9 +924,7 @@ fn choosing_a_known_site_prefills_the_form() {
 #[test]
 fn choosing_other_site_opens_the_blank_form() {
     let view_model = PortalsViewModel::default();
-    let view = PortalsView {
-        modal: Some(PortalModal::ChooseSite),
-    };
+    let view = choose_site_view();
 
     let mut harness = test_harness(&view_model, view, idle_state());
     harness.run();
@@ -824,9 +948,7 @@ fn choosing_other_site_opens_the_blank_form() {
 #[test]
 fn cancelling_the_chooser_closes_it() {
     let view_model = PortalsViewModel::default();
-    let view = PortalsView {
-        modal: Some(PortalModal::ChooseSite),
-    };
+    let view = choose_site_view();
 
     let mut harness = test_harness(&view_model, view, idle_state());
     harness.run();

@@ -1966,7 +1966,10 @@ mod tests {
         app.handle_portals_action(PortalsAction::OpenAdd);
 
         assert!(
-            matches!(&app.portals_view.modal, Some(PortalModal::ChooseSite)),
+            matches!(
+                &app.portals_view.modal,
+                Some(PortalModal::ChooseSite { .. })
+            ),
             "the add flow starts with the registry, not a blank form"
         );
         assert!(app.portals_view.form().is_none());

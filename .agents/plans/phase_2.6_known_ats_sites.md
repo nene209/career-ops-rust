@@ -1,7 +1,7 @@
 # Phase 2.6: Known ATS Boards and a Filtered Chooser — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.11), §12
-**Status:** In progress — WS1 complete; WS2 not started
+**Status:** In progress — WS1–WS2 complete; WS3 verification and docs pending
 **Last updated:** 2026-11-05
 **Duration:** 1–1.5 days
 **Depends on:** Phase 2.3 (providers, ATS adapters, registry), Phase 2.4 (chooser, attribution, restore), Phase 2.5 (registry live check and docs conventions)
@@ -16,6 +16,7 @@
 | v0.1 | Initial plan. The registry exposes two hand-curated sites (Waymo, NVIDIA) while four ATS boards are verified by live tests and invisible in the UI. This phase adds those boards and the chooser filter that Phase 2.4 deferred. Decisions from review: model an ATS board as a site with an adapter **engine** (option B, an `Engine` enum), not a new `Provider`; ship the four live-tested boards; the SmartRecruiters detail cap is an upper bound with a default of 25; search matches name, host, and engine label. |
 | v0.2 | Review decisions recorded: the union is named `SiteEngine` (not `Engine`) to keep it distinct from the existing `Provider`, which already means the config-selected engine. The SmartRecruiters cap of 25 is approved. WS1 starts. |
 | v0.3 | WS1 implemented: `SiteEngine`, six entries, offline detection/lookup/label tests, and the registry live run. Live results: Figma 143 jobs (143 with text), Spotify 86 (72), Linear 31 (31), Ubisoft 207 (25 enriched), NVIDIA 50 (40), Waymo skipped on the last run by its WAF after passing earlier. Greenhouse now redirects `boards.greenhouse.io` to `job-boards.greenhouse.io` and Figma's board page to `figma.com/careers`; detection accepts both hosts, the entry uses the canonical host, and the live probe follows the redirect. |
+| v0.4 | WS2 implemented: `KnownSite::matches` over name, host, and engine label; the chooser filter lives in `PortalModal::ChooseSite { filter }` so it starts empty on every open; a bounded scroll area, a no-match state, and **Clear**. Other site and Cancel stay outside the filter. kittest covers filtering by name/host/engine, the empty state, Clear, and choosing from a filtered list. |
 
 ---
 

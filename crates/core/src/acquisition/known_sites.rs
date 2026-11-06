@@ -87,6 +87,22 @@ impl KnownSite {
             None => format!("{} ({}) - unverified", self.name, self.engine.label()),
         }
     }
+
+    /// Case-insensitive substring over the name, host, and engine label.
+    ///
+    /// Notes are deliberately excluded: matching prose makes the results feel
+    /// arbitrary. An empty or whitespace-only query matches everything.
+    pub fn matches(&self, query: &str) -> bool {
+        let query = query.trim();
+        if query.is_empty() {
+            return true;
+        }
+        let query = query.to_lowercase();
+
+        self.name.to_lowercase().contains(&query)
+            || self.host.to_lowercase().contains(&query)
+            || self.engine.label().to_lowercase().contains(&query)
+    }
 }
 
 /// Phase 2.2's verified selector config for Waymo's search page.
@@ -382,6 +398,25 @@ mod tests {
             figma.label()
         );
         assert_eq!(figma.engine.provider(), Provider::Selectors);
+    }
+
+    #[test]
+    fn matches_filters_by_name_host_and_engine_only() {
+        let figma = lookup(&url("https://job-boards.greenhouse.io/figma")).expect("figma");
+
+        for query in ["figma", "FIGMA", "greenhouse", "job-boards", "  figma  "] {
+            assert!(figma.matches(query), "{query:?} should match Figma");
+        }
+        for query in ["lever", "nvidia", "spotify"] {
+            assert!(!figma.matches(query), "{query:?} must not match Figma");
+        }
+
+        // An empty query is the unfiltered list.
+        assert!(figma.matches(""));
+        assert!(figma.matches("   "));
+
+        // Notes are not searched: this word only appears in Figma's notes.
+        assert!(!figma.matches("figma.com"));
     }
 
     #[test]

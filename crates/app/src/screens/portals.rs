@@ -38,7 +38,9 @@ impl PortalsView {
     /// who does not already know a board's URL cannot benefit from an entry.
     /// "Other site" on the chooser opens the blank form, so nothing is gated.
     pub fn open_add(&mut self) {
-        self.modal = Some(PortalModal::ChooseSite);
+        self.modal = Some(PortalModal::ChooseSite {
+            filter: String::new(),
+        });
     }
 
     /// The blank add form, reached through "Other site".
@@ -108,9 +110,11 @@ impl PortalsView {
 
 pub enum PortalModal {
     /// The first step of the add flow: every embedded known site, plus
-    /// "Other site" for a blank form. Carries no state because the list is a
-    /// const in `known_sites`.
-    ChooseSite,
+    /// "Other site" for a blank form. Carries the filter query so it lives and
+    /// dies with the dialog.
+    ChooseSite {
+        filter: String,
+    },
     Add(PortalForm),
     Edit {
         id: i64,
@@ -821,8 +825,8 @@ fn modals(
 
     match &mut view.modal {
         None => {}
-        Some(PortalModal::ChooseSite) => {
-            site_choice = choose_site_modal(ui);
+        Some(PortalModal::ChooseSite { filter }) => {
+            site_choice = choose_site_modal(ui, filter);
         }
         Some(PortalModal::Add(form)) => {
             portal_form_modal(ui, "New portal", form, None, state, action);
@@ -863,7 +867,7 @@ fn known_sites_by_name() -> Vec<&'static KnownSite> {
     sites
 }
 
-fn choose_site_modal(ui: &mut Ui) -> Option<SiteChoice> {
+fn choose_site_modal(ui: &mut Ui, filter: &mut String) -> Option<SiteChoice> {
     let mut choice = None;
 
     Window::new("Add portal")
@@ -881,18 +885,39 @@ fn choose_site_modal(ui: &mut Ui) -> Option<SiteChoice> {
             );
             ui.add_space(4.0);
 
-            for site in known_sites_by_name() {
-                // Names and dates are visible; the notes would crowd the list
-                // as the registry grows, so they live on hover.
-                let response = ui.button(site.label());
-                let response = if site.notes.is_empty() {
-                    response
-                } else {
-                    response.on_hover_text(site.notes)
-                };
-                if response.clicked() {
-                    choice = Some(SiteChoice::Known(site));
+            ui.horizontal(|ui| {
+                labelled_input(ui, "Filter sites", filter, false);
+                if !filter.is_empty() && ui.button("Clear").clicked() {
+                    filter.clear();
                 }
+            });
+            ui.add_space(4.0);
+
+            let sites: Vec<&'static KnownSite> = known_sites_by_name()
+                .into_iter()
+                .filter(|site| site.matches(filter))
+                .collect();
+
+            if sites.is_empty() {
+                ui.label(RichText::new("No sites match this filter.").weak());
+            } else {
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for site in sites {
+                            // Names and dates are visible; the notes would crowd the
+                            // list as the registry grows, so they live on hover.
+                            let response = ui.button(site.label());
+                            let response = if site.notes.is_empty() {
+                                response
+                            } else {
+                                response.on_hover_text(site.notes)
+                            };
+                            if response.clicked() {
+                                choice = Some(SiteChoice::Known(site));
+                            }
+                        }
+                    });
             }
 
             ui.separator();
@@ -1465,7 +1490,7 @@ mod tests {
         let mut view = PortalsView::default();
 
         view.open_add();
-        assert!(matches!(&view.modal, Some(PortalModal::ChooseSite)));
+        assert!(matches!(&view.modal, Some(PortalModal::ChooseSite { .. })));
         assert!(view.form().is_none(), "the chooser is not a form");
 
         view.open_blank_add();
@@ -1485,6 +1510,22 @@ mod tests {
 
     /// Choosing an entry and typing its URL must produce the same portal. If
     /// they diverge, one of the two prefill paths has grown logic of its own.
+    #[test]
+    fn open_add_starts_with_an_empty_site_filter() {
+        let mut view = PortalsView {
+            modal: Some(PortalModal::ChooseSite {
+                filter: "lever".into(),
+            }),
+        };
+
+        view.open_add();
+
+        assert!(
+            matches!(&view.modal, Some(PortalModal::ChooseSite { filter }) if filter.is_empty()),
+            "the filter must not leak between dialogs"
+        );
+    }
+
     #[test]
     fn choosing_a_site_builds_the_same_form_as_typing_its_url() {
         for site in known_sites::all() {
