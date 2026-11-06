@@ -104,6 +104,10 @@ Skills:
 - {title}
 ```
 
+Every kind uses the same entry line: title, optional organization, optional
+date range, and an optional indented description. Empty parts are omitted, so a
+skill that only has a title renders as `- Kubernetes`.
+
 - Empty fields are skipped; an empty section is omitted.
 - Entries are ordered by `sort_order` within each kind; sections are emitted in
   the fixed order Experience, Education, Skills.
