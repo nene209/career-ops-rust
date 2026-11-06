@@ -41,7 +41,7 @@ Add a row here in the same change that adds or removes a live test.
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `live_fetch_reaches_the_pipeline` | `crates/app/src/app.rs` | `#[ignore]` | `LIVE_PORTAL_URLS` by default (Ashby Linear, Lever Spotify, Greenhouse Figma, SmartRecruiters Ubisoft) or `CAREER_OPS_LIVE_PORTALS` | The full app path: create portals through the service, fetch with the production HTTP client, store, batch progress, health badges, and the Pipeline list. | **Keep live.** It is the only end-to-end check of transport + orchestration. Parsing is already fixture-covered. |
 | `live_fetch_with_pagination_and_details` | `crates/app/src/app.rs` | `#[ignore]` | `CAREER_OPS_LIVE_PAGED_PORTAL` (default Waymo search) | Page 2 is still reachable and fetched by the cursor; a real posting's detail page still yields a description; WAF challenges skip. | **Keep live but weak.** Pagination arithmetic and detail extraction have offline tests. This one proves the live page still has the shape those tests assume. |
-| `live_registry_sites_reach_the_pipeline` | `crates/app/src/app.rs` | `#[ignore]` **and** `CAREER_OPS_LIVE_REGISTRY=1` | Every entry in `acquisition::known_sites` (NVIDIA Eightfold, Waymo selectors) | Each embedded config still matches its live site and reaches the Pipeline; a challenged entry is skipped without aborting the others. | **Keep live.** The registry's config plumbing is offline-tested; this is its only proof that the configs still work against the sites. |
+| `live_registry_sites_reach_the_pipeline` | `crates/app/src/app.rs` | `#[ignore]` **and** `CAREER_OPS_LIVE_REGISTRY=1` | Every entry in `acquisition::known_sites`: Waymo, NVIDIA, Figma (Greenhouse), Spotify (Lever), Linear (Ashby), Ubisoft (SmartRecruiters) | Each embedded config still reaches the Pipeline against its live site; a challenged entry is skipped without aborting the others. | **Keep live.** The registry's config plumbing is offline-tested; this is its only proof that the configs still work against the sites. |
 | `greenhouse_live`, `lever_live`, `ashby_live`, `smartrecruiters_live`, `smartrecruiters_detail_live`, `eightfold_live` | `crates/core/tests/ats_live.rs` | `RUN_LIVE_ATS_TESTS=1`; the tests return early without it (they are not `#[ignore]`) | One default board per ATS, overridable per adapter (`LIVE_*_SLUG`, `LIVE_EIGHTFOLD_*`) | The upstream APIs still return the shapes the adapters parse, and the detail endpoints still carry text. | **Keep live.** Fixtures cannot detect an API change. The board-detection helper in the same file is offline and runs by default. |
 | `obscura_returns_post_js_dom` | `crates/core/tests/obscura_spike.rs` | Binary availability (`vendor/obscura` or `OBSCURA_BIN`); returns early otherwise | `https://github.com/nene209/career-ops-rust` | The sidecar starts, CDP drives a page, post-JS DOM exists, and killing the sidecar is detectable. | **Candidate to make local.** Serve a page with inline JavaScript from a temp dir instead of GitHub; it proves the same thing without an external dependency. Do that if this spike is ever promoted beyond a Phase 2 gate. |
 | `obscura_print_to_pdf_if_supported` | `crates/core/tests/obscura_spike.rs` | None — it does **not** call `obscura_available()` | The sidecar | Records whether `printToPDF` works (the Phase 2 assumption is that it does not). | **Fix the gate first.** It spawns the binary unconditionally, which is why the standard validation command skips the whole file with `--skip obscura`. Add the availability check before relying on `cargo test` without that skip. |
@@ -100,6 +100,18 @@ The Obscura spike needs the browser binary:
 OBSCURA_BIN=$PWD/vendor/obscura \
     cargo test -p career-ops-core --test obscura_spike -- --nocapture
 ```
+
+### Registry run notes
+
+The registry now covers six boards. A full run takes roughly two minutes:
+Ubisoft's entry enriches 25 SmartRecruiters details (one request each), and
+Waymo's 90 detail requests dominate when its WAF serves the run. A board page
+that redirects is fine: the probe follows redirects, so Figma's
+`job-boards.greenhouse.io/figma` reaches `figma.com/careers` while the adapter
+fetches `boards-api.greenhouse.io`. Run this check from an unrestricted network
+(or allow the redirect host through a proxy) so a redirect is not misread as a
+challenge. A skipped entry keeps its previous `verified_at`; a skip is not a
+date update.
 
 ### How the normal suite excludes them
 

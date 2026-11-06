@@ -1,7 +1,8 @@
 # Phase 2.6: Known ATS Boards and a Filtered Chooser — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.11), §12
-**Status:** In progress — WS1–WS2 complete; WS3 verification and docs pending
+**Status:** Complete — retrospective recorded in
+`.agents/plans/phase_2.6_retrospective.md`
 **Last updated:** 2026-11-05
 **Duration:** 1–1.5 days
 **Depends on:** Phase 2.3 (providers, ATS adapters, registry), Phase 2.4 (chooser, attribution, restore), Phase 2.5 (registry live check and docs conventions)
@@ -17,6 +18,7 @@
 | v0.2 | Review decisions recorded: the union is named `SiteEngine` (not `Engine`) to keep it distinct from the existing `Provider`, which already means the config-selected engine. The SmartRecruiters cap of 25 is approved. WS1 starts. |
 | v0.3 | WS1 implemented: `SiteEngine`, six entries, offline detection/lookup/label tests, and the registry live run. Live results: Figma 143 jobs (143 with text), Spotify 86 (72), Linear 31 (31), Ubisoft 207 (25 enriched), NVIDIA 50 (40), Waymo skipped on the last run by its WAF after passing earlier. Greenhouse now redirects `boards.greenhouse.io` to `job-boards.greenhouse.io` and Figma's board page to `figma.com/careers`; detection accepts both hosts, the entry uses the canonical host, and the live probe follows the redirect. |
 | v0.4 | WS2 implemented: `KnownSite::matches` over name, host, and engine label; the chooser filter lives in `PortalModal::ChooseSite { filter }` so it starts empty on every open; a bounded scroll area, a no-match state, and **Clear**. Other site and Cancel stay outside the filter. kittest covers filtering by name/host/engine, the empty state, Clear, and choosing from a filtered list. |
+| v0.5 | WS3 implemented: full offline sweep, `docs/LIVE_TESTS.md` registry notes (six boards, ~2 min, redirect handling), the short retrospective, and the parent-plan close-out. Phase complete. |
 
 ---
 
@@ -305,6 +307,15 @@ probe follows the redirect to the final page while the adapter still fetches
    row with the plan link.
 5. Short retrospective in `.agents/plans/phase_2.6_retrospective.md` once the
    manual and live checks pass.
+
+**Implementation note (2026-11-05).** The offline suite, fmt, and clippy are
+clean. The registry live run is recorded in WS1: all four new entries verified
+on 2026-11-05, with Waymo WAF-skipped on the final run and its previous date
+unchanged. `docs/LIVE_TESTS.md` gained the six-board scope, the roughly two-minute
+runtime, and the redirect/proxy caveat. The retrospective records the Greenhouse
+host migration, the `SiteEngine` naming decision, the adapter-entry invariants,
+and the upper-bound detail cap. Manual script §4.2a and §4.3a.1 are ready for the
+owner's pass.
 
 ---
 
