@@ -68,6 +68,8 @@ prior outputs are consumed:
 | Unlock flow | Gates access to API keys and job data |
 | Backend traits from Phase 1 | Not used in Phase 3; `PdfBackend` rendering arrives in Phase 4 |
 | `docs/LIVE_TESTS.md` conventions | Phase 3's live provider and LLM tests are indexed there, `#[ignore]`d or env-gated, and never run in the default offline suite. |
+| Phase 2.8 output | Refresh/Continue/Fetch all are the portal fetch actions; detail enrichment is per-portal opt-in (default off for new portals, retained for Waymo and Ubisoft). Phase 3 therefore sees rows whose `raw_text` is often a card teaser until the user fetches descriptions. |
+| Phase 3.1 output | `job_descriptions.queue_state` exists (`new` / `details_needed` / `evaluate` / `dismissed` / `evaluated`); `profile.preferences` is populated; `manual::fetch_descriptions_batch` is available for a bounded refresh of flagged rows. |
 
 **Phase 3 assumes job descriptions exist in the database.** Phase 2 supplies them
 via the tiered acquisition pipeline, and Phase 2 is complete (six known sites and
@@ -450,6 +452,13 @@ pub struct PlainText {
     `applications::mark_not_a_match`. It is a no-op for an application that is
     already applied, interviewing, offered, or rejected, because that writer
     refuses those transitions. The status stays visible and editable.
+11. **Combined fetch-then-evaluate.** `EvaluationRequest` gains
+    `fetch_description_if_thin: bool` (default `false`). When `true` and the
+    job's normalized text is below `llm.thin_description_chars` (default 400),
+    the pipeline runs `manual::refresh_job` first, and only then assembles the
+    prompt. The report records whether the fetch happened. With Phase 2.8's
+    detail opt-in, most pipeline rows are thin on arrival, so the UI uses this
+    flag by default when the user clicks **Evaluate** on a row without text.
 
 ### Critical Implementation Notes
 
@@ -487,6 +496,12 @@ pub struct PlainText {
     applications. After it succeeds, the Pipeline row's badge and `has_user_state`
     must be updated in place, exactly as the manual action does. The status stays
     editable, and the report is still stored when the transition is refused.
+13. **Phase 3.1's queue state is written by evaluation, not by WS3.** When a
+    report is written, the same transaction sets `job_descriptions.queue_state
+    = 'evaluated'`. If Phase 3.1 has not shipped, this is a no-op (the column
+    does not exist yet); the write path guards on the column's presence at
+    compile time via the repository helper that Phase 3.1 introduces. Do not
+    reference the column before Phase 3.1 lands.
 
 ### Acceptance Criteria
 
@@ -635,6 +650,12 @@ pub struct CoverLetterResult {
    phase" tooltip. Replace those with the real actions. When no provider or API
    key is configured, the enabled-state check fails with a clear message and a
    link to Settings, not a silent no-op.
+1a. **Thin-row handling.** When the selected job's normalized text is under the
+    thin threshold, the Evaluate button reads **Fetch description and evaluate**
+    and passes `fetch_description_if_thin: true`. When the text is sufficient,
+    it reads **Evaluate**. A failure to fetch the description keeps the row
+    unevaluated with a message; the user can still evaluate the teaser by
+    clicking again with the "Evaluate without description" link.
 2. **Streaming progress display**: the report text appears incrementally in the
    detail view while the model generates it.
 3. **Report viewer**: the detail gains sections/tabs for **Description**,
@@ -877,6 +898,7 @@ were resolved on 2026-11-05:
 | Q-27 | Is there a batch-evaluation UI? | **No for now.** A bounded headless helper may exist for tests; the UI evaluates one job at a time. Revisit later. |
 | Q-28 | Should a `NoMatch` report change the application status automatically? | **Yes**, through `applications::mark_not_a_match`, which refuses submitted applications; the status stays editable. |
 | Q-29 | Where does the candidate's CV/profile data come from? | **Phase 2.7** ships the CV/Profile editor and the canonical `cv_summary`; Phase 3 consumes it. |
+| Q-42 | **Should Phase 3 auto-fetch descriptions for thin rows without asking?** | No. Fetching is a network call and a user cost; the Evaluate button makes the cost explicit ("Fetch description and evaluate") rather than hiding it. |
 
 Q-29 is complete before WS1 starts. Q-24 and Q-25 are complete before WS2/WS1;
 Q-26 and Q-5 before WS3 completes; Q-27 and Q-28 before WS6 completes.
