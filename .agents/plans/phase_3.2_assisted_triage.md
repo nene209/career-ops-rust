@@ -4,7 +4,7 @@
 **Status:** Planned — not started
 **Last updated:** 2026-11-06
 **Duration:** 5–7 days
-**Depends on:** Phase 3 (`rig` integration, compact prompt conventions, `active_for_use`, `applications::ensure`, cassette test patterns), Phase 3.1 (queue state, preferences, `fetch_descriptions_batch`), Phase 2.7 (`cv_summary`)
+**Depends on:** Phase 3 (`rig` integration, compact prompt conventions, `active_for_use`, `applications::ensure`, cassette test patterns), Phase 2.9 (queue state, preferences, `fetch_descriptions_batch`), Phase 2.7 (`cv_summary`)
 **Blocks:** nothing. The aggregator/web search idea remains out of scope and would be a separate, later phase if it ever happens.
 
 ---
@@ -13,15 +13,16 @@
 
 | Version | Change |
 | :--- | :--- |
-| v0.1 | Initial plan. Adds LLM-assisted triage on top of Phase 3.1's manual queue, and suggest-and-approve portal additions on top of Phase 2.6's registry. Every action is advisory: the agent proposes, the user approves. It is explicitly not an autonomous agent, and it does not add web search, an aggregator, or autonomous portal addition. One migration (0007) for triage provenance. |
+| v0.1 | Initial plan. Adds LLM-assisted triage on top of Phase 2.9's manual queue, and suggest-and-approve portal additions on top of Phase 2.6's registry. Every action is advisory: the agent proposes, the user approves. It is explicitly not an autonomous agent, and it does not add web search, an aggregator, or autonomous portal addition. One migration (0007) for triage provenance. |
+| v0.2 | The queue phase was renumbered from 3.1 to **Phase 2.9** and now lands before Phase 3, so this plan depends on 2.9 (queue, preferences) and Phase 3 (`rig`) rather than on a phase that came after it. Migration 0007 is unchanged: 2.9 takes 0005, Phase 3 takes 0006. |
 
 ---
 
 ## Purpose
 
-Phase 3 makes single-shot evaluation possible. Phase 3.1 gives the user a queue and preferences to steer it. Neither answers the question Phase 3.1 makes concrete: **"I have 200 new jobs; which 30 should I look at?"**
+Phase 3 makes single-shot evaluation possible. Phase 2.9 gives the user a queue and preferences to steer it. Neither answers the question Phase 2.9 makes concrete: **"I have 200 new jobs; which 30 should I look at?"**
 
-Phase 3.2 adds two LLM-driven conveniences on top of Phase 3.1's structure:
+Phase 3.2 adds two LLM-driven conveniences on top of Phase 2.9's structure:
 
 1. **Batch triage.** One LLM call over N titles and briefs, producing a `worth_details` / `skip` / `unsure` decision per job, written into the queue as `details_needed` / `dismissed` / `evaluate`. The user reviews the result in the Pipeline and can override any decision.
 2. **Portal suggestions.** One LLM call over the user's `cv_summary` and preferences, producing a short list of companies to consider. The user reviews and approves; nothing is added or fetched automatically.
@@ -30,7 +31,7 @@ The distinction is deliberate and comes from Phase 2's trust model: every fetch 
 
 ### Evidence
 
-- `job_descriptions.queue_state` exists (Phase 3.1) with `details_needed` / `evaluate` / `dismissed` as natural triage outcomes.
+- `job_descriptions.queue_state` exists (Phase 2.9) with `details_needed` / `evaluate` / `dismissed` as natural triage outcomes.
 - `core::llm` (Phase 3) provides client construction, the capability registry, the error taxonomy, and cassette test patterns.
 - `applications::ensure` (Phase 2.5) means a triage decision that leads to `evaluate` does not need to create an application yet — the evaluation flow does that when it runs.
 - `known_sites::all()` (Phase 2.6) is what portal suggestions should propose; the agent proposes a set of companies whose careers page is likely on a supported engine.
@@ -101,7 +102,7 @@ Triage writes `queue_state` and `queue_reason`, and records `triage_decision`, `
 - Trigger evaluation.
 - Delete anything.
 
-The user sees the decisions in the Pipeline (a **Triaged** filter, badges) and can accept, override, or clear any row with the Phase 3.1 detail actions. `dismissed` rows are visible under the Dismissed filter; a skip is reversible. That is the whole trust model: the agent moves rows in a state machine the user already controls.
+The user sees the decisions in the Pipeline (a **Triaged** filter, badges) and can accept, override, or clear any row with the Phase 2.9 detail actions. `dismissed` rows are visible under the Dismissed filter; a skip is reversible. That is the whole trust model: the agent moves rows in a state machine the user already controls.
 
 ### 4. Cost and time are shown before and after
 
@@ -144,7 +145,7 @@ ALTER TABLE job_descriptions ADD COLUMN triage_prompt_hash TEXT;
 ALTER TABLE job_descriptions ADD COLUMN triaged_at TEXT;
 ```
 
-`queue_state` and `queue_reason` (Phase 3.1) are what the UI reads; the `triage_*` columns are the provenance record — what the agent said, with what prompt, with what model, when. Same discipline as `evaluation_reports.prompt_version`.
+`queue_state` and `queue_reason` (Phase 2.9) are what the UI reads; the `triage_*` columns are the provenance record — what the agent said, with what prompt, with what model, when. Same discipline as `evaluation_reports.prompt_version`.
 
 ### 7. The prompt is compact and derived
 
@@ -238,7 +239,7 @@ pub struct TriageReport {
 2. Progress during the call: a header line "Triaging 47 jobs…", the button disabled, the row-level Stop cancelling the whole batch (there is no partial apply).
 3. On completion, the header line stays for one render ("Triaged 47 jobs: 18 worth details, 9 to evaluate, 18 skipped, 2 unsure. $0.003 · 8.2s."), then clears.
 4. **Triaged** filter added to the Pipeline. Rows show their `queue_reason` in a small italic subtitle when the row is selected.
-5. The per-row detail actions (Phase 3.1) still work: any triage decision can be overridden by the user.
+5. The per-row detail actions (Phase 2.9) still work: any triage decision can be overridden by the user.
 6. A dismissible banner under the Pipeline header: "You can override any triage decision. Skipped jobs stay visible under the Dismissed filter."
 7. `egui_kittest`:
    - The confirmation modal appears, shows the estimated cost, and Cancel does nothing.

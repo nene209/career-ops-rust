@@ -1,11 +1,11 @@
-# Phase 3.1: Acquisition Preferences and Job Queue — Detailed Execution Plan
+# Phase 2.9: Acquisition Preferences and Job Queue — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.13), §12
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.14), §12
 **Status:** Planned — not started
 **Last updated:** 2026-11-06
 **Duration:** 3–4 days
-**Depends on:** Phase 2.7 (CV/Profile editor), Phase 2.8 (fetch controls, detail opt-in), Phase 3 (`applications::ensure`, `Not a match`, the Pipeline detail's raw/plain toggle)
-**Blocks:** Phase 3.2 (triage fills the queue this phase creates)
+**Depends on:** Phase 2.5 (`applications::ensure`, `Not a match`, the Pipeline detail's raw/plain toggle, `manual::refresh_job`), Phase 2.8 (fetch controls, per-portal detail opt-in)
+**Blocks:** Phase 3 (evaluation writes `evaluated` into the queue this phase creates) and Phase 3.2 (triage fills the queue automatically).
 
 ---
 
@@ -14,12 +14,13 @@
 | Version | Change |
 | :--- | :--- |
 | v0.1 | Initial plan. Adds a preference layer (companies, locations, keywords, exclusions) and a manual job queue state on `job_descriptions`. The queue is what makes "the user steers the fetch and evaluation" possible without an LLM, and it is exactly the structure Phase 3.2's triage will fill. Also adds a bounded batch "fetch descriptions for flagged details" action, which pairs with Phase 2.8's detail opt-in. One migration. |
+| v0.2 | Renumbered from Phase 3.1 to **Phase 2.9**, so it lands before Phase 3. Phase 3 and this phase had come to depend on each other: Phase 3's entry conditions assumed the queue existed, while this plan listed Phase 3 as a dependency. Sequencing it first resolves that, and Phase 3 can then write `queue_state = 'evaluated'` unconditionally. Its only real inputs (`applications::ensure`, `Not a match`, the raw/plain toggle, `refresh_job`) are Phase 2.5 deliverables, so nothing from `rig` was ever needed here. Migration renumbered 0006 → **0005** (Phase 3 takes 0006, Phase 3.2 keeps 0007). |
 
 ---
 
 ## Purpose
 
-Phase 2.8 makes the fetch actions honest. Phase 3 makes evaluation possible. Neither answers two questions the user has had since the first real fetch:
+Phase 2.8 makes the fetch actions honest. Phase 2.9 adds the state that tells the app which postings deserve attention, and Phase 3 makes evaluation possible. Without the queue and the preferences, neither of the user's two standing questions has an answer:
 
 1. **"Which of these 200 new postings do I care about?"** — a preference layer that lets the user say "fintech, remote, staff-or-above" and see the pipeline sorted and badged accordingly, without hiding anything.
 2. **"Do I have to look at every one of them?"** — a manual queue where the user marks a row for details, for evaluation, or dismisses it, and a batch action to fetch the descriptions for everything they flagged.
@@ -50,7 +51,7 @@ The phase adds three things:
 | Queue state on `job_descriptions` (`new` / `details_needed` / `evaluate` / `dismissed` / `evaluated`) | Automatic triage (Phase 3.2) |
 | Detail-view actions to mark a row | Automatic description fetching during fetch (Phase 2.8 explicitly made this opt-in) |
 | Batch "fetch descriptions for flagged" with cancel and progress | Aggregator or web search (out of scope entirely) |
-| Migration 0006 for the queue columns | A new status column on `applications` — the queue is separate from the application status |
+| Migration 0005 for the queue columns | A new status column on `applications` — the queue is separate from the application status |
 | Preferences UI (Settings section), Pipeline filters | A queue that drives autonomous action |
 | Tests, docs, retrospective | A redesign of the Pipeline layout |
 
@@ -80,7 +81,7 @@ Every field is optional and defaults to empty. A `ProfilePreferences` struct des
 
 - **Preferred companies / locations / keywords** produce a `Preferred` badge and a `Preferred` filter option in the Pipeline. They do **not** hide anything by default.
 - **Excluded companies** are a hard filter: an excluded company's rows are hidden in the `All` view and visible only under an explicit `Excluded` filter, so the user can see and reverse the exclusion if they change their mind.
-- **Seniority** is a soft hint used only by Phase 3.2's triage; Phase 3.1 records it and shows it in the Settings screen without applying any filter.
+- **Seniority** is a soft hint used only by Phase 3.2's triage; Phase 2.9 records it and shows it in the Settings screen without applying any filter.
 
 The reasoning: "hide what I do not want" is a decision the user makes once (in `excluded_companies`), while "show me what I want" is an order-of-attention problem, not a visibility problem. Making `preferred_*` a filter would hide large parts of the pipeline by default, which is not what "steer me towards" means.
 
@@ -92,7 +93,7 @@ Queue state is different: it is a **pre-evaluation work state**. `new` (untouche
 
 The two are related but not the same. A row can be `new` with no application, and only becomes `evaluating` after the user (or, later, the agent) starts an evaluation. Keeping them separate means the queue works whether or not the user ever moves a row into the application lifecycle.
 
-`evaluated` is set automatically when Phase 3 writes a report. The other four are manual in Phase 3.1; Phase 3.2's triage will write `details_needed`, `evaluate`, or `dismissed` from the agent.
+`evaluated` is set automatically when Phase 3 writes a report, which is why Phase 3 lands after this phase. The other four are manual in Phase 2.9; Phase 3.2's triage will write `details_needed`, `evaluate`, or `dismissed` from the agent.
 
 ### 4. Manual actions in the detail view
 
@@ -112,7 +113,7 @@ A Pipeline header action: **Fetch descriptions (12)**. It runs `manual::refresh_
 
 On success, each row moves to `evaluate` (the user flagged it for details, so once details exist the natural next step is evaluation) with a badge on the detail view. On failure, the row stays `details_needed` and reports the error in the header.
 
-### 6. Migration 0006
+### 6. Migration 0005
 
 ```sql
 ALTER TABLE job_descriptions ADD COLUMN queue_state TEXT NOT NULL DEFAULT 'new';
@@ -182,11 +183,11 @@ No backfill: `new` is correct for every existing row.
 ### Deliverables
 
 1. `QueueState` enum (`new`, `details_needed`, `evaluate`, `dismissed`, `evaluated`) in `core::model`, with `as_str`/`parse`.
-2. Migration 0006 (as above), and the `JobDescription` model gains `queue_state: String`, `queue_reason: Option<String>`, `queued_at: Option<DateTime<Utc>>`.
+2. Migration 0005 (as above), and the `JobDescription` model gains `queue_state: String`, `queue_reason: Option<String>`, `queued_at: Option<DateTime<Utc>>`.
 3. `job_descriptions::set_queue_state(id, state, reason: Option<&str>)` and `set_queue_states(ids, state, reason)` for batch use.
 4. The Pipeline detail view gains three actions: **Mark for details**, **Mark for evaluation**, **Dismiss**. Each calls `set_queue_state`. A row already in the state shows the state's label instead of the action.
 5. A queue-state badge next to the status badge in the Pipeline list.
-6. Phase 3's `evaluation_reports` write path (already in Phase 3's plan) sets `queue_state = evaluated` on the row it evaluates. This is a small addition to Phase 3's WS3: the report write is inside a transaction that also updates the queue state. (See the Phase 3 update at the end of this response.)
+6. Phase 3's `evaluation_reports` write path sets `queue_state = evaluated` on the row it evaluates, inside the same transaction as the report insert. Phase 3 lands after this phase, so the column exists by then and no conditional guard is needed.
 7. `egui_kittest`:
    - Mark for details sets the state and shows the label.
    - A second click on the same action is a no-op.
@@ -196,7 +197,7 @@ No backfill: `new` is correct for every existing row.
 
 | Criterion | Verification |
 | :--- | :--- |
-| Migration 0006 applies to a 0005 database and preserves rows | Migration test |
+| Migration 0005 applies to a 0004 database and preserves rows | Migration test |
 | Each queue-state transition round-trips | Integration test |
 | The detail actions set the state and are idempotent | `egui_kittest` |
 | The queue-state badge renders next to the status badge | `egui_kittest` |
@@ -240,7 +241,7 @@ No backfill: `new` is correct for every existing row.
    - Flag a row for details, run Fetch descriptions, see the row move to `evaluate`.
    - Dismiss a row; verify it hides from All and appears under Dismissed.
 2. `docs/manual-test-script.md` §6 filters section: add `Preferred` and `Excluded`.
-3. Parent plan: v0.14 changelog, Phase 3.1 row, and the Phase 3.2 row updated to depend on 3.1.
+3. Parent plan: v0.14 changelog, Phase 2.9 row, and the Phase 3 row updated to depend on 2.9.
 4. Full validation, retrospective, and a note in Phase 3.2's Entry Conditions that the queue exists.
 
 ---
@@ -250,13 +251,13 @@ No backfill: `new` is correct for every existing row.
 | Layer | Covers |
 | :--- | :--- |
 | Core unit | `Preferences::matches` table; `QueueState::parse`/`as_str` |
-| Core integration | Migration 0006; every queue-state transition; batch fetch descriptions |
+| Core integration | Migration 0005; every queue-state transition; batch fetch descriptions |
 | View model | `PipelineViewModel` preferred/excluded flags; filter partitioning |
 | `egui_kittest` | Preferences UI; badges; queue actions; batch header |
 | App | Preferences → Pipeline → mark → batch fetch through the real database |
 | Manual | §6b on a real portal |
 
-No network for any new test. No new dependency. One migration (0006).
+No network for any new test. No new dependency. One migration (0005).
 
 ---
 
@@ -264,11 +265,11 @@ No network for any new test. No new dependency. One migration (0006).
 
 | ID | Risk | Impact | Mitigation |
 | :--- | :--- | :--- | :--- |
-| P3.1-R1 | **Preference matching surprises.** A substring like "Berlin" matches "Berlin, Germany" and "New Berlin." | Low | Document substring behavior in the Settings hint. An explicit `excluded_companies` lets the user un-hide a false positive. |
-| P3.1-R2 | **Queue state drifts from application status.** A row can be `evaluate` in the queue and `discovered` in the application. | Medium | The two are intentionally orthogonal; a row's queue state does not change its application status, and evaluation moves it from `evaluate` to `evaluated` while the application moves from `discovered` to `evaluating` to `ready`. The badge row shows both. |
-| P3.1-R3 | **Batch fetch descriptions runs into a WAF.** | Low | Sequential with pacing (from Phase 2.2's `http` pacing), bounded at 20, cancellable. |
-| P3.1-R4 | **Migration 0006 changes rows Phase 3 depends on.** | Low | `new` is a safe default; Phase 3 only reads `raw_text` and the application link. |
-| P3.1-R5 | **Preferences leak into prompts.** | Low | Phase 3 does not read preferences; Phase 3.2 will, with its own provenance. |
+| P2.9-R1 | **Preference matching surprises.** A substring like "Berlin" matches "Berlin, Germany" and "New Berlin." | Low | Document substring behavior in the Settings hint. An explicit `excluded_companies` lets the user un-hide a false positive. |
+| P2.9-R2 | **Queue state drifts from application status.** A row can be `evaluate` in the queue and `discovered` in the application. | Medium | The two are intentionally orthogonal; a row's queue state does not change its application status, and evaluation moves it from `evaluate` to `evaluated` while the application moves from `discovered` to `evaluating` to `ready`. The badge row shows both. |
+| P2.9-R3 | **Batch fetch descriptions runs into a WAF.** | Low | Sequential with pacing (from Phase 2.2's `http` pacing), bounded at 20, cancellable. |
+| P2.9-R4 | **The new columns change rows Phase 3 depends on.** | Low | `new` is a safe default; Phase 3 only reads `raw_text`, the application link, and now `queue_state`. |
+| P2.9-R5 | **Preferences leak into prompts.** | Low | Phase 3 does not read preferences; Phase 3.2 will, with its own provenance. |
 
 ---
 
@@ -279,7 +280,7 @@ No network for any new test. No new dependency. One migration (0006).
 3. `job_descriptions` has a queue state with the five values, populated by the detail view's manual actions.
 4. The queue state badge renders next to the status badge.
 5. **Fetch descriptions (N)** runs a bounded, cancellable batch, advances successful rows to `evaluate`, and reports failures.
-6. Migration 0006 applies to a 0005 database and preserves rows.
+6. Migration 0005 applies to a 0004 database and preserves rows.
 7. No new dependency and no change to acquisition semantics.
 8. Offline suite, fmt, and clippy are clean.
 9. Manual script §6b, parent plan, and retrospective are updated.
@@ -292,11 +293,11 @@ No network for any new test. No new dependency. One migration (0006).
 | :--- | :--- | :--- |
 | Q-35 | **Should excluded companies also be excluded from fetch?** | No. Fetch is the acquisition path; the exclusion is a Pipeline view filter. Fetching is cheap and the user may reverse an exclusion; filtering at fetch time would hide data the user cannot recover without re-fetching. |
 | Q-36 | **Should the queue state be exposed in the CSV/export later?** | Not in this phase. Phase 6's migration/export story is the right place to decide. |
-| Q-37 | **Should "Fetch descriptions" also evaluate?** | No. The two are separate actions so the user controls cost. Phase 3.2's triage may combine them for a supervised batch; Phase 3.1 keeps them apart. |
+| Q-37 | **Should "Fetch descriptions" also evaluate?** | No. The two are separate actions so the user controls cost. Phase 3.2's triage may combine them for a supervised batch; Phase 2.9 keeps them apart. |
 
 ---
 
-## What Phase 3.1 Is Not
+## What Phase 2.9 Is Not
 
 - Not a change to fetch semantics (Phase 2.8 owns those).
 - Not an evaluation pipeline (Phase 3 owns that).

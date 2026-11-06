@@ -1,10 +1,10 @@
 # Phase 3: AI Integration — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.13), §12
-**Status:** Draft v0.6 — decisions recorded; Phase 2.7 is complete, so WS1 can start
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.14), §12
+**Status:** Draft v0.7 — depends on Phases 2.7, 2.8, and 2.9; WS1 can start
 **Last updated:** 2026-11-06
 **Duration:** 3–4 weeks
-**Depends on:** Phase 2 completion and Phase 2.7 (CV/Profile editor, complete); see Entry Conditions
+**Depends on:** Phase 2 completion, Phase 2.7 (CV/Profile editor), Phase 2.8 (fetch controls and detail opt-in), Phase 2.9 (queue state and preferences); see Entry Conditions
 
 ---
 
@@ -18,6 +18,7 @@
 | v0.4 | Revised after Phases 2.5 and 2.6 closed. Records what the codebase already provides (seeded prompts with versioning, `core::text::plain_text`, `applications::ensure` and `Not a match`, the Pipeline search/detail/delete UI, `docs/LIVE_TESTS.md` gating). Corrects three stale assumptions: API keys get their own keychain namespace rather than using `core::keystore`; the original `modes/*.md` prompts cannot be sent verbatim (27–93 KB of tool-oriented instructions); and prompt versioning must be scoped by `is_system` so a user copy and a shipped system update cannot collide. Adds migration 0005 for report provenance, a job-id-based evaluation API that ensures the application, compact embedded prompts derived from the originals, and the current UI integration points. Open questions Q-24–Q-29 need owner decisions before WS1. |
 | v0.5 | Owner decisions recorded. **Q-29:** Phase 2.7 (CV/Profile editor) precedes Phase 3 and provides the canonical `cv_summary`. **Q-25:** DeepSeek is the first provider, through its OpenAI-compatible API; the abstraction stays open for a second. **Q-24, Q-26, Q-27, Q-28, Q-5:** confirmed as recommended. WS1 is now DeepSeek-first; WS2 consumes the Phase 2.7 summary renderer; the exit criterion allows closing with DeepSeek if a second provider would delay the core flows. |
 | v0.6 | Phase 2.7 closed, so the candidate-context dependency is a shipped function rather than an assumption: `repo::profile::cv_summary(&SqlitePool) -> Result<Option<String>>` for production and the pure `render_cv_summary(&Profile, &[CvEntry]) -> Option<String>` for tests, both in `crates/core/src/repo/profile.rs`. The format is fixed and documented in the renderer's doc comment; `None` for an empty profile is covered by `an_empty_profile_has_no_summary`. Phase 3 substitutes the string verbatim into `{{cv_summary}}` and must not re-format. |
+| v0.7 | Records the Phase 2.8 and Phase 2.9 inputs and resolves the ordering. **2.9 was renumbered from 3.1 and now lands before Phase 3**, which removes the circular dependency: Phase 3's entry conditions had assumed the queue existed while 2.9/3.1 had assumed Phase 3 did. 2.9's own inputs were Phase 2.5 deliverables, so nothing from `rig` was ever required there. Consequences: the report write sets `queue_state = 'evaluated'` unconditionally in the same transaction (note 13 no longer needs a compile-time guard), and the migration is renumbered **0005 → 0006** because 2.9 takes 0005. WS3 item 11 (combined fetch-then-evaluate) and 6.1a (thin-row button text) respond to Phase 2.8's detail opt-in. |
 
 ---
 
@@ -61,7 +62,7 @@ prior outputs are consumed:
 | `cv_entries` and `profile` repositories | Source of candidate context for prompts; Phase 2.7 adds the editor and the canonical `cv_summary` renderer |
 | `prompts` table, `repo::prompts`, and `prompts_seed` | Already seeded on every unlock: 14 system prompts, idempotent, with `create_version`, `active`, and `active_system`. Phase 3 adds the compact prompts, lookup helpers, and `is_system`-scoped versioning. |
 | `applications` table and repository | `ensure`, `mark_not_a_match`, `transition`, `attach_report`, and `set_match_score` exist. `Not a match` is a real status with transitions and a filter (Phase 2.5 WS3). Evaluation ensures the row before writing a report. |
-| `evaluation_reports` and `cover_letters` tables | Present from 0001; **no repository or write path exists yet**. Phase 3 adds both, plus migration 0005 for report provenance (`input_chars` and structured fields). |
+| `evaluation_reports` and `cover_letters` tables | Present from 0001; **no repository or write path exists yet**. Phase 3 adds both, plus migration 0006 for report provenance (`input_chars` and structured fields). |
 | `settings` table and `repo::settings` | `get_json`/`set_json`/`get_or` already exist for provider and model preferences. Keys never go here. |
 | egui shell with navigation | Pipeline detail already has disabled **Evaluate** and **Generate cover letter** buttons with an "Available in a later phase" tooltip; the Prompts and Settings screens are placeholders. Phase 3 replaces those. |
 | Pipeline list/detail state | Search, filters, delete (with a typed gate), the raw-text toggle, and status badges exist. Evaluation UI must compose with them; deleting a job cascades its reports. |
@@ -69,8 +70,8 @@ prior outputs are consumed:
 | Unlock flow | Gates access to API keys and job data |
 | Backend traits from Phase 1 | Not used in Phase 3; `PdfBackend` rendering arrives in Phase 4 |
 | `docs/LIVE_TESTS.md` conventions | Phase 3's live provider and LLM tests are indexed there, `#[ignore]`d or env-gated, and never run in the default offline suite. |
-| Phase 2.8 output | Refresh/Continue/Fetch all are the portal fetch actions; detail enrichment is per-portal opt-in (default off for new portals, retained for Waymo and Ubisoft). Phase 3 therefore sees rows whose `raw_text` is often a card teaser until the user fetches descriptions. |
-| Phase 3.1 output | `job_descriptions.queue_state` exists (`new` / `details_needed` / `evaluate` / `dismissed` / `evaluated`); `profile.preferences` is populated; `manual::fetch_descriptions_batch` is available for a bounded refresh of flagged rows. |
+| Phase 2.8 output | **Refresh** / **Continue** / **Fetch all pages** are the portal fetch actions (the header keeps **Reload list** and **Fetch all portals**); detail enrichment is per-portal opt-in (default off for new portals, retained for Waymo and Ubisoft). Phase 3 therefore sees rows whose `raw_text` is often a card teaser until the user fetches descriptions. |
+| Phase 2.9 output | `job_descriptions.queue_state` exists (`new` / `details_needed` / `evaluate` / `dismissed` / `evaluated`); `profile.preferences` is populated; `manual::fetch_descriptions_batch` is available for a bounded refresh of flagged rows. |
 
 **Phase 3 assumes job descriptions exist in the database.** Phase 2 supplies them
 via the tiered acquisition pipeline, and Phase 2 is complete (six known sites and
@@ -129,7 +130,7 @@ into an actionable "add your CV" error before assembling a prompt.
 | LLM evaluation tests via `rig::evals`, gated like the existing live tests | Adversarial red-teaming |
 | Prompt injection defense | Recording description-versus-teaser provenance on the job row (a Phase 2 follow-up) |
 | Deterministic HTML-to-text normalization before prompting (the function already exists; Phase 3 calls it) | Sending markup to the model, or stripping it at acquisition |
-| Migration 0005 for report provenance and structured fields | A prompt marketplace or remote sync |
+| Migration 0006 for report provenance and structured fields | A prompt marketplace or remote sync |
 | `{{cv_summary}}` rendered from the profile and CV repositories | A full CV/Profile editor (recommended as Phase 2.7; Q-29) |
 
 ---
@@ -308,7 +309,7 @@ pub fn delete_api_key(provider: LlmProvider) -> Result<()>;
    - Add `active_for_use(name)`: the latest user version if one exists, else the
      latest system version. Evaluation and cover-letter assembly call this, not
      `active`.
-   - Add the unique index on `(name, is_system, version)` to migration 0005
+   - Add the unique index on `(name, is_system, version)` to migration 0006
      (shared with WS3) once a test proves existing data cannot violate it.
 
 4. Minimal variable substitution supporting at least:
@@ -448,7 +449,7 @@ pub struct PlainText {
 6. Report storage in `evaluation_reports` with `prompt_version`, `prompt_hash`,
    `model_used`, `input_chars`, `source_chars`, `truncated`, `match_score`,
    `recommendation`, and `generated_at`. The table has the provenance columns
-   but not the structured fields or `input_chars`; migration `0005` adds them
+   but not the structured fields or `input_chars`; migration `0006` adds them
    (and `input_chars` to `cover_letters`) and updates both models. The full
    markdown stays in `content`; the structured fields make history and sorting
    possible without re-parsing it.
@@ -497,7 +498,7 @@ pub struct PlainText {
 10. **Truncation is a budget decision, not a detail.** When truncation happens,
     cut on a character boundary and set `truncated` so the report can say so.
     Never cut mid-entity: decode first, then truncate.
-11. **Migration 0005 changes the report shape.** It adds `match_score`,
+11. **Migration 0006 changes the report shape.** It adds `match_score`,
     `recommendation`, `input_chars`, `source_chars`, and `truncated` to
     `evaluation_reports`, adds `input_chars` to `cover_letters`, and a unique
     index on `prompts(name, is_system, version)` after a duplicate check. Update
@@ -508,12 +509,11 @@ pub struct PlainText {
     applications. After it succeeds, the Pipeline row's badge and `has_user_state`
     must be updated in place, exactly as the manual action does. The status stays
     editable, and the report is still stored when the transition is refused.
-13. **Phase 3.1's queue state is written by evaluation, not by WS3.** When a
-    report is written, the same transaction sets `job_descriptions.queue_state
-    = 'evaluated'`. If Phase 3.1 has not shipped, this is a no-op (the column
-    does not exist yet); the write path guards on the column's presence at
-    compile time via the repository helper that Phase 3.1 introduces. Do not
-    reference the column before Phase 3.1 lands.
+13. **Phase 2.9's queue state is written by evaluation.** When a report is
+    written, the same transaction sets `job_descriptions.queue_state =
+    'evaluated'` through the repository helper Phase 2.9 ships. 2.9 lands first,
+    so the column exists and there is no presence check: a report without the
+    queue update would leave the row stuck in `evaluate`.
 
 ### Acceptance Criteria
 
@@ -524,7 +524,7 @@ pub struct PlainText {
 | Recommendation is a valid enum variant | Unit test |
 | Report is stored with correct `prompt_version`, `prompt_hash`, `model_used` | Integration test |
 | The report stores `match_score`, `recommendation`, `input_chars`, `source_chars`, and `truncated` | Integration test |
-| Migration 0005 applies to a 0004 database and preserves existing rows | Migration test |
+| Migration 0006 applies to a 0005 database and preserves existing rows | Migration test |
 | Evaluating a Pipeline job with no application ensures one | Integration test |
 | A `NoMatch` report marks the application `not_a_match`, but not a submitted one | Integration test |
 | Match score is written to `applications.match_score` | Integration test |
@@ -575,7 +575,7 @@ pub struct CoverLetterResult {
    job description, and the optional tone. It reuses the `{{job_description}}`
    substitution from Workstream 3, so `plain_text` runs here too; a cover letter
    must not see tags either.
-3. Storage in the `cover_letters` table, including `input_chars` (migration 0005) alongside the existing provenance columns.
+3. Storage in the `cover_letters` table, including `input_chars` (migration 0006) alongside the existing provenance columns.
 4. Regeneration: a new generation creates a new row rather than overwriting, so the user can compare versions
 
 ### Critical Implementation Notes
@@ -848,7 +848,7 @@ End-to-end flows:
 | P3-R9 | **Scope creep into prompt tooling.** Building a full templating language or A/B testing framework. | Medium | Phase 3 supports flat variable substitution only. Conditionals, loops, and partials are explicitly deferred. Resist. |
 | P3-R10 | **Markup reaches the model as prose.** A prompt built directly from `raw_text` is mostly tags and attributes; the model sees less content per token and behavior varies by provider. | Medium | `core::text::plain_text` is a pipeline step with fixtures and idempotence tests, applied to every provider's text before assembly. `input_chars` on the report makes a thin input visible. |
 | P3-R11 | **The original prompts are sent verbatim.** They total ~120 KB, assume file and tool access, and ask for a 7-block report the schema cannot express. | High | Ship compact prompts derived from them (WS2, Q-24), with a size ceiling test. Keep the originals as reference, not as call input. |
-| P3-R12 | **Prompt versions collide.** A user copy and a later system seed can both claim `(name, version)`. | Medium | Scope versioning by `is_system`, resolve with `active_for_use`, and add a unique index in migration 0005 after a duplicate check. |
+| P3-R12 | **Prompt versions collide.** A user copy and a later system seed can both claim `(name, version)`. | Medium | Scope versioning by `is_system`, resolve with `active_for_use`, and add a unique index in migration 0006 after a duplicate check. |
 | P3-R13 | **Auto `Not a match` overrides the user.** A model opinion changes a status the user set, or a submitted application. | Low | Use `applications::mark_not_a_match`, which refuses submitted states; the status remains visible and editable, and the report is stored even when the transition is refused. |
 | P3-R14 | **DeepSeek's structured-output path is uncertain.** Tool-calling and strict JSON schemas may differ from OpenAI's. | High | Verify in Week 1 before building on it. Prefer tool/JSON-schema output; fall back to `response_format: json_object` plus schema validation and one retry. Never parse free prose. |
 | P3-R15 | **Single-provider dependency and jurisdiction.** DeepSeek is the only provider at launch and is PRC-hosted. | Medium | Keep `core::llm` provider-agnostic and add a second provider behind the same boundary. Disclose the jurisdiction in Settings. Do not log prompts. |
@@ -860,7 +860,7 @@ End-to-end flows:
 | Week | Focus | Deliverable |
 | :--- | :--- | :--- |
 | **1** | WS1 DeepSeek integration, key management, capability registry; WS2 compact prompts, scoped versioning, variable rendering | DeepSeek client returns a schema-valid result; the compact prompts seed and a report renders with no markup |
-| **2** | WS3 evaluation pipeline: structured output, streaming, storage, provenance, migration 0005 | Evaluation produces and stores a report with correct provenance and normalized input |
+| **2** | WS3 evaluation pipeline: structured output, streaming, storage, provenance, migration 0006 | Evaluation produces and stores a report with correct provenance and normalized input |
 | **3** | WS4 cover letter generation; WS5 Prompt Manager UI | Cover letters generate and store; Prompt Manager browses, edits, versions |
 | **4** | WS6 Evaluation UI, streaming, injection defense; WS7 LLM evaluation tests | End-to-end: evaluate → stream → view report → regenerate; injection tests pass |
 
@@ -888,7 +888,7 @@ Phase 3 is complete when **all** of the following are true:
 9. Cover letters generate as markdown and are stored with provenance.
 10. Prompt injection defenses are implemented and tested against malicious fixtures.
 11. A `NoMatch` report marks an eligible application `not_a_match`; a submitted application is left alone.
-12. Migration 0005 applies to an existing 0004 database and preserves rows.
+12. Migration 0006 applies to an existing 0005 database and preserves rows.
 13. `rig::evals` tests run in the default suite against cassettes and pass.
 14. CI is green on Linux, macOS, and Windows, including cassette, injection-defense, and UI jobs.
 15. A short Phase 3 retrospective memo exists, recording `rig` integration friction, provider quirks, prompt-size decisions, and injection-defense effectiveness.
@@ -906,7 +906,7 @@ were resolved on 2026-11-05:
 | Q-5 | How should prompt edits interact with historical evaluation reports beyond storing `prompt_version`? | **Confirmed:** `prompt_version` + `prompt_hash`, never hard-deleting prompt rows, is sufficient. Comparing regenerated reports is post-v1. |
 | Q-24 | Send the original `modes/*.md` prompts, or author compact embedded ones? | **Compact prompts derived from the originals**, with a size-ceiling test. The originals stay as reference. |
 | Q-25 | Which providers ship in Phase 3? | **DeepSeek first**, through its OpenAI-compatible API. The abstraction is ready for a second provider; adding one may slip without blocking the core flows. |
-| Q-26 | Where do report structured fields live? | **Columns in migration 0005**: `match_score`, `recommendation`, `input_chars`, `source_chars`, `truncated`; `applications.match_score` stays the latest score. |
+| Q-26 | Where do report structured fields live? | **Columns in migration 0006**: `match_score`, `recommendation`, `input_chars`, `source_chars`, `truncated`; `applications.match_score` stays the latest score. |
 | Q-27 | Is there a batch-evaluation UI? | **No for now.** A bounded headless helper may exist for tests; the UI evaluates one job at a time. Revisit later. |
 | Q-28 | Should a `NoMatch` report change the application status automatically? | **Yes**, through `applications::mark_not_a_match`, which refuses submitted applications; the status stays editable. |
 | Q-29 | Where does the candidate's CV/profile data come from? | **Phase 2.7** ships the CV/Profile editor and the canonical `cv_summary`; Phase 3 consumes it. |
