@@ -8,13 +8,17 @@
 //! type as OpenAI with a different base URL, auth header, and wire quirks
 //! (which is why `rig` exposes it as `providers::deepseek`).
 
+use futures_util::StreamExt;
 use sqlx::SqlitePool;
 use zeroize::Zeroizing;
 
-use super::capabilities::{capabilities, ModelCapabilities};
+use super::capabilities::{capabilities, ModelCapabilities, StructuredOutput};
 use super::config::{LlmConfig, LlmProvider};
 use super::error::LlmError;
 use super::keys;
+
+/// Where a streamed reply's fragments go.
+pub type DeltaSink = tokio::sync::mpsc::UnboundedSender<String>;
 
 /// A built client. Holds the provider call and the chosen model, so callers
 /// never have to thread both through.
@@ -23,6 +27,11 @@ pub struct LlmClient {
     provider: LlmProvider,
     model: String,
     client: rig::providers::openai::OpenAI,
+    temperature: f32,
+    max_tokens: Option<u32>,
+    /// Whether the model expects JSON mode. The evaluation pipeline asks for
+    /// it; a chat completion without it does not.
+    structured_output: StructuredOutput,
 }
 
 impl LlmConfig {
@@ -61,6 +70,9 @@ impl LlmConfig {
             provider: self.provider,
             model: self.model.clone(),
             client,
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+            structured_output: capabilities(self.provider, &self.model).structured_output,
         })
     }
 }
@@ -85,6 +97,96 @@ impl LlmClient {
             .await
             .map_err(|error| LlmError::from_rig(self.provider, error))
     }
+
+    /// Send one prompt and return the model's text.
+    ///
+    /// `model_override` comes from a request, so a re-evaluation can try a
+    /// different model without rebuilding the client. `json_mode` asks the
+    /// provider to constrain its reply to a JSON object; the caller still
+    /// parses and validates it, because DeepSeek offers JSON mode but not a
+    /// schema.
+    ///
+    /// With `deltas`, the text is also sent fragment by fragment as it
+    /// arrives. The returned string stays authoritative: a streamed reply is
+    /// assembled again at the end, and a provider that re-sends a fragment
+    /// must not double it in what we store.
+    pub async fn complete_text(
+        &self,
+        prompt: &str,
+        model_override: Option<&str>,
+        json_mode: bool,
+        deltas: Option<&DeltaSink>,
+    ) -> Result<String, LlmError> {
+        let model = self
+            .client
+            .chat(model_override.unwrap_or(self.model.as_str()));
+
+        let mut request = rig::completion::CompletionRequest::new(prompt.to_string());
+        request.temperature = Some(f64::from(self.temperature));
+        if let Some(max_tokens) = self.max_tokens {
+            request.max_tokens = Some(u64::from(max_tokens));
+        }
+        if json_mode && self.structured_output.is_usable() {
+            // DeepSeek's dialect accepts `json_object` through additional
+            // params rather than a `json_schema` response format; the same
+            // shape works on the other OpenAI-compatible providers.
+            request.additional_params = Some(serde_json::json!({
+                "response_format": { "type": "json_object" }
+            }));
+        }
+
+        let Some(sink) = deltas else {
+            let response = model
+                .call(request)
+                .await
+                .map_err(|error| LlmError::from_rig(self.provider, error))?;
+            return Ok(response_text(&response));
+        };
+
+        let mut stream = model
+            .stream(request)
+            .map_err(|error| LlmError::from_rig(self.provider, error))?;
+
+        let mut text = String::new();
+        while let Some(item) = stream.next().await {
+            if let rig::streaming::Item::Event(rig::streaming::StreamEvent::Text {
+                text: fragment,
+                ..
+            }) = item.map_err(|error| LlmError::from_rig(self.provider, error))?
+            {
+                text.push_str(&fragment);
+                // A closed receiver means the UI stopped listening; the
+                // completion still finishes so the report is not lost.
+                let _ = sink.send(fragment);
+            }
+        }
+
+        // The folded reply is authoritative: a provider may split or resend
+        // fragments, and the assembled text is what call() would return.
+        let response = stream
+            .finish()
+            .await
+            .map_err(|error| LlmError::from_rig(self.provider, error))?;
+        let assembled = response_text(&response);
+        Ok(if assembled.is_empty() {
+            text
+        } else {
+            assembled
+        })
+    }
+}
+
+/// The answer text of a response, concatenated across content blocks.
+/// Reasoning, tool calls, and images are not answer text.
+fn response_text(response: &rig::completion::CompletionResponse) -> String {
+    response
+        .choice
+        .iter()
+        .filter_map(|content| match content {
+            rig::completion::AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Whether the Pipeline's evaluation actions can run, and why not when they

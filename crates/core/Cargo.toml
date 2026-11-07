@@ -37,6 +37,7 @@ hex = "0.4"
 html-escape = "0.2"        # Greenhouse content unescaping
 rand = "0.8"
 reqwest = { version = "0.12", features = ["json"] }
+schemars = "1"            # JSON Schema for structured output
 scraper = "0.22"           # HTML parsing
 sha2 = "0.10"
 url = { version = "2", features = ["serde"] }

@@ -25,6 +25,7 @@ async fn the_llm_config_round_trips_through_settings() {
         temperature: 0.7,
         max_tokens: Some(2_048),
         max_job_chars: 9_000,
+        thin_description_chars: 500,
     };
     let stored = saved.save(&db.pool).await.unwrap();
     assert_eq!(stored, saved);

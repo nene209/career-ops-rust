@@ -57,6 +57,11 @@ pub enum PipelineAction {
     CancelDescriptions,
     /// Delete the job, confirmed.
     DeleteJob(i64),
+    /// Evaluate the job with the description storage already holds.
+    Evaluate(i64),
+    /// Fetch a full description first, then evaluate. WS6 emits this when the
+    /// selected row is under the thin-description threshold.
+    FetchDescriptionAndEvaluate(i64),
 }
 
 /// How far a running description batch has got.

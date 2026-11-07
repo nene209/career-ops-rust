@@ -296,6 +296,38 @@ pub async fn set_queue_states(
     Ok(updated)
 }
 
+/// Move one posting to a queue state inside a caller's transaction.
+///
+/// The evaluation service writes the report, the application link, and this
+/// state in one transaction: a report that exists on a row still marked
+/// `evaluate` would be a lie the next screen shows.
+pub async fn set_queue_state_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: i64,
+    state: QueueState,
+    reason: Option<&str>,
+) -> Result<()> {
+    let now = Utc::now();
+    let result = sqlx::query(
+        "UPDATE job_descriptions
+         SET queue_state = ?, queue_reason = ?, queued_at = ?
+         WHERE id = ?",
+    )
+    .bind(state.as_str())
+    .bind(reason)
+    .bind(now)
+    .bind(id)
+    .execute(&mut **tx)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(CoreError::Internal(
+            "job_descriptions::set_queue_state_tx: row not found",
+        ));
+    }
+    Ok(())
+}
+
 /// Delete a job description. Its application, evaluations, and cover letters
 /// cascade (`foreign_keys = ON`).
 pub async fn delete(pool: &SqlitePool, id: i64) -> Result<()> {

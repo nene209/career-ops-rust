@@ -91,12 +91,18 @@ pub const KEY_MODEL: &str = "llm.model";
 pub const KEY_TEMPERATURE: &str = "llm.temperature";
 pub const KEY_MAX_TOKENS: &str = "llm.max_tokens";
 pub const KEY_MAX_JOB_CHARS: &str = "llm.max_job_chars";
+pub const KEY_THIN_DESCRIPTION_CHARS: &str = "llm.thin_description_chars";
 
 /// Default character budget for the job text sent in a prompt.
 ///
 /// A character proxy for tokens (~4 characters per token), so the budget can
 /// be enforced without a tokenizer.
 pub const DEFAULT_MAX_JOB_CHARS: usize = 12_000;
+
+/// Below this many characters of normalized text, a row is "thin": a card
+/// teaser rather than a description. The evaluation UI offers to fetch the
+/// full text first.
+pub const DEFAULT_THIN_DESCRIPTION_CHARS: usize = 400;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmConfig {
@@ -106,6 +112,9 @@ pub struct LlmConfig {
     /// `None` lets the provider choose.
     pub max_tokens: Option<u32>,
     pub max_job_chars: usize,
+    /// Below this many normalized characters, the UI offers to fetch a full
+    /// description before evaluating.
+    pub thin_description_chars: usize,
 }
 
 impl Default for LlmConfig {
@@ -119,6 +128,7 @@ impl Default for LlmConfig {
             temperature: 0.2,
             max_tokens: None,
             max_job_chars: DEFAULT_MAX_JOB_CHARS,
+            thin_description_chars: DEFAULT_THIN_DESCRIPTION_CHARS,
         }
     }
 }
@@ -145,6 +155,9 @@ impl LlmConfig {
         let max_job_chars = read::<usize>(pool, KEY_MAX_JOB_CHARS)
             .await
             .unwrap_or(default.max_job_chars);
+        let thin_description_chars = read::<usize>(pool, KEY_THIN_DESCRIPTION_CHARS)
+            .await
+            .unwrap_or(default.thin_description_chars);
 
         Ok(Self {
             provider,
@@ -152,6 +165,7 @@ impl LlmConfig {
             temperature,
             max_tokens,
             max_job_chars,
+            thin_description_chars,
         }
         .sanitized())
     }
@@ -166,6 +180,12 @@ impl LlmConfig {
         settings::set_json(pool, KEY_TEMPERATURE, &config.temperature).await?;
         settings::set_json(pool, KEY_MAX_TOKENS, &config.max_tokens).await?;
         settings::set_json(pool, KEY_MAX_JOB_CHARS, &config.max_job_chars).await?;
+        settings::set_json(
+            pool,
+            KEY_THIN_DESCRIPTION_CHARS,
+            &config.thin_description_chars,
+        )
+        .await?;
         Ok(config)
     }
 
@@ -180,6 +200,7 @@ impl LlmConfig {
         self.model = self.model.trim().to_string();
         self.temperature = self.temperature.clamp(0.0, 2.0);
         self.max_job_chars = self.max_job_chars.max(1_000);
+        self.thin_description_chars = self.thin_description_chars.max(1);
         self
     }
 }
@@ -242,11 +263,13 @@ mod tests {
             temperature: 9.0,
             max_tokens: None,
             max_job_chars: 5,
+            thin_description_chars: 0,
         }
         .sanitized();
 
         assert_eq!(config.model, "deepseek-chat");
         assert_eq!(config.temperature, 2.0);
         assert_eq!(config.max_job_chars, 1_000);
+        assert_eq!(config.thin_description_chars, 1);
     }
 }

@@ -37,6 +37,7 @@ use career_ops_core::acquisition::router::{
     FetchError, FetchOutcome, FetchSource, HttpFetchSource, PreviewReport,
 };
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
+use career_ops_core::evaluation::{self, EvaluationRequest, EvaluationResult, Recommendation};
 use career_ops_core::llm::{self, LlmConfig, LlmProvider, LlmStatus};
 use career_ops_core::logging::{self, LogHandle, LogLine};
 use career_ops_core::model::{
@@ -235,6 +236,18 @@ pub struct CareerOpsApp {
     pipeline_delete_task: Option<AsyncTask<CoreResult<()>>>,
     deleting_job: Option<i64>,
 
+    /// The running evaluation, its job, and the text streamed so far.
+    evaluation_task: Option<AsyncTask<CoreResult<EvaluationResult>>>,
+    evaluating_job: Option<i64>,
+    /// Set when the run was asked to fetch a full description first; after
+    /// success the page is reloaded so the row shows the new text.
+    evaluation_fetched: bool,
+    evaluation_deltas: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    evaluation_stream: String,
+    /// A test seam: when set, evaluation uses this backend instead of building
+    /// a provider client from the keychain. Production leaves it `None`.
+    evaluation_backend: Option<Arc<dyn evaluation::CompletionBackend>>,
+
     cv_profile: CvProfileViewModel,
     cv_profile_view: CvProfileView,
     cv_profile_loaded: bool,
@@ -340,6 +353,12 @@ impl CareerOpsApp {
             descriptions_cancel: Arc::new(AtomicBool::new(false)),
             pipeline_delete_task: None,
             deleting_job: None,
+            evaluation_task: None,
+            evaluating_job: None,
+            evaluation_fetched: false,
+            evaluation_deltas: None,
+            evaluation_stream: String::new(),
+            evaluation_backend: None,
             cv_profile: CvProfileViewModel::default(),
             cv_profile_view: CvProfileView::default(),
             cv_profile_loaded: false,
@@ -368,6 +387,19 @@ impl CareerOpsApp {
             logs_confirm_delete: false,
             logs_wake_installed: false,
         }
+    }
+
+    /// Use `backend` for evaluations instead of building a provider client.
+    ///
+    /// The same test seam as [`Self::with_fetch_source`]: the pipeline is real,
+    /// the model is scripted, and no keychain or network is involved. Production
+    /// never calls this.
+    pub fn with_evaluation_backend(
+        mut self,
+        backend: Arc<dyn evaluation::CompletionBackend>,
+    ) -> Self {
+        self.evaluation_backend = Some(backend);
+        self
     }
 
     /// The state machine, if no async lock transition currently owns it.
@@ -547,6 +579,10 @@ impl CareerOpsApp {
             PipelineAction::FetchDescriptions => self.start_descriptions_batch(),
             PipelineAction::CancelDescriptions => self.cancel_descriptions_batch(),
             PipelineAction::DeleteJob(job_id) => self.start_job_delete(job_id),
+            PipelineAction::Evaluate(job_id) => self.start_evaluation(job_id, false),
+            PipelineAction::FetchDescriptionAndEvaluate(job_id) => {
+                self.start_evaluation(job_id, true)
+            }
         }
     }
 
@@ -908,6 +944,11 @@ impl CareerOpsApp {
         self.descriptions_cancel = Arc::new(AtomicBool::new(false));
         self.pipeline_delete_task = None;
         self.deleting_job = None;
+        self.evaluation_task = None;
+        self.evaluating_job = None;
+        self.evaluation_fetched = false;
+        self.evaluation_deltas = None;
+        self.evaluation_stream.clear();
 
         self.cv_profile = CvProfileViewModel::default();
         self.cv_profile_view = CvProfileView::default();
@@ -2054,6 +2095,168 @@ impl CareerOpsApp {
         }
     }
 
+    /// Evaluate one job.
+    ///
+    /// The backend is built here rather than in the service so the key is read
+    /// from the keychain on the calling thread's runtime and never reaches a
+    /// database row. `fetch_description_if_thin` is the WS6 button decision.
+    fn start_evaluation(&mut self, job_id: i64, fetch_description_if_thin: bool) {
+        if self.evaluation_task.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.pipeline_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.pipeline_error = None;
+        self.pipeline_message = Some("Evaluating…".into());
+        self.evaluation_stream.clear();
+        self.evaluation_fetched = fetch_description_if_thin;
+        self.evaluating_job = Some(job_id);
+
+        let (deltas_tx, deltas_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.evaluation_deltas = Some(deltas_rx);
+
+        let fetch_source = Arc::clone(&self.fetch_source);
+        let injected = self.evaluation_backend.clone();
+        let task = self.spawn(async move {
+            let request = EvaluationRequest {
+                fetch_description_if_thin,
+                stream: true,
+                ..EvaluationRequest::new(job_id)
+            };
+            let fetch: &dyn FetchSource = fetch_source.as_ref();
+
+            if let Some(backend) = injected {
+                return evaluation::run_evaluation(
+                    &pool,
+                    &request,
+                    backend.as_ref(),
+                    Some(fetch),
+                    Some(&deltas_tx),
+                )
+                .await;
+            }
+
+            let config = LlmConfig::load(&pool).await?;
+            let Some(key) = llm::keys::get_api_key(config.provider)? else {
+                return Err(CoreError::from(llm::LlmError::MissingApiKey {
+                    provider: config.provider,
+                }));
+            };
+            let client = config.build_client(&key)?;
+            evaluation::run_evaluation(&pool, &request, &client, Some(fetch), Some(&deltas_tx))
+                .await
+        });
+
+        self.evaluation_task = Some(task);
+    }
+
+    fn poll_evaluation(&mut self, ctx: &egui::Context) {
+        if self.evaluation_task.is_none() {
+            self.evaluation_deltas = None;
+            return;
+        }
+
+        // Streamed fragments are display only; the stored report is the text
+        // the service assembled, not the concatenation of these.
+        if let Some(rx) = self.evaluation_deltas.as_mut() {
+            while let Ok(fragment) = rx.try_recv() {
+                self.evaluation_stream.push_str(&fragment);
+            }
+        }
+
+        let poll = match self.evaluation_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.evaluation_task = None;
+                // The sender is dropped with the task, so anything left in the
+                // channel arrived before the output; drain it before hiding the
+                // progress text.
+                if let Some(mut rx) = self.evaluation_deltas.take() {
+                    while let Ok(fragment) = rx.try_recv() {
+                        self.evaluation_stream.push_str(&fragment);
+                    }
+                }
+                let job_id = self.evaluating_job.take();
+                let fetched = std::mem::take(&mut self.evaluation_fetched);
+                match result {
+                    Ok(report) => {
+                        if let Some(id) = job_id {
+                            // The queue and the row flags follow the write; the
+                            // text does not need a reload unless a fetch ran.
+                            self.pipeline.set_queue(id, QueueState::Evaluated);
+                            if let Some(row) =
+                                self.pipeline.rows.iter_mut().find(|row| row.id == id)
+                            {
+                                row.has_user_state = true;
+                                if report.recommendation == Recommendation::NoMatch {
+                                    row.status = Some(StatusLabel::NotAMatch);
+                                } else if row.status.is_none()
+                                    || matches!(
+                                        row.status,
+                                        Some(StatusLabel::Discovered)
+                                            | Some(StatusLabel::Evaluating)
+                                            | Some(StatusLabel::Ready)
+                                    )
+                                {
+                                    row.status = Some(StatusLabel::Ready);
+                                }
+                            }
+                            if fetched {
+                                // The description was replaced during the run, so
+                                // the loaded page no longer describes the row.
+                                self.start_pipeline_load();
+                            }
+                        }
+                        self.pipeline_error = None;
+                        self.pipeline_message = Some(format!(
+                            "Evaluated: {} ({:.2}) across {} characters{}.",
+                            report.recommendation.label(),
+                            report.match_score,
+                            report.input_chars,
+                            if report.truncated { ", truncated" } else { "" }
+                        ));
+                    }
+                    Err(error) => {
+                        self.pipeline_message = None;
+                        self.pipeline_error = Some(format!("Evaluation failed: {error}"));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.evaluation_task = None;
+                self.evaluation_deltas = None;
+                self.evaluating_job = None;
+                self.evaluation_fetched = false;
+                self.pipeline_message = None;
+                self.pipeline_error = Some("The evaluation was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// The text streamed by the running evaluation so far, for WS6's report
+    /// pane. Empty until the provider sends its first fragment.
+    pub fn evaluation_stream(&self) -> &str {
+        &self.evaluation_stream
+    }
+
+    /// The job whose evaluation is running, if any.
+    pub fn evaluating_job(&self) -> Option<i64> {
+        self.evaluating_job
+    }
+
     // ------------------------------------------------------------------
     // End Pipeline
     // ------------------------------------------------------------------
@@ -2835,6 +3038,7 @@ impl eframe::App for CareerOpsApp {
                 self.poll_pipeline_queue(ui.ctx());
                 self.poll_descriptions_batch(ui.ctx());
                 self.poll_pipeline_delete(ui.ctx());
+                self.poll_evaluation(ui.ctx());
                 self.poll_cv_profile_task(ui.ctx());
                 self.poll_cv_profile_save(ui.ctx());
                 self.poll_cv_profile_entry(ui.ctx());
@@ -3829,6 +4033,7 @@ mod tests {
             app.poll_pipeline_queue(ctx);
             app.poll_descriptions_batch(ctx);
             app.poll_pipeline_delete(ctx);
+            app.poll_evaluation(ctx);
             app.poll_cv_profile_task(ctx);
             app.poll_cv_profile_save(ctx);
             app.poll_cv_profile_entry(ctx);
@@ -4771,6 +4976,163 @@ mod tests {
         assert!(!app.descriptions_cancel.load(Ordering::Relaxed));
         app.handle_pipeline_action(PipelineAction::CancelDescriptions);
         assert!(app.descriptions_cancel.load(Ordering::Relaxed));
+    }
+
+    /// A fake model for the app-level evaluation path. The pipeline, the
+    /// transaction, and the row updates are real; only the provider is scripted.
+    struct FakeEvalBackend {
+        reply: String,
+    }
+
+    #[async_trait::async_trait]
+    impl evaluation::CompletionBackend for FakeEvalBackend {
+        async fn complete(
+            &self,
+            _prompt: &str,
+            _model: Option<&str>,
+            _json_mode: bool,
+            deltas: Option<&career_ops_core::llm::DeltaSink>,
+        ) -> Result<String, llm::LlmError> {
+            if let Some(sink) = deltas {
+                let _ = sink.send("streaming fragment ".into());
+            }
+            Ok(self.reply.clone())
+        }
+    }
+
+    fn eval_reply() -> String {
+        r#"{"match_score":0.9,"recommendation":"strong_match",
+            "strengths":["a","b","c"],"gaps":["x"],
+            "rationale":"fits","full_report_markdown":"A strong fit."}"#
+            .to_string()
+    }
+
+    fn eval_text() -> String {
+        let mut text = String::from("We are hiring a Rust engineer. ");
+        while text.chars().count() < 600 {
+            text.push_str("You will build offline-first desktop software with SQLite. ");
+        }
+        text
+    }
+
+    /// The Evaluate action through the app: the report is stored, the row moves
+    /// to `evaluated`, and its badge and delete gate follow without a reload.
+    #[test]
+    fn evaluating_a_row_updates_the_queue_status_and_gate() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::default());
+        let backend = Arc::new(FakeEvalBackend {
+            reply: eval_reply(),
+        });
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source)
+            .with_evaluation_backend(backend);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        let pool = app.pool().expect("pool");
+        app.runtime()
+            .block_on(profile_repo::update_details(
+                &pool,
+                &ProfileDetails {
+                    name: "Ada Lovelace".into(),
+                    email: "ada@example.com".into(),
+                    phone: None,
+                    location: Some("London".into()),
+                    summary: Some("Mathematician.".into()),
+                },
+            ))
+            .expect("profile");
+
+        let stored = app
+            .runtime()
+            .block_on(job_repo::upsert(
+                &pool,
+                job_repo::NewJobDescription {
+                    title: "Engineer".into(),
+                    company: "Acme".into(),
+                    source_url: "https://example.com/jobs/evaluate".into(),
+                    raw_text: eval_text(),
+                    fetch_tier: FetchTier::Tier1bHtml,
+                    external_id: None,
+                },
+            ))
+            .expect("store");
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+        app.pipeline_view.selected = Some(stored.id);
+
+        app.handle_pipeline_action(PipelineAction::Evaluate(stored.id));
+        wait_until(&mut app, &ctx, |app| app.evaluation_task.is_none());
+
+        assert!(app.pipeline_error.is_none(), "{:?}", app.pipeline_error);
+        assert!(
+            app.evaluating_job().is_none(),
+            "the job is no longer running"
+        );
+        assert!(
+            app.evaluation_stream().contains("streaming fragment"),
+            "the fake streamed into the app's buffer"
+        );
+        assert!(
+            app.pipeline_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Evaluated: Strong match")),
+            "{:?}",
+            app.pipeline_message
+        );
+
+        let row = &app.pipeline.rows[0];
+        assert_eq!(row.queue, QueueState::Evaluated);
+        assert_eq!(row.status, Some(StatusLabel::Ready));
+        assert!(
+            row.has_user_state,
+            "a stored report makes deleting the row a gated action"
+        );
+
+        let application = app
+            .runtime()
+            .block_on(application_repo::ensure(&pool, stored.id))
+            .expect("ensure");
+        assert_eq!(application.status, "ready");
+        assert!(application.evaluation_report_id.is_some());
+        assert_eq!(
+            app.runtime()
+                .block_on(job_repo::get(&pool, stored.id))
+                .expect("get")
+                .expect("row")
+                .queue_state,
+            "evaluated"
+        );
     }
 
     /// A complete batch, a partial one, a stopped one and a capped one have to

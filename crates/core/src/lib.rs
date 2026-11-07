@@ -9,6 +9,7 @@ pub mod acquisition;
 pub mod backend;
 pub mod db;
 pub mod error;
+pub mod evaluation;
 pub mod keystore;
 pub mod llm;
 pub mod logging;

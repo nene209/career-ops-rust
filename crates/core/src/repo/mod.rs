@@ -12,6 +12,7 @@
 
 pub mod applications;
 pub mod cv_entries;
+pub mod evaluation_reports;
 pub mod job_descriptions;
 pub mod portals;
 pub mod profile;

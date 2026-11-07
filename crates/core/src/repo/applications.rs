@@ -154,6 +154,63 @@ pub async fn set_match_score(pool: &SqlitePool, id: i64, score: f64) -> Result<(
     Ok(())
 }
 
+/// Link a report and its score to an application inside a caller's
+/// transaction, optionally moving the status.
+///
+/// The evaluation service writes the report, this link, and the job's queue
+/// state atomically. `status` is `None` when the application was already past
+/// the evaluation lifecycle, or when the caller is not driving it: an applied
+/// row must never be moved backwards by an evaluation.
+pub async fn finish_evaluation_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: i64,
+    report_id: i64,
+    match_score: f64,
+    status: Option<ApplicationStatus>,
+) -> Result<()> {
+    if !(0.0..=1.0).contains(&match_score) {
+        return Err(CoreError::Internal("match_score must be in [0.0, 1.0]"));
+    }
+
+    let now = Utc::now();
+    let result = match status {
+        Some(status) => {
+            sqlx::query(
+                "UPDATE applications
+                 SET evaluation_report_id = ?, match_score = ?, status = ?, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(report_id)
+            .bind(match_score)
+            .bind(status.as_str())
+            .bind(now)
+            .bind(id)
+            .execute(&mut **tx)
+            .await?
+        }
+        None => {
+            sqlx::query(
+                "UPDATE applications
+                 SET evaluation_report_id = ?, match_score = ?, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(report_id)
+            .bind(match_score)
+            .bind(now)
+            .bind(id)
+            .execute(&mut **tx)
+            .await?
+        }
+    };
+
+    if result.rows_affected() == 0 {
+        return Err(CoreError::Internal(
+            "applications::finish_evaluation_tx: row not found",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn attach_report(pool: &SqlitePool, id: i64, report_id: i64) -> Result<()> {
     let now: DateTime<Utc> = Utc::now();
     sqlx::query("UPDATE applications SET evaluation_report_id = ?, updated_at = ? WHERE id = ?")

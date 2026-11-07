@@ -30,7 +30,7 @@ pub mod keys;
 pub mod retry;
 
 pub use capabilities::{capabilities, ModelCapabilities, StructuredOutput};
-pub use client::{status, LlmClient, LlmStatus};
+pub use client::{status, DeltaSink, LlmClient, LlmStatus};
 pub use config::{LlmConfig, LlmProvider};
 pub use error::LlmError;
 pub use retry::{with_retry, RetryPolicy};

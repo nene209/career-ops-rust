@@ -203,6 +203,17 @@ pub struct EvaluationReport {
     pub model_used: String,
     pub prompt_version: Option<i64>,
     pub prompt_hash: Option<String>,
+    /// Written by Phase 3; `None` for a report from an earlier build.
+    pub match_score: Option<f64>,
+    /// One of [`Recommendation`](crate::evaluation::Recommendation), stored as
+    /// text.
+    pub recommendation: Option<String>,
+    /// Characters of job text actually sent, after normalization and the budget.
+    pub input_chars: Option<i64>,
+    /// The stored text before normalization, for the thin-input diagnosis.
+    pub source_chars: Option<i64>,
+    /// The job text was cut to fit the budget.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -214,6 +225,8 @@ pub struct CoverLetter {
     pub model_used: String,
     pub prompt_version: Option<i64>,
     pub prompt_hash: Option<String>,
+    /// Characters of prompt input sent, added with the evaluation provenance.
+    pub input_chars: Option<i64>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
