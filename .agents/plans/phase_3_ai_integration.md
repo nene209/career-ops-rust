@@ -1,7 +1,7 @@
 # Phase 3: AI Integration — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.14), §12
-**Status:** Draft v0.7 — depends on Phases 2.7, 2.8, and 2.9; WS1 can start
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.24), §12
+**Status:** Ready v0.9 — every entry condition is met (Phases 2.7, 2.8, and 2.9 are complete) and Q-43 is resolved; WS1 can start
 **Last updated:** 2026-11-06
 **Duration:** 3–4 weeks
 **Depends on:** Phase 2 completion, Phase 2.7 (CV/Profile editor), Phase 2.8 (fetch controls and detail opt-in), Phase 2.9 (queue state and preferences); see Entry Conditions
@@ -19,6 +19,8 @@
 | v0.5 | Owner decisions recorded. **Q-29:** Phase 2.7 (CV/Profile editor) precedes Phase 3 and provides the canonical `cv_summary`. **Q-25:** DeepSeek is the first provider, through its OpenAI-compatible API; the abstraction stays open for a second. **Q-24, Q-26, Q-27, Q-28, Q-5:** confirmed as recommended. WS1 is now DeepSeek-first; WS2 consumes the Phase 2.7 summary renderer; the exit criterion allows closing with DeepSeek if a second provider would delay the core flows. |
 | v0.6 | Phase 2.7 closed, so the candidate-context dependency is a shipped function rather than an assumption: `repo::profile::cv_summary(&SqlitePool) -> Result<Option<String>>` for production and the pure `render_cv_summary(&Profile, &[CvEntry]) -> Option<String>` for tests, both in `crates/core/src/repo/profile.rs`. The format is fixed and documented in the renderer's doc comment; `None` for an empty profile is covered by `an_empty_profile_has_no_summary`. Phase 3 substitutes the string verbatim into `{{cv_summary}}` and must not re-format. |
 | v0.7 | Records the Phase 2.8 and Phase 2.9 inputs and resolves the ordering. **2.9 was renumbered from 3.1 and now lands before Phase 3**, which removes the circular dependency: Phase 3's entry conditions had assumed the queue existed while 2.9/3.1 had assumed Phase 3 did. 2.9's own inputs were Phase 2.5 deliverables, so nothing from `rig` was ever required there. Consequences: the report write sets `queue_state = 'evaluated'` unconditionally in the same transaction (note 13 no longer needs a compile-time guard), and the migration is renumbered **0005 → 0006** because 2.9 takes 0005. WS3 item 11 (combined fetch-then-evaluate) and 6.1a (thin-row button text) respond to Phase 2.8's detail opt-in. |
+| v0.8 | Checked against the shipped 2.7–2.9 code, with one correctness fix and four corrections. **The "same transaction" claim in note 13 was not expressible:** `job_descriptions::set_queue_states` opens and commits its own transaction, so WS3 adds a transaction-scoped variant (`set_queue_state_tx(&mut Transaction, ..)`) and calls it inside the report insert; otherwise a crash between the two writes leaves a report on a row still marked `evaluate`. Corrections: **Settings is a real screen** since 2.9 (acquisition preferences), so WS1 extends it with an AI section instead of replacing a placeholder; **the Pipeline detail already has a Queue row** (**Mark for details** / **Mark for evaluation** / **Dismiss**) and the header a bounded **Fetch descriptions (N)** batch, so WS6 composes with both and its thin-row path reuses `manual::refresh_job`; **`core::text::plain_text` matches the documented signature exactly** (`PlainText { text, truncated, source_chars }`), so WS3 item 3 is a call, not new code; and **`core::logging` + `docs/logging.md` already forbid logging prompts and completions**, so WS1 adds one count-and-outcome line per call rather than a second logging story. Also adds exit criterion 16 (the queue write), and **Q-43** — the plan never said what happens to `applications.status` during an evaluation, and `Discovered → Evaluating → Ready` is already permitted, so the owner has to confirm the intended behavior. |
+| v0.9 | **Q-43 resolved by the owner: the evaluation moves the application through its lifecycle.** `discovered` and `ready` enter `evaluating` before the call, and success returns to `ready` — all three transitions are already permitted by `applications::is_valid_transition`. Any other status is left alone, a failure or cancellation returns to the status the row had, and a `NoMatch` report goes straight to `mark_not_a_match` instead of passing through `ready`. WS3 gains deliverable 12 and an acceptance criterion; exit criterion 17 pins it. **`rig` is pinned to `0.46.0`**, the current release as of this date; note 1 and P3-R1 now record the checked version instead of asking for one. Also corrects WS3 item 10: `mark_not_a_match` refuses a submitted application with an `Err` rather than acting as a silent no-op, so the caller treats that error as "leave the status alone" and still stores the report. |
 
 ---
 
@@ -64,14 +66,15 @@ prior outputs are consumed:
 | `applications` table and repository | `ensure`, `mark_not_a_match`, `transition`, `attach_report`, and `set_match_score` exist. `Not a match` is a real status with transitions and a filter (Phase 2.5 WS3). Evaluation ensures the row before writing a report. |
 | `evaluation_reports` and `cover_letters` tables | Present from 0001; **no repository or write path exists yet**. Phase 3 adds both, plus migration 0006 for report provenance (`input_chars` and structured fields). |
 | `settings` table and `repo::settings` | `get_json`/`set_json`/`get_or` already exist for provider and model preferences. Keys never go here. |
-| egui shell with navigation | Pipeline detail already has disabled **Evaluate** and **Generate cover letter** buttons with an "Available in a later phase" tooltip; the Prompts and Settings screens are placeholders. Phase 3 replaces those. |
+| egui shell with navigation | Pipeline detail renders **Evaluate** and **Generate cover letter** disabled with an "Available in a later phase" tooltip, plus Phase 2.9's **Queue** row (**Mark for details** / **Mark for evaluation** / **Dismiss**) and the header's **Fetch descriptions (N)** batch. **Settings is a real screen** (acquisition preferences, Phase 2.9); **Prompts is still a placeholder**. Phase 3 extends the first and replaces the second. |
 | Pipeline list/detail state | Search, filters, delete (with a typed gate), the raw-text toggle, and status badges exist. Evaluation UI must compose with them; deleting a job cascades its reports. |
 | Keystore (§7 of main plan) | Provides the unlock flow and the envelope key. It is **not** a general secret store, so Phase 3 adds a separate keychain namespace for API keys (WS1). |
 | Unlock flow | Gates access to API keys and job data |
 | Backend traits from Phase 1 | Not used in Phase 3; `PdfBackend` rendering arrives in Phase 4 |
 | `docs/LIVE_TESTS.md` conventions | Phase 3's live provider and LLM tests are indexed there, `#[ignore]`d or env-gated, and never run in the default offline suite. |
 | Phase 2.8 output | **Refresh** / **Continue** / **Fetch all pages** are the portal fetch actions (the header keeps **Reload list** and **Fetch all portals**); detail enrichment is per-portal opt-in (default off for new portals, retained for Waymo and Ubisoft). Phase 3 therefore sees rows whose `raw_text` is often a card teaser until the user fetches descriptions. |
-| Phase 2.9 output | `job_descriptions.queue_state` exists (`new` / `details_needed` / `evaluate` / `dismissed` / `evaluated`); `profile.preferences` is populated; `manual::fetch_descriptions_batch` is available for a bounded refresh of flagged rows. |
+| Phase 2.9 output | `job_descriptions.queue_state` exists (`new` / `details_needed` / `evaluate` / `dismissed` / `evaluated`) with `set_queue_state(pool, id, state, reason)` and the batch `set_queue_states(pool, ids, state, reason) -> usize` (one transaction, reports rows changed). `profile.preferences` is populated; `manual::fetch_descriptions_batch(pool, ids, source, cancel, progress)` is available for a bounded refresh of flagged rows, capped at `DESCRIPTION_BATCH_LIMIT = 20`. |
+| `core::logging` and `docs/logging.md` | One `tracing` seam with a rotated file and an in-memory ring, already rendering in the **Logs** screen and drawer. Its never-log list already forbids prompts, completions, CV text, and key material, so Phase 3 logs counts, models, and outcomes only. |
 
 **Phase 3 assumes job descriptions exist in the database.** Phase 2 supplies them
 via the tiered acquisition pipeline, and Phase 2 is complete (six known sites and
@@ -127,6 +130,7 @@ into an actionable "add your CV" error before assembling a prompt.
 | Evaluation UI (trigger, stream, view report) | Visual regression testing |
 | `prompt_version`, `prompt_hash`, `model_used`, and `input_chars` provenance | Multi-modal prompts (images, audio) |
 | Auto-marking `Not a match` from a NoMatch report, without overriding a submitted application (Q-20) | Continuous evaluation dashboards |
+| Moving the application `discovered`/`ready` → `evaluating` → `ready` while an evaluation runs, and restoring it on failure (Q-43) | Any other status change initiated by the app (the user still owns `applied`, `interviewing`, `rejected`, `offer`) |
 | LLM evaluation tests via `rig::evals`, gated like the existing live tests | Adversarial red-teaming |
 | Prompt injection defense | Recording description-versus-teaser provenance on the job row (a Phase 2 follow-up) |
 | Deterministic HTML-to-text normalization before prompting (the function already exists; Phase 3 calls it) | Sending markup to the model, or stripping it at acquisition |
@@ -220,19 +224,23 @@ pub fn delete_api_key(provider: LlmProvider) -> Result<()>;
 4. Model capability registry: which models support structured output, streaming, tool calls, and their context window sizes
 5. Error taxonomy mapping `rig` errors to application-level errors: `MissingApiKey`, `RateLimited`, `ContextLengthExceeded`, `ProviderError`, `InvalidResponse`
 6. Retry policy with exponential backoff for transient failures (429, 503, network timeouts)
-7. **Settings UI** replacing the placeholder screen: provider selector (DeepSeek
-   selected by default), model field, API key entry (write-only; saved to the
-   keychain and never shown again), a **Test connection** action, and the
-   data-sharing disclosure (the CV summary and job text are sent to the selected
-   provider; name the provider and its jurisdiction). Missing capability and
-   missing-key states are explained here rather than surfaced as errors from the
-   Pipeline.
+7. **Settings UI.** The screen exists since Phase 2.9 and owns the
+   acquisition preferences; Phase 3 adds an **AI** section beside them rather
+   than replacing the screen: provider selector (DeepSeek selected by default),
+   model field, API key entry (write-only; saved to the keychain and never shown
+   again), a **Test connection** action, and the data-sharing disclosure (the CV
+   summary and job text are sent to the selected provider; name the provider and
+   its jurisdiction). Missing capability and missing-key states are explained
+   here rather than surfaced as errors from the Pipeline. Saving the AI section
+   is a separate action from **Save preferences**: one writes `profile`, the
+   other `settings` and the keychain, and a failed keychain write must not leave
+   the preferences form dirty.
 8. A `llm.status()` helper the Pipeline uses to decide whether the Evaluate and
    Cover letter buttons are enabled, with a reason when they are not.
 
 ### Critical Implementation Notes
 
-1. **`rig` is pre-1.0 and ships breaking changes.** The crates.io page explicitly warns: "future updates will contain breaking changes." Pin to a specific version in `Cargo.toml` and treat upgrades as deliberate work with a migration review. **Verify the current version against crates.io before pinning** — this plan was written when the version was `0.44.0`, and that may have moved. Do not pin a version that has not been checked against the current docs.
+1. **`rig` is pre-1.0 and ships breaking changes.** The crates.io page explicitly warns: "future updates will contain breaking changes." Pin to a specific version in `Cargo.toml` and treat upgrades as deliberate work with a migration review. **Pin `0.46.0`**, which is the current release as of 2026-11-06 (this plan previously said `0.44.0`). Re-check before the pin lands in `Cargo.toml`; if it has moved, treat the bump as a deliberate step with a changelog review rather than a caret range.
 2. **`rig` splits into `rig-core` and `rig-agent`.** The root `rig` facade re-exports both. Depend only on `rig` unless there is a specific reason to reach lower.
 3. **DeepSeek first (Q-25).** DeepSeek exposes an OpenAI-compatible API at
    `https://api.deepseek.com` (`deepseek-chat`, `deepseek-reasoner`). Use `rig`'s
@@ -250,6 +258,12 @@ pub fn delete_api_key(provider: LlmProvider) -> Result<()>;
 6. **Streaming requires a runtime bridge.** `rig`'s streaming traits return `Stream` types. egui renders on the UI thread while Portals work runs on a `tokio` runtime. Use the app's existing `async_bridge` pattern (Phase 2.1): poll the task from the UI, never block it.
 7. **`rig` supports OpenTelemetry GenAI semantic conventions.** Wire this up early if observability is desired; retrofitting it later means touching every call site.
 8. **DeepSeek is a PRC-hosted provider.** The Settings disclosure must say that the CV summary and job text leave the machine and are sent to DeepSeek. Do not log prompts or responses at info level.
+9. **Logging already has a policy.** `core::logging` is the one `tracing` seam
+   and `docs/logging.md` is its never-log list: prompts, completions, CV text,
+   and key material are on it. Phase 3 adds one `info!` line per call — provider,
+   model, `input_chars`, `elapsed_ms`, outcome, and the classified error on
+   failure — and nothing that identifies the posting's text. The Logs screen
+   then shows an evaluation as one line per call rather than a wall of prompt.
 
 ### Acceptance Criteria
 
@@ -462,9 +476,10 @@ pub struct PlainText {
    hard limit 10) is allowed for tests and future UI; there is no batch UI and
    no hundreds-of-jobs run in Phase 3.
 10. Auto-mark `Not a match` when the report recommends `NoMatch` (Q-20), using
-    `applications::mark_not_a_match`. It is a no-op for an application that is
-    already applied, interviewing, offered, or rejected, because that writer
-    refuses those transitions. The status stays visible and editable.
+    `applications::mark_not_a_match`. For an application that is applied,
+    interviewing, offered, or rejected the writer **refuses** the transition with
+    an error, so the caller treats that error as "leave the status alone" and
+    still stores the report. The status stays visible and editable.
 11. **Combined fetch-then-evaluate.** `EvaluationRequest` gains
     `fetch_description_if_thin: bool` (default `false`). When `true` and the
     job's normalized text is below `llm.thin_description_chars` (default 400),
@@ -472,6 +487,18 @@ pub struct PlainText {
     prompt. The report records whether the fetch happened. With Phase 2.8's
     detail opt-in, most pipeline rows are thin on arrival, so the UI uses this
     flag by default when the user clicks **Evaluate** on a row without text.
+
+    This is the single-row path; do not add a second fetch loop. A user who has
+    many thin rows already has Phase 2.9's **Fetch descriptions (N)** batch
+    (`fetch_descriptions_batch`), which fetches them and advances the queue.
+12. **Application lifecycle (Q-43).** The evaluation is a visible step in the
+    application's status. Before the model call, a `discovered` or `ready`
+    application moves to `evaluating`; after the report is stored, `evaluating`
+    returns to `ready`. All three transitions already exist in
+    `applications::is_valid_transition`. Every other status is left alone (a
+    report on an `applied` row must not move it backwards), a failed or cancelled
+    call returns the row to the status it had, and a `NoMatch` report goes
+    straight to `mark_not_a_match` instead of passing through `ready`.
 
 ### Critical Implementation Notes
 
@@ -509,11 +536,17 @@ pub struct PlainText {
     applications. After it succeeds, the Pipeline row's badge and `has_user_state`
     must be updated in place, exactly as the manual action does. The status stays
     editable, and the report is still stored when the transition is refused.
-13. **Phase 2.9's queue state is written by evaluation.** When a report is
-    written, the same transaction sets `job_descriptions.queue_state =
-    'evaluated'` through the repository helper Phase 2.9 ships. 2.9 lands first,
-    so the column exists and there is no presence check: a report without the
-    queue update would leave the row stuck in `evaluate`.
+13. **Phase 2.9's queue state is written by evaluation, in the report's
+    transaction.** `job_descriptions::set_queue_states` opens and commits its own
+    transaction, so calling it after the report insert would leave a window where
+    a report exists on a row still marked `evaluate`. The evaluation service
+    therefore opens one `Transaction` and writes both: the report insert and the
+    queue update (`queue_state = 'evaluated'`) through a transaction-taking
+    helper. 2.9 landed first, so the column exists and there is no presence
+    check, and the row is set to `evaluated` even if the user changed the queue
+    in the meantime — the report is the fact. The loaded Pipeline row follows
+    with `PipelineViewModel::set_queue(id, QueueState::Evaluated)`, so the badge
+    changes without a reload.
 
 ### Acceptance Criteria
 
@@ -538,6 +571,9 @@ pub struct PlainText {
 | Entities and block boundaries survive normalization | Unit test: `&amp;`, `&#39;`, `&nbsp;`, `<li>`, `<p>`, `<br>` |
 | Truncation never splits a character or an entity | Unit test at the boundary |
 | The report records `input_chars` after normalization | Integration test |
+| An evaluation moves a `discovered`/`ready` application to `evaluating`, then to `ready` (Q-43) | Integration test |
+| A failed or cancelled evaluation restores the application's previous status | Integration test |
+| A report on an `applied` application leaves its status alone | Integration test |
 
 ---
 
@@ -657,26 +693,35 @@ pub struct CoverLetterResult {
 
 #### Evaluation UI
 
-1. **Enable the existing disabled buttons.** The Pipeline detail already renders
+1. **Enable the existing disabled buttons.** The Pipeline detail renders
    **Evaluate** and **Generate cover letter** with an "Available in a later
-   phase" tooltip. Replace those with the real actions. When no provider or API
-   key is configured, the enabled-state check fails with a clear message and a
-   link to Settings, not a silent no-op.
+   phase" tooltip, below a **Queue** row that Phase 2.9 added. Replace the two
+   disabled actions with the real ones and leave the queue row where it is: the
+   queue is what the user wants done, the buttons are doing it. When no provider
+   or API key is configured, the enabled-state check fails with a clear message
+   and a link to Settings, not a silent no-op.
 1a. **Thin-row handling.** When the selected job's normalized text is under the
     thin threshold, the Evaluate button reads **Fetch description and evaluate**
     and passes `fetch_description_if_thin: true`. When the text is sufficient,
-    it reads **Evaluate**. A failure to fetch the description keeps the row
-    unevaluated with a message; the user can still evaluate the teaser by
-    clicking again with the "Evaluate without description" link.
+    it reads **Evaluate**. The fetch is `manual::refresh_job` — the same path as
+    the row's **Refresh description** — so there is no second extractor. A
+    failure to fetch keeps the row unevaluated with a message; the user can still
+    evaluate the teaser by clicking again with the "Evaluate without description"
+    link. A user with many thin rows should use the header's **Fetch
+    descriptions (N)** batch instead of clicking each one.
 2. **Streaming progress display**: the report text appears incrementally in the
    detail view while the model generates it.
 3. **Report viewer**: the detail gains sections/tabs for **Description**,
    **Evaluation**, and **Cover letter**. The existing plain-text/raw toggle stays
    on the description tab. The evaluation tab shows the match score,
    recommendation, strengths, gaps, and narrative.
-4. **Match score badge** in the Pipeline row, next to the tier and status. The
-   list is a `ScrollArea`, not a table, so Phase 3 adds the badge and an explicit
-   sort control (score / fetched) rather than a sortable column header.
+4. **Match score badge** in the Pipeline row, beside the queue badge. The row
+   already carries a tier label, a status badge, a queue badge, and the
+   **Preferred**/**Excluded** markers, so the score is one compact number (for
+   example `0.82`) with the recommendation in its hover text rather than a
+   second badge. The list is a `ScrollArea`, not a table, so Phase 3 adds the
+   badge and an explicit sort control (score / fetched) rather than a sortable
+   column header.
 5. **Re-evaluate action** with a prompt/model override selector; each run stores
    a new report and updates the latest-report pointer on the application.
 6. **Evaluation history**: all reports for an application, with prompt version,
@@ -686,6 +731,12 @@ pub struct CoverLetterResult {
 8. **Auto `Not a match`**: a `NoMatch` report marks the application through the
    existing writer and updates the row badge and `has_user_state` in place, the
    same way the manual action does.
+9. **Queue state after a report.** Writing a report sets `queue_state =
+   'evaluated'` in the same transaction (WS3, note 13) and updates the loaded
+   row with `PipelineViewModel::set_queue`. The detail's queue badge then reads
+   **Evaluated** and the three manual queue actions still work: **Mark for
+   evaluation** is a pre-evaluation hint, not a substitute for **Evaluate**.
+   Re-evaluating leaves the row `evaluated`.
 
 The existing delete gate already names evaluations as lost state, and deleting a
 job cascades its reports and letters. The evaluation UI therefore does not need a
@@ -837,7 +888,7 @@ End-to-end flows:
 
 | ID | Risk | Impact | Mitigation |
 | :--- | :--- | :--- | :--- |
-| P3-R1 | **`rig` pre-1.0 breaking changes.** The crate explicitly warns of breaking changes. | High | Pin to a specific version. Verify the current version before pinning. Treat upgrades as deliberate work with migration review. Isolate `rig` behind `core::llm` so churn is absorbed in one place. |
+| P3-R1 | **`rig` pre-1.0 breaking changes.** The crate explicitly warns of breaking changes. | High | Pin `0.46.0` (checked 2026-11-06) with no caret range. Treat upgrades as deliberate work with migration review. Isolate `rig` behind `core::llm` so churn is absorbed in one place. |
 | P3-R2 | **Provider API differences.** Structured output, streaming, and tool support vary by provider. | Medium | Capability registry per provider/model. UI warns when a model lacks a required capability. Fallback or refusal is explicit. |
 | P3-R3 | **Prompt injection from malicious job descriptions.** | High | Structural separation, instruction hierarchy, structured output validation, no tool access. Documented as imperfect. See Workstream 6. |
 | P3-R4 | **Streaming + egui integration causes UI stalls.** Same problem as the browser backends in Phase 2 and 4. | Medium | Use the `async_bridge` polling pattern (Phase 2.1). Add UI responsiveness test. Cancellation support. |
@@ -892,14 +943,16 @@ Phase 3 is complete when **all** of the following are true:
 13. `rig::evals` tests run in the default suite against cassettes and pass.
 14. CI is green on Linux, macOS, and Windows, including cassette, injection-defense, and UI jobs.
 15. A short Phase 3 retrospective memo exists, recording `rig` integration friction, provider quirks, prompt-size decisions, and injection-defense effectiveness.
+16. Writing a report sets `queue_state = 'evaluated'` in the same transaction, and the Pipeline row's badge updates without a reload (WS3, note 13; WS6, item 9).
+17. An evaluation moves a `discovered`/`ready` application to `evaluating` and back to `ready`, restores the previous status on failure or cancellation, and never rewrites a submitted application's status (Q-43; WS3, deliverable 12).
 
 ---
 
 ## Open Questions (Phase 3 Owns)
 
-The main plan (v0.12) tracks cross-phase questions in Appendix B, and Phases
+The main plan (v0.24) tracks cross-phase questions in Appendix B, and Phases
 2.5/2.6 record their own Q-18–Q-23 in their phase plans. Phase 3's questions
-were resolved on 2026-11-05:
+were resolved on 2026-11-05, and **Q-43 on 2026-11-06**.
 
 | # | Question | Resolution |
 | :--- | :--- | :--- |
@@ -911,9 +964,10 @@ were resolved on 2026-11-05:
 | Q-28 | Should a `NoMatch` report change the application status automatically? | **Yes**, through `applications::mark_not_a_match`, which refuses submitted applications; the status stays editable. |
 | Q-29 | Where does the candidate's CV/profile data come from? | **Phase 2.7** ships the CV/Profile editor and the canonical `cv_summary`; Phase 3 consumes it. |
 | Q-42 | **Should Phase 3 auto-fetch descriptions for thin rows without asking?** | No. Fetching is a network call and a user cost; the Evaluate button makes the cost explicit ("Fetch description and evaluate") rather than hiding it. |
+| Q-43 | **What happens to `applications.status` during an evaluation?** | **Resolved:** the evaluation moves the application through its lifecycle. `discovered` and `ready` enter `evaluating` before the call and return to `ready` on success; every other status is left alone, a failure or cancellation restores the previous status, and `NoMatch` goes straight to `mark_not_a_match`. All three transitions already exist in `applications::is_valid_transition`, so this needs no schema or repository change — just the two calls in WS3, deliverable 12. |
 
 Q-29 is complete before WS1 starts. Q-24 and Q-25 are complete before WS2/WS1;
-Q-26 and Q-5 before WS3 completes; Q-27 and Q-28 before WS6 completes.
+Q-26 and Q-5 before WS3 completes; Q-27, Q-28 and Q-43 before WS6 completes.
 
 ---
 
