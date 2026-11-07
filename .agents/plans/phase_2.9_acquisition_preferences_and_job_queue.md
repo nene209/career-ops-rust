@@ -1,10 +1,10 @@
 # Phase 2.9: Acquisition Preferences and Job Queue — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.14), §12
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.16), §12
 **Status:** Planned — not started
 **Last updated:** 2026-11-06
 **Duration:** 3–4 days
-**Depends on:** Phase 2.5 (`applications::ensure`, `Not a match`, the Pipeline detail's raw/plain toggle, `manual::refresh_job`), Phase 2.8 (fetch controls, per-portal detail opt-in)
+**Depends on:** Phase 2.5 (`applications::ensure`, `Not a match`, the Pipeline detail's raw/plain toggle, `manual::refresh_job`), Phase 2.8 (fetch controls, per-portal detail opt-in), Phase 2.8.1 (the **Logs** screen and drawer, where the batch's per-job lines are read)
 **Blocks:** Phase 3 (evaluation writes `evaluated` into the queue this phase creates) and Phase 3.2 (triage fills the queue automatically).
 
 ---
@@ -15,6 +15,7 @@
 | :--- | :--- |
 | v0.1 | Initial plan. Adds a preference layer (companies, locations, keywords, exclusions) and a manual job queue state on `job_descriptions`. The queue is what makes "the user steers the fetch and evaluation" possible without an LLM, and it is exactly the structure Phase 3.2's triage will fill. Also adds a bounded batch "fetch descriptions for flagged details" action, which pairs with Phase 2.8's detail opt-in. One migration. |
 | v0.2 | Renumbered from Phase 3.1 to **Phase 2.9**, so it lands before Phase 3. Phase 3 and this phase had come to depend on each other: Phase 3's entry conditions assumed the queue existed, while this plan listed Phase 3 as a dependency. Sequencing it first resolves that, and Phase 3 can then write `queue_state = 'evaluated'` unconditionally. Its only real inputs (`applications::ensure`, `Not a match`, the raw/plain toggle, `refresh_job`) are Phase 2.5 deliverables, so nothing from `rig` was ever needed here. Migration renumbered 0006 → **0005** (Phase 3 takes 0006, Phase 3.2 keeps 0007). |
+| v0.3 | Phase 2.8.1 (Logging and Diagnostics) inserted before this phase, so the order is **2.8 → 2.8.1 → 2.9 → Phase 3 → 3.2**. Nothing in this plan's content changes: the batch in WS4 is a long, partially-failing operation across many jobs, which is exactly what the Logs screen and drawer are for, so this phase now names it as a dependency and reads its per-job progress in that screen rather than inferring it from a final count. |
 
 ---
 
