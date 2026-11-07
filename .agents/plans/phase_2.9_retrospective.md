@@ -6,8 +6,10 @@
 **Period:** 2026-11-06
 **Estimate:** 3–4 days
 **Actual:** five workstreams in one session, plus a manual-testing pass still to come
-**Status:** Code complete. Manual script §6b is written and **not yet verified** by
-the owner; everything else — preferences, queue, batch — is covered offline.
+**Status:** Code complete. Manual script §6b is verified by the owner except
+6b.8 (a posting whose page yields no description), which stays in the script for
+a genuine refusal and is covered offline by
+`a_failure_leaves_the_row_marked_for_details`.
 
 ---
 
@@ -43,7 +45,7 @@ that Phase 3 and Phase 3.2 read.
 | 6 | Migration 0005 applies to a 0004 database and preserves rows | ✅ | `migration_0005_applies_to_a_0004_database_and_preserves_rows` |
 | 7 | No new dependency and no change to acquisition semantics | ✅ | `Cargo.toml` unchanged; the router, tiers, and failure classification untouched. `fetch_descriptions_batch` calls the existing `manual::refresh_job` |
 | 8 | Offline suite, fmt, and clippy are clean | ✅ | See the command table below |
-| 9 | Manual script §6b, parent plan, and retrospective are updated | ✅ | §6b written (eight steps), §6.2 and §6.3 extended, `main.md` v0.22, Phase 3.2's entry conditions, this document. §6b is not yet exercised. |
+| 9 | Manual script §6b, parent plan, and retrospective are updated | ✅ | §6b written (eight steps), §6.2 and §6.3 extended, `main.md` v0.22, Phase 3.2's entry conditions, this document. 6b.1–6b.7 verified by the owner; 6b.8 left for a genuine failure and covered by the offline tests. |
 
 **Verification commands and results (2026-11-06):**
 
