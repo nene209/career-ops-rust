@@ -15,6 +15,7 @@ pub mod logging;
 pub mod model;
 pub mod portals;
 pub mod preferences;
+pub mod prompt_render;
 pub mod prompts_seed;
 pub mod repo;
 pub mod text;

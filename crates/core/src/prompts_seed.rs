@@ -59,7 +59,10 @@ pub struct SeedPrompt {
 ///
 /// ## Required for Phase 3
 ///
-/// `_shared`, `oferta`, `scan`, `cover`, `pdf`.
+/// `_shared`, `oferta`, `scan`, `cover`, `pdf`, plus the two compact prompts
+/// Phase 3 actually calls: `evaluate` and `cover_letter`. The originals stay
+/// seeded as reference material; they address an agent with file access and are
+/// 27–93 KB each, so they are never sent as a single-shot prompt (Q-24).
 ///
 /// ## Optional
 ///
@@ -94,6 +97,19 @@ pub const SYSTEM_PROMPTS: &[SeedPrompt] = &[
         name: "pdf",
         category: "render",
         content: include_str!("../prompts/pdf.md"),
+    },
+    // The two prompts Phase 3 sends. Compact, derived from `oferta.md` and
+    // `cover.md`; `evaluate` carries the scoring rubric and the JSON contract,
+    // `cover_letter` the letter rules. Do not replace them with the originals.
+    SeedPrompt {
+        name: "evaluate",
+        category: "evaluate",
+        content: include_str!("../prompts/evaluate.md"),
+    },
+    SeedPrompt {
+        name: "cover_letter",
+        category: "cover_letter",
+        content: include_str!("../prompts/cover_letter.md"),
     },
     // ------------------------------------------------------------------
     // Optional — present in the original repo, useful in later phases.
