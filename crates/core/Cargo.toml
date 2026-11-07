@@ -18,6 +18,10 @@ serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# The logging module installs the subscriber (file + in-process buffer). This is
+# a workspace dependency already in `Cargo.lock` through the app, so it adds no
+# new package: only the dependency edge.
+tracing-subscriber.workspace = true
 zeroize.workspace = true
 
 async-trait = "0.1"
@@ -58,5 +62,8 @@ nix = { version = "0.29", features = ["signal"] }
 [dev-dependencies]
 career-ops-test-support = { workspace = true }
 keyring = "3"
+# Drives the `log` -> `tracing` bridge test: `try_init` installs it, and
+# without it `sqlx`'s `log` records would vanish.
+log = "0.4"
 tempfile = "3"
 tokio = { workspace = true, features = ["full"] }

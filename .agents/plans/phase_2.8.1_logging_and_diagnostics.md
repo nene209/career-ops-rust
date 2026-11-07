@@ -1,7 +1,7 @@
 # Phase 2.8.1: Logging and Diagnostics — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.16), §12
-**Status:** Planned — not started
+**Status:** In progress — WS1 (the logging core) implemented; WS2–WS4 pending
 **Last updated:** 2026-11-06
 **Duration:** 2–3 days
 **Depends on:** Phase 2.8 (the walk, its stop reasons, and the failures this phase makes readable)
@@ -14,6 +14,7 @@
 | Version | Change |
 | :--- | :--- |
 | v0.1 | Initial plan. Implements **Option B** from the phase review — a durable log file plus an in-app Logs screen — with the owner's four decisions recorded: **Option B, with Option C deferred** to its own section; numbered **2.8.1** and sequenced before 2.9; the screen **visible in release builds** at `info`; and the **bottom drawer in scope now**, not later. No migration, no new external dependency, no change to fetch behavior. |
+| v0.2 | WS1 implemented. Two details the code settled. **The `log` bridge needs no direct dependency:** `SubscriberInitExt::try_init` installs `LogTracer` itself, and `the_log_bridge_carries_log_crate_records` pins it, so `tracing-log` is not added. **One level policy, not per-event logic:** the subscriber's global `EnvFilter` is the union (`info`, plus `debug` for `career_ops_core`/`career_ops_app`) and the file layer adds its own `info` filter on top, which is what makes the buffer deeper than the file without any branch in the layer. `LogHandle` also exposes `policy()` (so the screen can state where its level came from) and `dropped()`. `Cargo.lock` gains two dependency edges on the core package and no new packages. |
 
 ---
 
@@ -86,9 +87,9 @@ The screen must **not** tail the file: that reparses text back into structure th
 
 `career_ops_core::logging` owns initialization, the buffer, and the file writer. Core integration tests are where the interesting assertions live (`portals_service.rs` already drives scripted walks), and they cannot depend on the app crate. The app only renders a `LogHandle`.
 
-This adds `tracing-subscriber.workspace = true` to `crates/core/Cargo.toml`. It is **not a new external crate**: the package is already a workspace dependency and already in `Cargo.lock` via the app, so `--offline` is unaffected.
+This adds `tracing-subscriber.workspace = true` to `crates/core/Cargo.toml`. It is **not a new external crate**: the package is already a workspace dependency and already in `Cargo.lock` via the app, so nothing is downloaded — only the dependency edge changes.
 
-`main.rs` also keeps `tracing_log::LogTracer::init()`, because replacing `fmt::init()` with a manual `registry().init()` otherwise drops records emitted through the `log` crate (some `sqlx` paths). `tracing-log` is pulled in by `tracing-subscriber`'s default features; confirm with `cargo tree -p career-ops-core` before adding it as a direct dependency.
+The `log` bridge is handled by `SubscriberInitExt::try_init`, which installs `LogTracer` itself (that is what `fmt::init()` used to do). `tracing-log` is therefore **not** a direct dependency; `the_log_bridge_carries_log_crate_records` in `crates/core/tests/logging.rs` pins the behaviour, so a future switch away from `try_init` fails a test rather than silently dropping `sqlx`'s `log` records.
 
 ### 4. `LogLine` is structured, because every existing event is
 
@@ -181,11 +182,11 @@ No schema change. No change to any fetch, stop reason, cursor, or health rule. T
    - `pub enum LogMode { File, BufferOnly }`
    - `pub fn init(mode: LogMode) -> LogHandle` — idempotent (`try_init`, `OnceLock`); a second call returns the installed handle.
    - `pub fn handle() -> LogHandle` — lazily installs `BufferOnly`.
-   - `pub struct LogHandle { .. }` — `buffer()`, `path() -> Option<&Path>`, `latest_seq()`, `snapshot() -> Vec<LogLine>`, `set_wake(Arc<dyn Fn() + Send + Sync>)`, `clear()`.
-2. `logging/log_line.rs` — `LogLine` as in decision 4, plus `compact()` (the copyable one-line form) and `timestamp_short()`.
-3. `logging/buffer.rs` — `LogBuffer { cap, dropped, .. }` with `push`, `snapshot`, `latest_seq`, `dropped`; `BufferLayer` + a single-method `Visit`, honouring the per-target level policy from decision 2.
-4. `logging/file.rs` — `LogFile` (`Mutex<File>`, append, flush per line), `MakeWriter` impl, `should_rotate(size, limit)`, `rotate(dir, keep)`; log directory `<data_dir>/logs/` created on demand.
-5. `logging/panic.rs` — `install_panic_hook(log_path)` writing payload + location through its own handle, then chaining.
+   - `pub struct LogHandle { .. }` — `buffer()`, `path() -> Option<&Path>`, `policy()`, `latest_seq()`, `snapshot() -> Vec<LogLine>`, `dropped()`, `set_wake(Arc<dyn Fn() + Send + Sync>)`, `clear()`.
+2. `logging/line.rs` — `LogLine` as in decision 4, plus `compact()` (the copyable one-line form) and `timestamp_short()`.
+3. `logging/buffer.rs` — `LogBuffer { capacity, dropped, .. }` with `push`, `snapshot`, `latest_seq`, `dropped`, `len`, `clear`; `BufferLayer` + a `Visit` that needs only `record_debug` and `record_str`. The level policy is the subscriber's global `EnvFilter` (`info`, `debug` for `career_ops_core`/`career_ops_app`), with the file layer adding its own `info` filter — so the buffer sees more than the file without any per-event logic.
+4. `logging/file.rs` — `LogFile` (`Mutex<File>`, append, flush per write), `MakeWriter` impl, `should_rotate(size, limit)`, `rotate_if_needed(dir, limit)`, `prune_archives(dir, keep)`; log directory `<data_dir>/logs/` created on demand.
+5. `logging/panic_hook.rs` — `install_panic_hook(path)` writing payload + location through its own handle, then chaining.
 6. `logging::truncate_for_log(value: &str, max_chars: usize) -> String`.
 7. Tests (`crates/core/tests/logging.rs`):
    - a line reaches the buffer with its message and fields;
@@ -207,7 +208,7 @@ No schema change. No change to any fetch, stop reason, cursor, or health rule. T
 | Rotation keeps five files and only runs at startup | Unit test with a tempdir |
 | A panic writes a readable line without deadlocking | `catch_unwind` test |
 | Initialisation is safe from two callers in one process | Idempotence test |
-| No new entry in `Cargo.lock` | `git diff Cargo.lock` is empty |
+| No new package in `Cargo.lock` | `git diff Cargo.lock` shows only the two dependency edges on the core package entry (`tracing-subscriber`, and `log` as a dev-dependency) |
 
 ---
 
@@ -262,7 +263,8 @@ No schema change. No change to any fetch, stop reason, cursor, or health rule. T
 5. Sidebar footer: a **Logs drawer** checkbox, plus `Cmd/Ctrl+L` toggling it when no text field has focus.
 6. `PortalsAction::ShowLogs` and a **View logs** button beside the error line and beside a stalled-walk message; the handler navigates to `MainScreen::Logs` and closes the drawer.
 7. Snapshot polling: refresh `logs_snapshot` only when `latest_seq` changes; install the wake callback in `CareerOpsApp::new`.
-8. `crates/app/tests/logs_screen.rs`:
+8. **Migrate the ignored live tests off their own subscriber.** `live_fetch_reaches_the_pipeline`, `live_fetch_with_pagination_and_details`, and `live_registry_sites_reach_the_pipeline` currently `try_init` a stderr `fmt` subscriber to make `RUST_LOG` visible. Once `CareerOpsApp::new` installs the global subscriber, that `try_init` fails and their diagnostics silently go to the buffer instead. They must read `logging::handle().snapshot()` (or print the buffer on failure) rather than installing a second subscriber.
+9. `crates/app/tests/logs_screen.rs`:
    - lines render with their `k=v` fields;
    - a level chip narrows the list and **All** restores it;
    - the search matches message, target, and field values;
@@ -325,7 +327,7 @@ No network for any new test. No new external dependency. No migration.
 | P2.8.1-R5 | **The in-memory buffer is mistaken for the record.** | Low | The screen says "this session"; the path and **Open log folder** are always visible. |
 | P2.8.1-R6 | **`Panel::bottom` inside the root `Ui` does not draw as a drawer** at egui 0.37. | Medium | Spiked first in WS3; both mounts share the view-model, so dropping the drawer costs only the toggle. |
 | P2.8.1-R7 | **Global subscriber state leaks between tests.** | Medium | `init` is idempotent and returns the same buffer; tests assert content or a `seq` watermark, never emptiness. |
-| P2.8.1-R8 | **Replacing `fmt::init()` silently drops `log`-crate records** (some `sqlx` paths). | Low | Keep `LogTracer::init()`; verified by the per-page tests observing a query-level line if one exists. |
+| P2.8.1-R8 | **Replacing `fmt::init()` silently drops `log`-crate records** (some `sqlx` paths). | Low | `try_init` installs the `LogTracer` bridge; `the_log_bridge_carries_log_crate_records` fails if that ever stops being true. |
 
 ---
 
@@ -340,7 +342,7 @@ No network for any new test. No new external dependency. No migration.
 7. **View logs** beside a Portals error and a stalled walk navigates to the screen.
 8. A completed or stalled walk logs one line per page and one per chunk, naming the page and the stop reason.
 9. Sidecar stderr is captured instead of discarded.
-10. No migration, no new external dependency, no `Cargo.lock` change, no change to fetch behavior.
+10. No migration, no new external package, no change to fetch behavior; `Cargo.lock` gains only dependency edges on the core package, no new entries.
 11. Offline suite, fmt, and clippy are clean.
 12. `docs/logging.md`, manual script §9, `docs/patterns.md`, the parent plan, and a retrospective are updated.
 
@@ -353,6 +355,7 @@ No network for any new test. No new external dependency. No migration.
 | Q-44 | **Should logs be structured JSON and exportable as a diagnostic bundle?** | Deferred to Option C (below). The transcript viewer is the higher-value half for one user on one machine; JSON pays off when logs are aggregated, which this app does not do. |
 | Q-45 | **Should the log level be settable from Settings instead of `RUST_LOG`?** | Not now. Settings is still a placeholder (Phase 2.9 adds one section, Phase 5 completes it). Until then the Logs screen states its capture level and points at `RUST_LOG`. Revisit in Phase 5's error-handling audit. |
 | Q-46 | **Should the drawer also show progress (fetch, batch, save) alongside log lines?** | No. Progress already has a home in each screen's header; mixing it into the drawer would duplicate state and make the log harder to scan. |
+| Q-47 | **Should a terminal run also echo to stderr?** | Not in this phase. `main` used to write to stderr; it now writes the file and the buffer, and the file is `tail -f`-able. Echoing to stderr when `std::io::IsTerminal` would need an optional boxed layer and buys nothing the file does not already give. Revisit if live-test or CI diagnosis turns out to want it. |
 
 ---
 

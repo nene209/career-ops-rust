@@ -8,12 +8,13 @@
 use anyhow::Result;
 use career_ops_app::app::CareerOpsApp;
 use career_ops_app::state::AppState;
-use tracing_subscriber::EnvFilter;
+use career_ops_core::logging::{self, LogMode};
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    // The file sink and the in-process buffer, from one `tracing` seam. This
+    // must run before anything else so the bootstrap is recorded too; stderr
+    // alone was invisible for a windowed build.
+    let _logs = logging::init(LogMode::File);
 
     let state = AppState::bootstrap(career_ops_core::data_dir())?;
 
