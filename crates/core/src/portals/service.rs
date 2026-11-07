@@ -71,11 +71,31 @@ pub async fn fetch_more(
     report(pool, portal_id, outcome).await
 }
 
+/// Record a classified fetch failure.
+///
+/// The router logs a *successful* call (`fetch finished`), but every failure
+/// returns before that line — including the early ones that never reach the
+/// network, like an unparseable scraper config or a bad URL. Without this, an
+/// error the UI shows has no trace in the log at all, which is exactly how the
+/// manual pass found a failure that "was not in the logs".
+fn log_failure(portal_id: i64, error: &FetchError) {
+    tracing::warn!(
+        portal = portal_id,
+        cause = error.cause.as_str(),
+        detail = %error.detail,
+        "fetch failed"
+    );
+}
+
 async fn report(
     pool: &SqlitePool,
     portal_id: i64,
     outcome: std::result::Result<FetchOutcome, FetchError>,
 ) -> Result<FetchReport> {
+    if let Err(error) = &outcome {
+        log_failure(portal_id, error);
+    }
+
     let portal = portals::get(pool, portal_id)
         .await?
         .ok_or_else(|| CoreError::Internal("portal vanished during fetch"))?;
@@ -194,7 +214,10 @@ where
         .await
         {
             Ok(outcome) => outcome,
-            Err(error) => break FetchAllStop::Failed(error),
+            Err(error) => {
+                log_failure(portal_id, &error);
+                break FetchAllStop::Failed(error);
+            }
         };
 
         // A run that starts where the last one started cannot make progress,
@@ -411,11 +434,14 @@ where
                 portal_name: name,
                 result: Ok(outcome.jobs_fetched),
             },
-            Err(e) => BatchEntry {
-                portal_id,
-                portal_name: name,
-                result: Err(e),
-            },
+            Err(e) => {
+                log_failure(portal_id, &e);
+                BatchEntry {
+                    portal_id,
+                    portal_name: name,
+                    result: Err(e),
+                }
+            }
         };
 
         progress(&entry);

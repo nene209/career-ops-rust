@@ -410,19 +410,19 @@ Everything here reads the in-app buffer; only the fetch steps need the network.
 
 | # | Step | Expected |
 | :-- | :--- | :--- |
-| 9.1 | Click **Logs drawer** in the sidebar footer, or press Cmd/Ctrl+L. | A resizable strip appears at the bottom of the window, spanning the full width under the sidebar too, with "Logs", the level chips, **Pause**, **Follow**, **Open screen**, and **Close**. The active screen keeps working above it; the shortcut or **Close** hides it. |
-| 9.2 | While the drawer is open, click into a text field (for example the Portals **Filter**) and press Cmd/Ctrl+L. | Nothing toggles: the shortcut is ignored while a field has the keyboard. Click elsewhere and it works again. |
-| 9.3 | With the drawer open, click **Refresh** on a portal. 🌐 | `page read` and `fetch finished` lines appear as it runs, newest at the bottom, without touching the drawer. |
-| 9.4 | Scroll up inside the drawer. | **Follow** turns itself off and the view keeps its place while new lines arrive. Clicking **Follow** returns to the tail. |
-| 9.5 | Select **Logs** in the sidebar. | The same rows, plus **Filter**, **Pause**, **Copy visible**, **Open folder**, **Delete logs**, and a capture line naming the policy and the file path. A session without a file says "this session is in memory only". |
-| 9.6 | Click **Pause**, then start a fetch. | The list stops moving and the paused header counts "N new lines". **Resume** jumps to the newest line. |
-| 9.7 | Type `stop` in **Filter**, then click **Clear filter**; then click **Warn**. | Only lines whose message, target, or field value contains `stop` remain (for example `fetch-all chunk` with `stop=…`). **Warn** hides every `info` line; **All** restores them. |
-| 9.8 | Click **Copy visible**, then paste into a text editor. | One line per visible row, in the `12:34:56.789 INFO  target: message key=value` shape. |
-| 9.9 | Click **Open folder**. | The file manager opens the logs directory, which holds `career-ops.log` (and archives once the file has passed 5 MB and the app has restarted). |
-| 9.10 | **Edit** a portal, set the provider to an unknown one (`{"provider":"workday"}`), save, click **Refresh**, then **View logs** beside the error. | The save is accepted and the refresh fails as a configuration error; the error line offers **View logs**, and the screen opens showing the classified cause. This step needs no network. |
-| 9.11 | On a real board, run **Fetch all pages** until it reports a page it could not read, then click **View logs**. 🌐 | The chunk line names the range and the reason: `fetch-all chunk … first_page=… pages=… deepest=… stop=fetch-failed`, preceded by one `page read` line per page that worked. |
-| 9.12 | Quit, relaunch, and open **Logs**. | The screen starts empty (the buffer is per session) and the new run's first line is `career-ops starting` with `version`, `profile`, `data_dir`, and `log`. The previous run's lines are still in the file. |
-| 9.13 | Click **Delete logs**, then **Cancel**; then click it again and **Delete permanently**. | The first pass changes nothing. Confirming clears the screen, reports how many files were deleted, and says a new file starts on the next launch. |
+| 9.1 | ✅ Click **Logs drawer** in the sidebar footer, or press Cmd/Ctrl+L. | A resizable strip appears at the bottom of the window, spanning the full width under the sidebar too, with "Logs", the level chips, **Pause**, **Follow**, **Open screen**, and **Close**. The active screen keeps working above it; the shortcut or **Close** hides it. |
+| 9.2 | ✅ While the drawer is open, click into a text field (for example the Portals **Filter**) and press Cmd/Ctrl+L. | Nothing toggles: the shortcut is ignored while a field has the keyboard. Click elsewhere and it works again. |
+| 9.3 | ✅ With the drawer open, click **Refresh** on a portal. 🌐 | `page read` and `fetch finished` lines appear as it runs, newest at the bottom, without touching the drawer. |
+| 9.4 | ✅ Scroll up inside the drawer. | **Follow** turns itself off and the view keeps its place while new lines arrive. Clicking **Follow** returns to the tail. |
+| 9.5 | ✅ Select **Logs** in the sidebar. | The same rows, plus **Filter**, **Pause**, **Copy visible**, **Open folder**, **Delete logs**, and a capture line naming the policy and the file path. A session without a file says "this session is in memory only". |
+| 9.6 | ✅ Click **Pause**, then start a fetch. | The list stops moving and the paused header counts "N new lines". **Resume** jumps to the newest line. |
+| 9.7 | ✅ Type `stop` in **Filter**, then click **Clear filter**; then click **Warn**. | Only lines whose message, target, or field value contains `stop` remain (for example `fetch-all chunk` with `stop=…`). **Warn** hides every `info` line; **All** restores them. |
+| 9.8 | ✅ Click **Copy visible**, then paste into a text editor. | One line per visible row, in the `12:34:56.789 INFO  target: message key=value` shape. |
+| 9.9 | ✅ Click **Open folder**. | The file manager opens the logs directory, which holds `career-ops.log` (and archives once the file has passed 5 MB and the app has restarted). |
+| 9.10 | ✅ **Edit** a portal, set the provider to an unknown one (`{"provider":"workday"}`), save, click **Refresh**, then **View logs** beside the error. | The save is accepted and the refresh fails as a configuration error; the error line offers **View logs**, and the screen opens showing a `fetch failed` warn line with `cause` and a `detail` naming the provider. This step needs no network. |
+| 9.11 | ✅ On a real board, run **Fetch all pages** until it reports a page it could not read, then click **View logs**. 🌐 | The chunk line names the range and the reason: `fetch-all chunk … first_page=… pages=… deepest=… stop=fetch-failed`, preceded by one `page read` line per page that worked. |
+| 9.12 | ✅ Quit, relaunch, and open **Logs**. | The screen starts empty (the buffer is per session) and the new run's first line is `career-ops starting` with `version`, `profile`, `data_dir`, and `log`. The previous run's lines are still in the file. |
+| 9.13 | ✅ Click **Delete logs**, then **Cancel**; then click it again and **Delete permanently**. | The first pass changes nothing. Confirming clears the screen, reports how many files were deleted, and says a new file starts on the next launch. |
 
 ## 10. Sign-off
 

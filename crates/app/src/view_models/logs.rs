@@ -63,6 +63,34 @@ impl LevelFilter {
     }
 }
 
+/// Which of the two surfaces is rendering.
+///
+/// They share one `LogsView`, but each keeps its own scroll position, so each
+/// needs its own "have I jumped to the tail yet" bookkeeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogsMount {
+    Screen,
+    Drawer,
+}
+
+/// A mount's own scroll bookkeeping.
+///
+/// The two surfaces share the view but not the scroll position, so "I still owe
+/// a jump to the tail" is per mount.
+#[derive(Debug, Clone, Copy)]
+struct MountScroll {
+    /// A jump is owed: Follow was just switched on, or this mount has never
+    /// rendered. Cleared when the view actually lands at the bottom.
+    pending: bool,
+}
+
+impl Default for MountScroll {
+    fn default() -> Self {
+        // A surface that renders for the first time lands at the tail.
+        Self { pending: true }
+    }
+}
+
 /// The Logs screen's state: what to show, and whether it is frozen.
 #[derive(Debug, Clone)]
 pub struct LogsView {
@@ -73,9 +101,15 @@ pub struct LogsView {
     /// A watermark rather than a copy: resuming is a single assignment, and the
     /// count of lines that arrived while paused falls out of the same number.
     pub paused_at: Option<u64>,
-    /// Keep the newest line in view. Cleared when the user scrolls up.
-    pub follow: bool,
     pub drawer_open: bool,
+    /// Keep the newest line in view.
+    ///
+    /// Private because it has an invariant: [`follow`](Self::follow) is the only
+    /// way to read it and [`set_follow`](Self::set_follow) the only way to write
+    /// it, so the per-mount jump state can never drift from the flag.
+    follow: bool,
+    screen: MountScroll,
+    drawer: MountScroll,
 }
 
 impl Default for LogsView {
@@ -84,8 +118,10 @@ impl Default for LogsView {
             level: LevelFilter::All,
             query: String::new(),
             paused_at: None,
-            follow: true,
             drawer_open: false,
+            follow: true,
+            screen: MountScroll::default(),
+            drawer: MountScroll::default(),
         }
     }
 }
@@ -93,6 +129,63 @@ impl Default for LogsView {
 impl LogsView {
     pub fn is_paused(&self) -> bool {
         self.paused_at.is_some()
+    }
+
+    pub fn follow(&self) -> bool {
+        self.follow
+    }
+
+    pub fn set_follow(&mut self, follow: bool) {
+        self.follow = follow;
+        self.screen.pending = follow;
+        self.drawer.pending = follow;
+    }
+
+    pub fn toggle_follow(&mut self) {
+        self.set_follow(!self.follow);
+    }
+
+    fn mount(&self, mount: LogsMount) -> MountScroll {
+        match mount {
+            LogsMount::Screen => self.screen,
+            LogsMount::Drawer => self.drawer,
+        }
+    }
+
+    fn mount_mut(&mut self, mount: LogsMount) -> &mut MountScroll {
+        match mount {
+            LogsMount::Screen => &mut self.screen,
+            LogsMount::Drawer => &mut self.drawer,
+        }
+    }
+
+    /// Should this mount jump to the tail?
+    ///
+    /// `stick_to_bottom` only *keeps* a view at the end — egui enters sticky mode
+    /// from the current offset — so switching Follow on has to ask for the jump.
+    /// The request stays until the view reports that it landed, which covers the
+    /// frame that carries the jump (its offset is still the old one) and a mount
+    /// that renders for the first time after the click.
+    pub fn take_follow_jump(&self, mount: LogsMount) -> bool {
+        self.follow && self.mount(mount).pending
+    }
+
+    /// Called after the list rendered.
+    ///
+    /// Landing at the bottom settles the request. A position away from the
+    /// bottom, with no request outstanding, is the user scrolling up — which is
+    /// what ends follow mode.
+    pub fn observe_scroll(&mut self, mount: LogsMount, at_bottom: bool) {
+        let pending = {
+            let scroll = self.mount_mut(mount);
+            if at_bottom {
+                scroll.pending = false;
+            }
+            scroll.pending
+        };
+        if !at_bottom && self.follow && !pending {
+            self.follow = false;
+        }
     }
 
     /// Freeze at `latest_seq`, or resume.
@@ -193,8 +286,81 @@ mod tests {
     fn the_default_view_shows_everything_and_follows() {
         let view = LogsView::default();
         assert_eq!(view.visible(&sample()).len(), 3);
-        assert!(view.follow);
+        assert!(view.follow());
         assert!(!view.is_paused());
+    }
+
+    #[test]
+    fn each_mount_jumps_until_it_lands_at_the_tail() {
+        let mut view = LogsView::default();
+
+        assert!(
+            view.take_follow_jump(LogsMount::Screen),
+            "a fresh view lands at the tail, not the top"
+        );
+        assert!(
+            view.take_follow_jump(LogsMount::Screen),
+            "and keeps asking until the view reports the landing"
+        );
+        view.observe_scroll(LogsMount::Screen, true);
+        assert!(!view.take_follow_jump(LogsMount::Screen), "landing ends it");
+
+        assert!(
+            view.take_follow_jump(LogsMount::Drawer),
+            "the other mount has its own scroll position"
+        );
+    }
+
+    #[test]
+    fn clicking_follow_jumps_and_its_own_frame_cannot_undo_it() {
+        let mut view = LogsView::default();
+        view.observe_scroll(LogsMount::Screen, true);
+
+        view.set_follow(false);
+        assert!(!view.follow());
+        assert!(
+            !view.take_follow_jump(LogsMount::Screen),
+            "switching follow off does not jump"
+        );
+
+        view.toggle_follow();
+        assert!(view.follow());
+        assert!(
+            view.take_follow_jump(LogsMount::Screen),
+            "switching it back on jumps again"
+        );
+
+        // The jump frame still reports the old offset. That is not the user
+        // scrolling away, so it must not end follow mode.
+        view.observe_scroll(LogsMount::Screen, false);
+        assert!(view.follow(), "a pending jump must not undo its own click");
+
+        // Landing settles it; a later attempt to scroll away ends follow mode.
+        view.observe_scroll(LogsMount::Screen, true);
+        view.observe_scroll(LogsMount::Screen, false);
+        assert!(!view.follow());
+    }
+
+    #[test]
+    fn a_mount_that_appears_after_the_click_still_jumps() {
+        let mut view = LogsView::default();
+        view.observe_scroll(LogsMount::Drawer, true);
+
+        assert!(
+            view.take_follow_jump(LogsMount::Screen),
+            "opening the screen after following in the drawer shows the tail"
+        );
+    }
+
+    #[test]
+    fn arriving_at_the_bottom_keeps_follow_mode_on() {
+        let mut view = LogsView::default();
+        view.take_follow_jump(LogsMount::Screen);
+
+        view.observe_scroll(LogsMount::Screen, true);
+
+        assert!(view.follow());
+        assert!(!view.take_follow_jump(LogsMount::Screen));
     }
 
     #[test]

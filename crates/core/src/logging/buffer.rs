@@ -9,7 +9,6 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Local};
@@ -33,13 +32,19 @@ pub type Wake = Arc<dyn Fn() + Send + Sync>;
 struct State {
     lines: VecDeque<LogLine>,
     wake: Option<Wake>,
+    /// The sequence number of the last stored line, and the number of lines the
+    /// cap has evicted. Both live under the same lock as `lines` on purpose:
+    /// assigning a number outside it let two threads claim 5 and 6 and append
+    /// them in the other order, which broke the "snapshot order follows the
+    /// sequence" invariant the UI relies on when it keys a refresh on
+    /// `latest_seq`.
+    next_seq: u64,
+    dropped: u64,
 }
 
 struct Shared {
     capacity: usize,
     state: Mutex<State>,
-    next_seq: AtomicU64,
-    dropped: AtomicU64,
 }
 
 /// A bounded, cloneable handle to the captured lines.
@@ -54,8 +59,6 @@ impl LogBuffer {
             shared: Arc::new(Shared {
                 capacity: capacity.max(1),
                 state: Mutex::new(State::default()),
-                next_seq: AtomicU64::new(0),
-                dropped: AtomicU64::new(0),
             }),
         }
     }
@@ -82,22 +85,25 @@ impl LogBuffer {
     ) {
         // Every event consumes a sequence number, including one that is about
         // to be dropped, so `latest_seq` is a watermark of what was *emitted*
-        // and "N new lines" stays correct across eviction.
-        let seq = self.shared.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        let line = LogLine {
-            seq,
-            timestamp,
-            level,
-            target,
-            message,
-            fields,
-        };
-
+        // and "N new lines" stays correct across eviction. Taking the number
+        // under the lock is what makes sequence order and storage order the
+        // same thing.
         let wake = {
             let mut state = lock(&self.shared.state);
+            let seq = state.next_seq + 1;
+            state.next_seq = seq;
+            let line = LogLine {
+                seq,
+                timestamp,
+                level,
+                target,
+                message,
+                fields,
+            };
+
             if state.lines.len() == self.shared.capacity {
                 state.lines.pop_front();
-                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+                state.dropped += 1;
             }
             state.lines.push_back(line);
             state.wake.clone()
@@ -114,13 +120,16 @@ impl LogBuffer {
     }
 
     /// The sequence number of the most recent event, `0` before the first.
+    ///
+    /// Read under the buffer lock, so a caller that sees `N` here also sees
+    /// every line up to `N` in [`snapshot`](Self::snapshot).
     pub fn latest_seq(&self) -> u64 {
-        self.shared.next_seq.load(Ordering::Relaxed)
+        lock(&self.shared.state).next_seq
     }
 
     /// How many lines the cap has evicted this session.
     pub fn dropped(&self) -> u64 {
-        self.shared.dropped.load(Ordering::Relaxed)
+        lock(&self.shared.state).dropped
     }
 
     pub fn capacity(&self) -> usize {
@@ -140,7 +149,7 @@ impl LogBuffer {
     pub fn clear(&self) {
         let mut state = lock(&self.shared.state);
         state.lines.clear();
-        self.shared.dropped.store(0, Ordering::Relaxed);
+        state.dropped = 0;
     }
 
     pub fn set_wake(&self, wake: Wake) {
@@ -266,5 +275,38 @@ mod tests {
         push_many(&buffer, 1);
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.capacity(), 1);
+    }
+
+    /// Sequence order and storage order must agree even under concurrent
+    /// writers: the UI refreshes its snapshot when `latest_seq` changes, so a
+    /// line appended "behind" a newer one would be missed.
+    #[test]
+    fn concurrent_writers_keep_the_snapshot_in_sequence_order() {
+        let buffer = LogBuffer::new(1_000);
+        let mut threads = Vec::new();
+        for thread in 0..4 {
+            let buffer = buffer.clone();
+            threads.push(std::thread::spawn(move || {
+                for index in 0..50 {
+                    buffer.push(
+                        Level::INFO,
+                        "test",
+                        format!("t{thread}-{index}"),
+                        Vec::new(),
+                    );
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("writer thread");
+        }
+
+        let lines = buffer.snapshot();
+        assert_eq!(lines.len(), 200);
+        assert!(
+            lines.windows(2).all(|pair| pair[0].seq < pair[1].seq),
+            "snapshot order must follow the sequence"
+        );
+        assert_eq!(buffer.latest_seq(), 200);
     }
 }

@@ -702,3 +702,60 @@ async fn a_walk_logs_the_page_it_stopped_at() {
 
     db.close().await;
 }
+
+/// A failure that never reaches the network still has to appear in the log.
+///
+/// The manual pass found a config error the UI showed and the log did not,
+/// because every `?` in the router returns before its `fetch finished` line.
+#[tokio::test]
+async fn a_fetch_failure_is_logged_with_its_cause() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(
+        &db.pool,
+        NewPortal {
+            company_name: "Acme".into(),
+            url: "https://example.com/jobs".into(),
+            render_mode: RenderMode::Static,
+            scraper_config: Some(serde_json::json!({ "provider": "workday" })),
+        },
+    )
+    .await
+    .unwrap();
+
+    let handle = career_ops_core::logging::handle();
+    let before = handle.latest_seq();
+    let source = Arc::new(MockFetchSource::default());
+    let report = service::fetch_one(&db.pool, portal.id, source.as_ref(), None)
+        .await
+        .expect("a fetch report, not a service error");
+    assert!(report.outcome.is_err(), "the provider is not supported");
+
+    let lines = handle.snapshot();
+    let line = lines
+        .iter()
+        .find(|line| {
+            line.seq > before
+                && line.message == "fetch failed"
+                && line
+                    .fields
+                    .iter()
+                    .any(|(key, value)| key == "detail" && value.contains("workday"))
+        })
+        .expect("the failure reached the log");
+
+    let field = |name: &str| {
+        line.fields
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    let expected_portal = portal.id.to_string();
+    assert_eq!(field("portal"), Some(expected_portal.as_str()));
+    assert!(
+        field("cause").is_some_and(|cause| !cause.is_empty()),
+        "the classification is named: {:?}",
+        field("cause")
+    );
+
+    db.close().await;
+}

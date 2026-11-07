@@ -89,6 +89,7 @@ horizontal scrollbar is the reading surface.
 | `career-ops starting` | info | `version`, `profile`, `data_dir`, `log` |
 | `page read` (HTML and Eightfold) | info | `page`, `jobs`, `added`, plus `url`/`bytes` or `offset` |
 | `fetch finished` (one per fetch call) | info | `portal`, `tier`, `first_page`, `pages`, `jobs`, `details_attempted`, `details_enriched`, `stop`, `elapsed_ms` |
+| `fetch failed` (every failed fetch, including early ones) | warn | `portal`, `cause`, `detail` |
 | `fetch-all chunk` (one per walk chunk) | info | `portal`, `first_page`, `pages`, `deepest`, `jobs`, `stop` |
 | `eightfold position skipped` | warn | `index`, `positions`, the parse error |
 | `eightfold page kept without…` | warn | `positions`, `skipped` |
@@ -96,7 +97,10 @@ horizontal scrollbar is the reading surface.
 | Panic (`logging::panic`) | error | payload and source location, written to the file |
 
 A failure also carries its classification: the same cause and suggested action
-the Portals health badge shows.
+the Portals health badge shows. Failures that never reach the network — an
+unparseable scraper config, a bad portal URL — are logged at the service layer
+as `fetch failed`, because the router's `fetch finished` line only exists for a
+run that got as far as reading pages.
 
 ## What is never written
 

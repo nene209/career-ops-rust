@@ -13,7 +13,14 @@ use egui::{Color32, RichText, ScrollArea, TextWrapMode, Ui};
 use tracing::Level;
 
 use super::components::{labelled_input, EmptyState};
-use crate::view_models::logs::{LevelFilter, LogsView};
+use crate::view_models::logs::{LevelFilter, LogsMount, LogsView};
+
+/// The offset that means "the end" without being infinite.
+///
+/// egui clamps a scroll offset to the content, so any value above the content
+/// height lands at the bottom. `f32::MAX` is not usable: `content - MAX` is
+/// `-inf`, and the resulting NaN rect panics the layout.
+const JUMP_OFFSET: f32 = 1_000_000.0;
 
 /// What the app has to do because a screen cannot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +95,7 @@ pub fn show(
 
     ui.separator();
     dropped_marker(ui, state);
-    list(ui, lines, view);
+    list(ui, lines, view, LogsMount::Screen);
 
     action
 }
@@ -114,8 +121,8 @@ pub fn drawer(
         }
         ui.separator();
         pause_button(ui, view, state);
-        if ui.selectable_label(view.follow, "Follow").clicked() {
-            view.follow = !view.follow;
+        if ui.selectable_label(view.follow(), "Follow").clicked() {
+            view.toggle_follow();
         }
         ui.separator();
         if ui.button("Open screen").clicked() {
@@ -127,7 +134,7 @@ pub fn drawer(
     });
 
     dropped_marker(ui, state);
-    list(ui, lines, view);
+    list(ui, lines, view, LogsMount::Drawer);
 
     action
 }
@@ -163,8 +170,8 @@ fn actions(
     ui.horizontal(|ui| {
         pause_button(ui, view, state);
 
-        if ui.selectable_label(view.follow, "Follow").clicked() {
-            view.follow = !view.follow;
+        if ui.selectable_label(view.follow(), "Follow").clicked() {
+            view.toggle_follow();
         }
 
         if ui.button("Copy visible").clicked() {
@@ -220,7 +227,7 @@ fn dropped_marker(ui: &mut Ui, state: LogsRenderState<'_>) {
     }
 }
 
-fn list(ui: &mut Ui, lines: &[LogLine], view: &mut LogsView) {
+fn list(ui: &mut Ui, lines: &[LogLine], view: &mut LogsView, mount: LogsMount) {
     let visible = view.visible(lines);
     if visible.is_empty() {
         if lines.is_empty() {
@@ -236,9 +243,18 @@ fn list(ui: &mut Ui, lines: &[LogLine], view: &mut LogsView) {
         return;
     }
 
+    let jumped = view.take_follow_jump(mount);
     let mut area = ScrollArea::both().auto_shrink([false, false]);
-    if view.follow && !view.is_paused() {
+    if view.follow() && !view.is_paused() {
         area = area.stick_to_bottom(true);
+    }
+    if jumped {
+        // `stick_to_bottom` only keeps a view that is *already* at the end —
+        // egui enters sticky mode from the current offset — so turning Follow
+        // on has to ask for the jump. The offset is clamped to the content, and
+        // it is a finite constant rather than `f32::MAX`: `content - MAX`
+        // overflows to `-inf` and egui panics on the resulting NaN rect.
+        area = area.vertical_scroll_offset(JUMP_OFFSET);
     }
 
     let output = area.show(ui, |ui| {
@@ -257,14 +273,11 @@ fn list(ui: &mut Ui, lines: &[LogLine], view: &mut LogsView) {
     });
 
     // Scrolling up is what takes the user out of follow mode; the Follow chip is
-    // how they come back, so the two cannot disagree.
-    if view.follow && !view.is_paused() {
-        let at_bottom = output.state.clamped_offset().y + output.inner_rect.height() + 4.0
-            >= output.content_size.y;
-        if !at_bottom {
-            view.follow = false;
-        }
-    }
+    // how they come back. A jump still in flight is not "the user scrolled
+    // away", so `observe_scroll` settles it instead of ending follow mode.
+    let at_bottom =
+        output.state.clamped_offset().y + output.inner_rect.height() + 4.0 >= output.content_size.y;
+    view.observe_scroll(mount, at_bottom);
 }
 
 fn level_color(ui: &Ui, level: Level) -> Color32 {
