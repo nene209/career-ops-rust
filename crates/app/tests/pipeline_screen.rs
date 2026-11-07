@@ -8,6 +8,7 @@ use career_ops_app::screens::pipeline::{self, PipelineAction, PipelineRenderStat
 use career_ops_app::view_models::pipeline::{
     JobFilter, JobRow, PipelineViewModel, StatusLabel, TierLabel,
 };
+use career_ops_core::preferences::Preferences;
 use egui::accesskit::Role;
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
@@ -61,6 +62,8 @@ fn row(id: i64, title: &str, status: Option<StatusLabel>, tier: TierLabel) -> Jo
         plain_text: "We are hiring.".into(),
         stored_is_markup: false,
         has_user_state: status.is_some_and(|status| status != StatusLabel::Discovered),
+        preferred: false,
+        excluded: false,
     }
 }
 
@@ -76,6 +79,16 @@ fn view_model(rows: Vec<JobRow>, filter: JobFilter, search: &str) -> PipelineVie
         rows,
         filter,
         search: search.into(),
+        ..Default::default()
+    }
+}
+
+/// A view model whose rows are classified by `preferences`.
+fn preferred_view_model(rows: Vec<JobRow>, preferences: Preferences) -> PipelineViewModel {
+    PipelineViewModel {
+        rows,
+        preferences,
+        ..Default::default()
     }
 }
 
@@ -684,4 +697,127 @@ fn an_error_offers_a_retry() {
     harness.run();
 
     assert!(harness.state().actions.contains(&PipelineAction::Reload));
+}
+
+fn preferences() -> Preferences {
+    Preferences {
+        preferred_companies: vec!["Acme".into()],
+        excluded_companies: vec!["RecruiterCo".into()],
+        ..Default::default()
+    }
+}
+
+fn preferred_row(id: i64, title: &str) -> JobRow {
+    let mut row = row(id, title, None, TierLabel::Ats);
+    row.preferred = true;
+    row
+}
+
+fn excluded_row(id: i64, title: &str) -> JobRow {
+    let mut row = row(id, title, None, TierLabel::Ats);
+    row.company = "RecruiterCo".into();
+    row.excluded = true;
+    row
+}
+
+/// The badge and the filter chip share the word "Preferred", so the badge is
+/// queried by role: a label, not a button.
+#[test]
+fn a_preferred_row_shows_the_badge_and_others_do_not() {
+    let view_model = preferred_view_model(
+        vec![
+            preferred_row(1, "Engineer"),
+            row(2, "Designer", None, TierLabel::Ats),
+        ],
+        preferences(),
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    // Exactly one preferred row, so exactly one badge: `get_by_role_and_label`
+    // would panic if the second row carried one too.
+    let _badge = harness.get_by_role_and_label(Role::Label, "Preferred");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Label, "Excluded")
+            .is_none(),
+        "no row is excluded"
+    );
+}
+
+#[test]
+fn the_excluded_filter_is_the_only_view_that_shows_an_excluded_row() {
+    let rows = || vec![preferred_row(1, "Engineer"), excluded_row(2, "Hidden role")];
+
+    // All hides it...
+    let all = view_model(rows(), JobFilter::All, "");
+    let mut harness = test_harness(&all, PipelineView::default(), idle_state());
+    harness.run();
+    let _ = harness.get_by_label("Engineer — Acme");
+    assert!(
+        harness
+            .query_by_label("Hidden role — RecruiterCo")
+            .is_none(),
+        "All hides an excluded row"
+    );
+
+    // ...and Excluded is the one view that shows it, so the exclusion can be
+    // seen and reversed.
+    let excluded = view_model(rows(), JobFilter::Excluded, "");
+    let mut harness = test_harness(&excluded, PipelineView::default(), idle_state());
+    harness.run();
+    let _ = harness.get_by_label("Hidden role — RecruiterCo");
+    assert!(
+        harness.query_by_label("Engineer — Acme").is_none(),
+        "the Excluded view shows only the excluded rows"
+    );
+}
+
+#[test]
+fn the_preferred_filter_shows_exactly_the_preferred_rows() {
+    let view_model = view_model(
+        vec![
+            preferred_row(1, "Engineer"),
+            row(2, "Designer", None, TierLabel::Ats),
+        ],
+        JobFilter::Preferred,
+        "",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("Engineer — Acme");
+    assert!(harness.query_by_label("Designer — Acme").is_none());
+}
+
+#[test]
+fn the_header_reports_the_preference_summary() {
+    let view_model = preferred_view_model(
+        vec![
+            preferred_row(1, "Engineer"),
+            excluded_row(2, "Hidden role"),
+            row(3, "Designer", None, TierLabel::Ats),
+        ],
+        preferences(),
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("1 preferred of 2 shown; 1 excluded company hidden.");
+}
+
+#[test]
+fn no_summary_without_preferences() {
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    assert!(
+        harness.query_by_label("0 preferred of 1 shown.").is_none(),
+        "nothing configured, nothing to say"
+    );
 }

@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use career_ops_core::model::{ApplicationStatus, JobDescription};
+use career_ops_core::preferences::{PreferenceFacts, Preferences};
 use career_ops_core::text;
 use chrono::Utc;
 
@@ -19,6 +20,10 @@ pub struct PipelineViewModel {
     /// Case-insensitive substring over title and company. Kept here rather
     /// than in the screen so a reload does not clear it.
     pub search: String,
+    /// The preferences the rows were classified with. Stored so the header can
+    /// tell "nothing matches" from "nothing is configured", and so saving new
+    /// preferences can re-badge the loaded rows without a database reload.
+    pub preferences: Preferences,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +47,12 @@ pub struct JobRow {
     /// The user has a status, evaluation, or cover letter for this job, so
     /// deleting it needs the typed confirmation.
     pub has_user_state: bool,
+    /// A preferred company, location, or keyword matched. A badge, never a
+    /// filter — see `JobFilter`.
+    pub preferred: bool,
+    /// The company is on the exclusion list. Hidden everywhere except the
+    /// `Excluded` filter.
+    pub excluded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +143,10 @@ impl StatusLabel {
 pub enum JobFilter {
     #[default]
     All,
+    /// Rows the preference layer badged, excluding exclusions.
+    Preferred,
+    /// The only view in which an excluded row is visible.
+    Excluded,
     NotApplied,
     Applied,
     Rejected,
@@ -142,6 +157,8 @@ impl JobFilter {
     pub fn all() -> &'static [JobFilter] {
         &[
             JobFilter::All,
+            JobFilter::Preferred,
+            JobFilter::Excluded,
             JobFilter::NotApplied,
             JobFilter::Applied,
             JobFilter::Rejected,
@@ -152,6 +169,8 @@ impl JobFilter {
     pub fn label(self) -> &'static str {
         match self {
             Self::All => "All",
+            Self::Preferred => "Preferred",
+            Self::Excluded => "Excluded",
             Self::NotApplied => "Not applied",
             Self::Applied => "Applied",
             Self::Rejected => "Rejected",
@@ -160,8 +179,17 @@ impl JobFilter {
     }
 
     pub fn matches(self, row: &JobRow) -> bool {
+        // An exclusion is a decision the user made once, so it wins over every
+        // other view: the row is reachable only through `Excluded`, where it
+        // can be seen and reversed.
+        if row.excluded {
+            return self == Self::Excluded;
+        }
+
         match self {
             Self::All => true,
+            Self::Preferred => row.preferred,
+            Self::Excluded => false,
             Self::NotApplied => match row.status {
                 None => true,
                 Some(status) => {
@@ -182,11 +210,13 @@ impl PipelineViewModel {
         jobs: Vec<JobDescription>,
         statuses: &HashMap<i64, ApplicationStatus>,
         touched: &HashSet<i64>,
+        preferences: Preferences,
     ) -> Self {
         Self {
-            rows: rows_from_jobs(jobs, statuses, touched),
+            rows: rows_from_jobs(jobs, statuses, touched, &preferences),
             filter: JobFilter::All,
             search: String::new(),
+            preferences,
         }
     }
 
@@ -198,8 +228,23 @@ impl PipelineViewModel {
         jobs: Vec<JobDescription>,
         statuses: &HashMap<i64, ApplicationStatus>,
         touched: &HashSet<i64>,
+        preferences: Preferences,
     ) {
-        self.rows = rows_from_jobs(jobs, statuses, touched);
+        self.rows = rows_from_jobs(jobs, statuses, touched, &preferences);
+        self.preferences = preferences;
+    }
+
+    /// Re-badge the rows that are already loaded.
+    ///
+    /// Saving preferences must not require a database reload: the rows are in
+    /// memory and their classification is the only thing that changed.
+    pub fn set_preferences(&mut self, preferences: Preferences) {
+        self.preferences = preferences;
+        for row in &mut self.rows {
+            let matched = self.preferences.matches(row.preference_facts());
+            row.preferred = matched.preferred;
+            row.excluded = matched.excluded;
+        }
     }
 
     /// Rows matching the current filter and search, in the original
@@ -209,6 +254,48 @@ impl PipelineViewModel {
         self.rows.iter().filter(move |row| {
             self.filter.matches(row) && (query.is_empty() || row.matches_search(&query))
         })
+    }
+
+    /// Distinct companies whose rows the exclusion list hides.
+    pub fn excluded_companies(&self) -> usize {
+        let mut names: Vec<&str> = self
+            .rows
+            .iter()
+            .filter(|row| row.excluded)
+            .map(|row| row.company.as_str())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names.len()
+    }
+
+    /// The header's one-line preference summary, or `None` when nothing is
+    /// configured.
+    ///
+    /// "Nothing configured" and "nothing matches" are different states, which
+    /// is why the view model keeps the preferences: a user who set keywords and
+    /// sees "0 preferred of 45 shown" knows the keywords are not matching.
+    pub fn preference_summary(&self) -> Option<String> {
+        if self.preferences.is_empty() {
+            return None;
+        }
+
+        let mut shown = 0usize;
+        let mut preferred = 0usize;
+        for row in self.apply_filter() {
+            shown += 1;
+            if row.preferred {
+                preferred += 1;
+            }
+        }
+
+        let mut summary = format!("{preferred} preferred of {shown} shown");
+        match self.excluded_companies() {
+            0 => summary.push('.'),
+            1 => summary.push_str("; 1 excluded company hidden."),
+            hidden => summary.push_str(&format!("; {hidden} excluded companies hidden.")),
+        }
+        Some(summary)
     }
 
     pub fn row(&self, id: i64) -> Option<&JobRow> {
@@ -221,12 +308,21 @@ impl JobRow {
     fn matches_search(&self, query: &str) -> bool {
         self.title.to_lowercase().contains(query) || self.company.to_lowercase().contains(query)
     }
+
+    /// The fields the preference layer looks at.
+    ///
+    /// The description is the markup-free text, and it is also where a
+    /// location has to be found today: `job_descriptions` stores no location.
+    fn preference_facts(&self) -> PreferenceFacts<'_> {
+        PreferenceFacts::new(&self.company, None, &self.title).with_description(&self.plain_text)
+    }
 }
 
 fn rows_from_jobs(
     jobs: Vec<JobDescription>,
     statuses: &HashMap<i64, ApplicationStatus>,
     touched: &HashSet<i64>,
+    preferences: &Preferences,
 ) -> Vec<JobRow> {
     jobs.into_iter()
         .map(|job| {
@@ -242,7 +338,7 @@ fn rows_from_jobs(
             let stored_is_markup =
                 job.raw_text.contains('<') && description.text.trim() != job.raw_text.trim();
 
-            JobRow {
+            let mut row = JobRow {
                 id: job.id,
                 title: job.title,
                 company: job.company,
@@ -254,7 +350,14 @@ fn rows_from_jobs(
                 plain_text: description.text,
                 stored_is_markup,
                 has_user_state,
-            }
+                preferred: false,
+                excluded: false,
+            };
+
+            let matched = preferences.matches(row.preference_facts());
+            row.preferred = matched.preferred;
+            row.excluded = matched.excluded;
+            row
         })
         .collect()
 }
@@ -291,6 +394,16 @@ mod tests {
             plain_text: "body".into(),
             stored_is_markup: false,
             has_user_state: status.is_some_and(|status| status != StatusLabel::Discovered),
+            preferred: false,
+            excluded: false,
+        }
+    }
+
+    fn preferences() -> Preferences {
+        Preferences {
+            preferred_companies: vec!["Acme".into()],
+            excluded_companies: vec!["RecruiterCo".into()],
+            ..Default::default()
         }
     }
 
@@ -338,7 +451,8 @@ mod tests {
         ];
         let statuses = HashMap::from([(1, ApplicationStatus::Ready)]);
 
-        let view_model = PipelineViewModel::from_jobs(jobs, &statuses, &HashSet::new());
+        let view_model =
+            PipelineViewModel::from_jobs(jobs, &statuses, &HashSet::new(), Preferences::default());
 
         assert_eq!(view_model.rows.len(), 2);
         assert_eq!(view_model.rows[0].title, "Engineer");
@@ -365,6 +479,7 @@ mod tests {
             vec![html_job, plain_job, spaced_job],
             &HashMap::new(),
             &HashSet::new(),
+            Preferences::default(),
         );
 
         assert_eq!(view_model.rows[0].plain_text, "Hello world.");
@@ -397,6 +512,7 @@ mod tests {
                 rows: rows.clone(),
                 filter,
                 search: String::new(),
+                ..Default::default()
             };
             view_model
                 .apply_filter()
@@ -428,12 +544,14 @@ mod tests {
             rows: Vec::new(),
             filter: JobFilter::Applied,
             search: "engineer".into(),
+            ..Default::default()
         };
 
         view_model.replace_jobs(
             vec![job(9, "New", "tier1a:ats")],
             &HashMap::new(),
             &HashSet::new(),
+            Preferences::default(),
         );
 
         assert_eq!(view_model.rows.len(), 1);
@@ -457,6 +575,7 @@ mod tests {
             rows: vec![engineer, designer, other],
             filter: JobFilter::All,
             search: "ENGINEER".into(),
+            ..Default::default()
         };
 
         let ids: Vec<i64> = view_model.apply_filter().map(|row| row.id).collect();
@@ -474,6 +593,7 @@ mod tests {
             rows: vec![rejected, applied],
             filter: JobFilter::Applied,
             search: "engineer".into(),
+            ..Default::default()
         };
 
         let ids: Vec<i64> = view_model.apply_filter().map(|row| row.id).collect();
@@ -489,12 +609,165 @@ mod tests {
         let statuses = HashMap::from([(1, ApplicationStatus::NotAMatch)]);
         let touched = HashSet::from([2]);
 
-        let view_model = PipelineViewModel::from_jobs(jobs, &statuses, &touched);
+        let view_model =
+            PipelineViewModel::from_jobs(jobs, &statuses, &touched, Preferences::default());
 
         assert!(view_model.rows[0].has_user_state, "the status counts");
         assert!(
             view_model.rows[1].has_user_state,
             "a report or letter counts"
+        );
+    }
+
+    fn job_at(id: i64, title: &str, company: &str, body: &str) -> JobDescription {
+        let mut job = job(id, title, "tier1a:ats");
+        job.company = company.into();
+        job.raw_text = body.into();
+        job
+    }
+
+    fn classified(jobs: Vec<JobDescription>, preferences: Preferences) -> PipelineViewModel {
+        PipelineViewModel::from_jobs(jobs, &HashMap::new(), &HashSet::new(), preferences)
+    }
+
+    fn visible(view_model: &PipelineViewModel, filter: JobFilter) -> Vec<i64> {
+        PipelineViewModel {
+            rows: view_model.rows.clone(),
+            filter,
+            search: String::new(),
+            preferences: view_model.preferences.clone(),
+        }
+        .apply_filter()
+        .map(|row| row.id)
+        .collect()
+    }
+
+    #[test]
+    fn rows_are_classified_by_the_preferences() {
+        let view_model = classified(
+            vec![
+                job_at(1, "Engineer", "Acme", "A role."),
+                job_at(2, "Engineer", "RecruiterCo", "A role."),
+                job_at(3, "Engineer", "Other", "A role."),
+            ],
+            preferences(),
+        );
+
+        assert!(view_model.rows[0].preferred, "Acme is a preferred company");
+        assert!(!view_model.rows[0].excluded);
+        assert!(view_model.rows[1].excluded, "RecruiterCo is excluded");
+        assert!(!view_model.rows[1].preferred);
+        assert!(!view_model.rows[2].preferred);
+        assert!(!view_model.rows[2].excluded);
+    }
+
+    #[test]
+    fn all_hides_exclusions_and_only_the_excluded_filter_shows_them() {
+        let view_model = classified(
+            vec![
+                job_at(1, "Engineer", "Acme", "A role."),
+                job_at(2, "Engineer", "RecruiterCo", "A role."),
+            ],
+            preferences(),
+        );
+
+        assert_eq!(visible(&view_model, JobFilter::All), vec![1]);
+        assert_eq!(visible(&view_model, JobFilter::Preferred), vec![1]);
+        assert_eq!(visible(&view_model, JobFilter::Excluded), vec![2]);
+
+        for filter in [
+            JobFilter::NotApplied,
+            JobFilter::Applied,
+            JobFilter::Rejected,
+            JobFilter::NotAMatch,
+        ] {
+            assert!(
+                !visible(&view_model, filter).contains(&2),
+                "{filter:?} must not surface an excluded row"
+            );
+        }
+    }
+
+    #[test]
+    fn an_exclusion_outranks_a_preference() {
+        let both = Preferences {
+            preferred_companies: vec!["RecruiterCo".into()],
+            excluded_companies: vec!["RecruiterCo".into()],
+            ..Default::default()
+        };
+        let view_model = classified(vec![job_at(1, "Engineer", "RecruiterCo", "A role.")], both);
+
+        assert!(view_model.rows[0].preferred, "the company is on both lists");
+        assert!(view_model.rows[0].excluded);
+        assert!(
+            visible(&view_model, JobFilter::All).is_empty(),
+            "hiding wins: the exclusion is the decision the user made"
+        );
+        assert!(visible(&view_model, JobFilter::Preferred).is_empty());
+        assert_eq!(visible(&view_model, JobFilter::Excluded), vec![1]);
+    }
+
+    #[test]
+    fn the_summary_is_absent_when_nothing_is_configured() {
+        let view_model = classified(
+            vec![job_at(1, "Engineer", "Acme", "A role.")],
+            Preferences::default(),
+        );
+
+        assert_eq!(view_model.preference_summary(), None);
+    }
+
+    #[test]
+    fn the_summary_counts_preferred_rows_and_hidden_companies() {
+        let view_model = classified(
+            vec![
+                job_at(1, "Engineer", "Acme", "A role."),
+                job_at(2, "Designer", "Acme", "A role."),
+                job_at(3, "Engineer", "RecruiterCo", "A role."),
+                job_at(4, "Engineer", "Other", "A role."),
+            ],
+            preferences(),
+        );
+
+        assert_eq!(
+            view_model.preference_summary().as_deref(),
+            Some("2 preferred of 3 shown; 1 excluded company hidden."),
+            "the hidden row is not part of \"shown\""
+        );
+    }
+
+    #[test]
+    fn the_summary_omits_the_hidden_clause_when_nothing_is_hidden() {
+        let view_model = classified(
+            vec![job_at(1, "Engineer", "Acme", "A role.")],
+            Preferences {
+                keywords: vec!["rust".into()],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            view_model.preference_summary().as_deref(),
+            Some("0 preferred of 1 shown."),
+            "configured but matching nothing is still worth saying"
+        );
+    }
+
+    #[test]
+    fn saving_preferences_rebadges_loaded_rows() {
+        let mut view_model = classified(
+            vec![job_at(1, "Engineer", "Acme", "A role.")],
+            Preferences::default(),
+        );
+        assert!(!view_model.rows[0].preferred);
+
+        view_model.set_preferences(preferences());
+
+        assert!(view_model.rows[0].preferred);
+        assert_eq!(
+            view_model.preference_summary().as_deref(),
+            Some("1 preferred of 1 shown."),
+            "the header follows the save without a database reload"
         );
     }
 
@@ -504,6 +777,7 @@ mod tests {
             rows: vec![row(1, None), row(2, None)],
             filter: JobFilter::All,
             search: String::new(),
+            ..Default::default()
         };
 
         assert_eq!(view_model.row(2).map(|row| row.id), Some(2));

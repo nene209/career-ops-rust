@@ -165,7 +165,14 @@ fn header(
         ui.label(RichText::new(message).weak());
     }
 
-    ui.horizontal(|ui| {
+    // Preference summary: shown only when something is configured, and phrased
+    // so "nothing matched" is distinguishable from "nothing set".
+    if let Some(summary) = view_model.preference_summary() {
+        ui.label(RichText::new(summary).weak().small());
+    }
+
+    // Seven chips no longer fit on one line at the minimum window width.
+    ui.horizontal_wrapped(|ui| {
         for &filter in JobFilter::all() {
             if ui
                 .selectable_label(view_model.filter == filter, filter.label())
@@ -261,6 +268,20 @@ fn row_ui(ui: &mut Ui, row: &JobRow, view: &mut PipelineView) {
         }
 
         tier_label(ui, row.tier);
+        if row.preferred {
+            ui.label(
+                RichText::new("Preferred")
+                    .small()
+                    .color(Color32::from_rgb(0x0e, 0x7c, 0x86)),
+            );
+        }
+        if row.excluded {
+            ui.label(
+                RichText::new("Excluded")
+                    .small()
+                    .color(Color32::from_rgb(0x6b, 0x72, 0x80)),
+            );
+        }
         if let Some(status) = row.status {
             status_badge(ui, status);
         }

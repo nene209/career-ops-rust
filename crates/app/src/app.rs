@@ -81,6 +81,7 @@ type PipelineLoad = CoreResult<(
     Vec<JobDescription>,
     HashMap<i64, ApplicationStatus>,
     HashSet<i64>,
+    Preferences,
 )>;
 
 /// The profile singleton and its CV entries, loaded together so the editor can
@@ -1550,7 +1551,10 @@ impl CareerOpsApp {
                 })
                 .collect();
             let touched = job_repo::user_touched_ids(&pool).await?;
-            Ok((jobs, statuses, touched))
+            // Loaded with the rows so the badges and the header summary agree:
+            // a separate load could badge a page with the previous preferences.
+            let preferences = profile_repo::preferences(&pool).await?;
+            Ok((jobs, statuses, touched, preferences))
         });
 
         self.pipeline_task = Some(task);
@@ -1566,8 +1570,9 @@ impl CareerOpsApp {
             TaskPoll::Ready(result) => {
                 self.pipeline_task = None;
                 match result {
-                    Ok((jobs, statuses, touched)) => {
-                        self.pipeline.replace_jobs(jobs, &statuses, &touched);
+                    Ok((jobs, statuses, touched, preferences)) => {
+                        self.pipeline
+                            .replace_jobs(jobs, &statuses, &touched, preferences);
                         self.pipeline_loaded = true;
                         self.pipeline_error = None;
                     }
@@ -1972,6 +1977,9 @@ impl CareerOpsApp {
                 self.settings_save_task = None;
                 match result {
                     Ok(preferences) => {
+                        // The Pipeline badges from these, so re-badge what is
+                        // already loaded instead of waiting for a reload.
+                        self.pipeline.set_preferences(preferences.clone());
                         self.settings.mark_saved(preferences);
                         self.settings_message = Some("Preferences saved.".into());
                         self.settings_error = None;

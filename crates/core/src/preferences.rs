@@ -9,6 +9,11 @@
 //! not word boundaries: the Pipeline search behaves the same way, and someone
 //! who types "rust" means "rust" anywhere in the title.
 //!
+//! Location is the exception worth knowing about: `job_descriptions` has no
+//! location column yet, so a location preference also matches the posting text.
+//! It is a badge, not a filter — a false positive costs a highlight — and the
+//! alternative is a field that silently never matches anything.
+//!
 //! The two halves have different jobs. Preferred companies, locations, and
 //! keywords **boost** — they badge a row and offer a filter, but hide nothing.
 //! Exclusions **filter**: an excluded company's rows are hidden in the `All`
@@ -118,6 +123,9 @@ impl Preferences {
             || facts
                 .location
                 .is_some_and(|location| contains_any(&self.preferred_locations, location))
+            // No location column exists yet, so the posting text is the only
+            // place a city can appear. See the module note.
+            || contains_any(&self.preferred_locations, facts.description)
             || contains_any(&self.keywords, facts.title)
             || contains_any(&self.keywords, facts.description)
     }
@@ -199,6 +207,20 @@ mod tests {
         assert!(
             !prefs.matches(facts("Acme", None, "Engineer")).preferred,
             "a posting with no location cannot match a location preference"
+        );
+    }
+
+    #[test]
+    fn a_location_preference_matches_the_description_when_no_location_is_stored() {
+        let prefs = preferences();
+
+        let hit = prefs.matches(
+            facts("Acme", None, "Engineer").with_description("This role is fully remote."),
+        );
+
+        assert!(
+            hit.preferred,
+            "job_descriptions has no location column, so the text is the only place a location can appear"
         );
     }
 
