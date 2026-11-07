@@ -13,6 +13,7 @@ use sqlx::SqlitePool;
 
 use crate::error::{CoreError, Result};
 use crate::model::{CvEntry, Profile};
+use crate::preferences::Preferences;
 
 use super::cv_entries::{self, CvEntryKind};
 
@@ -101,6 +102,43 @@ pub async fn update_details(pool: &SqlitePool, details: &ProfileDetails) -> Resu
     get(pool)
         .await?
         .ok_or(CoreError::Internal("profile::update_details"))
+}
+
+/// The stored acquisition preferences.
+///
+/// A `NULL` column reads as empty preferences, and so does a malformed value
+/// (logged): the column predates this phase and is hand-editable, so a broken
+/// value must not make the Pipeline unopenable.
+pub async fn preferences(pool: &SqlitePool) -> Result<Preferences> {
+    let profile = ensure_singleton(pool).await?;
+    Ok(Preferences::from_json(profile.preferences.as_deref()))
+}
+
+/// Replace `profile.preferences` and return the updated row.
+///
+/// The whole object is rewritten: the settings screen is the only editor, and a
+/// partial merge would make "remove a keyword" depend on the caller having
+/// sent the previous list.
+pub async fn update_preferences(pool: &SqlitePool, preferences: &Preferences) -> Result<Profile> {
+    ensure_singleton(pool).await?;
+
+    let raw = serde_json::to_string(preferences)?;
+    let now = Utc::now();
+    let result = sqlx::query("UPDATE profile SET preferences = ?, updated_at = ? WHERE id = 1")
+        .bind(raw)
+        .bind(now)
+        .execute(pool)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(CoreError::Internal(
+            "profile::update_preferences: row not found",
+        ));
+    }
+
+    get(pool)
+        .await?
+        .ok_or(CoreError::Internal("profile::update_preferences"))
 }
 
 /// Load the singleton and its CV entries, then render the canonical summary.

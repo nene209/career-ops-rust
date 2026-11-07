@@ -44,6 +44,7 @@ use career_ops_core::portals::service::{
     self, BatchEntry, BatchReport, FetchAllPagesReport, FetchAllProgress, FetchAllStop,
     PortalWithHealth,
 };
+use career_ops_core::preferences::Preferences;
 use career_ops_core::repo::applications as application_repo;
 use career_ops_core::repo::cv_entries as cv_entry_repo;
 use career_ops_core::repo::job_descriptions as job_repo;
@@ -64,11 +65,13 @@ use crate::screens::portals::{
     ConfigPreview, ManualSuccess, PortalForm, PortalFormData, PortalModal, PortalsAction,
     PortalsRenderState, PortalsView, PreviewInputs, PreviewSample, StalledWalk,
 };
+use crate::screens::settings::{SettingsAction, SettingsRenderState};
 use crate::state::{AppState, Screen};
 use crate::view_models::cv_profile::{CvEntryDraft, CvProfileViewModel};
 use crate::view_models::logs::LogsView;
 use crate::view_models::pipeline::{PipelineViewModel, StatusLabel};
 use crate::view_models::portals::{BatchProgress, PortalsViewModel};
+use crate::view_models::settings::SettingsViewModel;
 
 type StateTask = AsyncTask<(AppState, CoreResult<()>)>;
 
@@ -98,6 +101,7 @@ enum ScreenAction {
     Portals(PortalsAction),
     Pipeline(PipelineAction),
     CvProfile(CvProfileAction),
+    Settings(SettingsAction),
     Logs(LogsAction),
 }
 
@@ -226,6 +230,14 @@ pub struct CareerOpsApp {
     cv_profile_entry_task: Option<EntryTask>,
     cv_profile_deleting: Option<i64>,
 
+    /// The acquisition preferences form and the value storage holds.
+    settings: SettingsViewModel,
+    settings_loaded: bool,
+    settings_error: Option<String>,
+    settings_message: Option<String>,
+    settings_task: Option<AsyncTask<CoreResult<Preferences>>>,
+    settings_save_task: Option<AsyncTask<CoreResult<Preferences>>>,
+
     /// The logging seam. `main` installs the file sink; tests get the buffer.
     logs: LogHandle,
     logs_view: LogsView,
@@ -308,6 +320,12 @@ impl CareerOpsApp {
             cv_profile_save_task: None,
             cv_profile_entry_task: None,
             cv_profile_deleting: None,
+            settings: SettingsViewModel::default(),
+            settings_loaded: false,
+            settings_error: None,
+            settings_message: None,
+            settings_task: None,
+            settings_save_task: None,
             logs,
             logs_view: LogsView::default(),
             logs_snapshot: Vec::new(),
@@ -587,6 +605,19 @@ impl CareerOpsApp {
         }
     }
 
+    /// Execute an intent emitted by the Settings screen.
+    ///
+    /// Public so tests can drive the same path the UI uses without rendering.
+    pub fn handle_settings_action(&mut self, action: SettingsAction) {
+        match action {
+            SettingsAction::Reload => {
+                self.settings_loaded = false;
+                self.start_settings_load();
+            }
+            SettingsAction::Save(preferences) => self.start_preferences_save(preferences),
+        }
+    }
+
     /// Execute an intent emitted by the CV / Profile screen.
     ///
     /// Public so tests can drive the same path the UI uses without rendering.
@@ -833,6 +864,13 @@ impl CareerOpsApp {
         self.cv_profile_save_task = None;
         self.cv_profile_entry_task = None;
         self.cv_profile_deleting = None;
+
+        self.settings = SettingsViewModel::default();
+        self.settings_loaded = false;
+        self.settings_error = None;
+        self.settings_message = None;
+        self.settings_task = None;
+        self.settings_save_task = None;
     }
 
     fn pool(&self) -> Option<sqlx::SqlitePool> {
@@ -1856,6 +1894,107 @@ impl CareerOpsApp {
         }
     }
 
+    fn start_settings_load(&mut self) {
+        if self.settings_task.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.settings_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.settings_error = None;
+        let task = self.spawn(async move { profile_repo::preferences(&pool).await });
+        self.settings_task = Some(task);
+    }
+
+    fn poll_settings_task(&mut self, ctx: &egui::Context) {
+        let poll = match self.settings_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Ready(result) => {
+                self.settings_task = None;
+                match result {
+                    Ok(preferences) => {
+                        self.settings = SettingsViewModel::from_preferences(preferences);
+                        self.settings_loaded = true;
+                        self.settings_error = None;
+                    }
+                    Err(error) => self.settings_error = Some(error.to_string()),
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Cancelled => {
+                self.settings_task = None;
+                self.settings_error = Some("The operation was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn start_preferences_save(&mut self, preferences: Preferences) {
+        if self.settings_save_task.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.settings_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.settings_error = None;
+        self.settings_message = None;
+        let task = self.spawn(async move {
+            // Round-trip through storage: the form adopts the value the column
+            // now holds, so a serialization surprise shows up as a dirty form
+            // rather than as a silent mismatch.
+            let profile = profile_repo::update_preferences(&pool, &preferences).await?;
+            Ok(Preferences::from_json(profile.preferences.as_deref()))
+        });
+        self.settings_save_task = Some(task);
+    }
+
+    fn poll_preferences_save(&mut self, ctx: &egui::Context) {
+        let poll = match self.settings_save_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Ready(result) => {
+                self.settings_save_task = None;
+                match result {
+                    Ok(preferences) => {
+                        self.settings.mark_saved(preferences);
+                        self.settings_message = Some("Preferences saved.".into());
+                        self.settings_error = None;
+                    }
+                    Err(error) => {
+                        self.settings_message = None;
+                        self.settings_error =
+                            Some(format!("Could not save the preferences: {error}"));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Cancelled => {
+                self.settings_save_task = None;
+                self.settings_error = Some("The save was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
     fn start_entry_write(&mut self, write: EntryWrite) {
         if self.cv_profile_entry_task.is_some() {
             return;
@@ -2172,6 +2311,8 @@ impl eframe::App for CareerOpsApp {
                 self.poll_cv_profile_task(ui.ctx());
                 self.poll_cv_profile_save(ui.ctx());
                 self.poll_cv_profile_entry(ui.ctx());
+                self.poll_settings_task(ui.ctx());
+                self.poll_preferences_save(ui.ctx());
                 self.drain_batch_progress();
 
                 // The buffer is where background tasks report; without a wake
@@ -2210,6 +2351,14 @@ impl eframe::App for CareerOpsApp {
                     self.start_cv_profile_load();
                 }
 
+                if self.navigation.current() == MainScreen::Settings
+                    && self.settings_task.is_none()
+                    && !self.settings_loaded
+                    && self.settings_error.is_none()
+                {
+                    self.start_settings_load();
+                }
+
                 let render_state = PortalsRenderState {
                     loading: matches!(&self.portals_task, Some(PortalsTask::List { .. })),
                     busy: self.portals_task.is_some() || self.fetch_all_task.is_some(),
@@ -2240,6 +2389,13 @@ impl eframe::App for CareerOpsApp {
                     saving: self.cv_profile_save_task.is_some()
                         || self.cv_profile_entry_task.is_some(),
                     deleting: self.cv_profile_deleting,
+                };
+
+                let settings_state = SettingsRenderState {
+                    loading: self.settings_task.is_some(),
+                    saving: self.settings_save_task.is_some(),
+                    error: self.settings_error.as_deref(),
+                    message: self.settings_message.as_deref(),
                 };
 
                 let log_path = self.logs.path().map(|path| path.display().to_string());
@@ -2280,6 +2436,7 @@ impl eframe::App for CareerOpsApp {
                 let pipeline_view = &mut self.pipeline_view;
                 let cv_profile = &mut self.cv_profile;
                 let cv_profile_view = &mut self.cv_profile_view;
+                let settings = &mut self.settings;
                 let logs_snapshot = &self.logs_snapshot;
                 let logs_view = &mut self.logs_view;
 
@@ -2305,6 +2462,10 @@ impl eframe::App for CareerOpsApp {
                                 screens::logs::show(ui, logs_snapshot, logs_view, logs_state)
                                     .map(ScreenAction::Logs)
                             }
+                            MainScreen::Settings => {
+                                screens::settings::show(ui, settings, settings_state)
+                                    .map(ScreenAction::Settings)
+                            }
                             other => {
                                 screens::shell::placeholder(ui, other);
                                 None
@@ -2326,6 +2487,7 @@ impl eframe::App for CareerOpsApp {
                     Some(ScreenAction::Portals(action)) => self.handle_portals_action(action),
                     Some(ScreenAction::Pipeline(action)) => self.handle_pipeline_action(action),
                     Some(ScreenAction::CvProfile(action)) => self.handle_cv_profile_action(action),
+                    Some(ScreenAction::Settings(action)) => self.handle_settings_action(action),
                     Some(ScreenAction::Logs(action)) => self.handle_logs_action(action),
                     None => {}
                 }
@@ -2724,6 +2886,41 @@ mod tests {
         assert!(!app.pipeline_loaded, "changing a filter must not load");
     }
 
+    /// The Settings screen's round trip: save through the app, then read the
+    /// stored value back the way a fresh load would.
+    #[test]
+    fn preferences_save_and_reload_through_the_app() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+
+        app.handle_settings_action(SettingsAction::Save(Preferences {
+            keywords: vec!["rust".into()],
+            excluded_companies: vec!["RecruiterCo".into()],
+            ..Default::default()
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.settings_save_task.is_none() && app.settings_message.is_some()
+        });
+
+        assert!(!app.settings.is_dirty(), "the stored value is adopted");
+        assert_eq!(app.settings.form.keywords, "rust");
+        assert_eq!(app.settings.form.excluded_companies, "RecruiterCo");
+
+        // Forget the form and load again: the value must come from the row.
+        app.settings = SettingsViewModel::default();
+        app.settings_loaded = false;
+        app.handle_settings_action(SettingsAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.settings_task.is_none() && app.settings_loaded
+        });
+
+        assert_eq!(app.settings.form.keywords, "rust");
+        assert!(app.settings.is_configured());
+        assert!(!app.settings.is_dirty());
+    }
+
     /// The Logs screen is one click from a fetch failure, and opening it must
     /// not leave the drawer that would duplicate it on top.
     #[test]
@@ -3017,6 +3214,8 @@ mod tests {
             app.poll_cv_profile_task(ctx);
             app.poll_cv_profile_save(ctx);
             app.poll_cv_profile_entry(ctx);
+            app.poll_settings_task(ctx);
+            app.poll_preferences_save(ctx);
             app.drain_batch_progress();
             if condition(app) {
                 return;

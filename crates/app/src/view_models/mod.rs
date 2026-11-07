@@ -11,3 +11,4 @@ pub mod cv_profile;
 pub mod logs;
 pub mod pipeline;
 pub mod portals;
+pub mod settings;

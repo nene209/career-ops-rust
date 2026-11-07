@@ -13,6 +13,7 @@ pub mod keystore;
 pub mod logging;
 pub mod model;
 pub mod portals;
+pub mod preferences;
 pub mod prompts_seed;
 pub mod repo;
 pub mod text;

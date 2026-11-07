@@ -15,6 +15,7 @@ pub mod lock;
 pub mod logs;
 pub mod pipeline;
 pub mod portals;
+pub mod settings;
 pub mod shell;
 
 pub use components::{labelled_input, labelled_multiline, EmptyState, LoadingSpinner, StatusBadge};
