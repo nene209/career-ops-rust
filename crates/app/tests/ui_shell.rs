@@ -113,6 +113,37 @@ fn empty_state_action_button_reports_clicks() {
 }
 
 #[test]
+fn the_sidebar_offers_the_logs_drawer_toggle() {
+    struct ShellState {
+        nav: NavigationState,
+        drawer: bool,
+    }
+
+    let mut harness = Harness::new_ui_state(
+        |ui, state: &mut ShellState| {
+            shell::show_with(ui, &mut state.nav, &mut state.drawer, |ui, screen| {
+                shell::placeholder(ui, screen)
+            });
+        },
+        ShellState {
+            nav: NavigationState::new(),
+            drawer: false,
+        },
+    );
+
+    harness.run();
+    assert!(!harness.state().drawer);
+
+    harness.get_by_label("Logs drawer").click();
+    harness.run();
+
+    assert!(
+        harness.state().drawer,
+        "the footer toggle must reach the app's drawer state"
+    );
+}
+
+#[test]
 fn every_status_badge_renders_its_label() {
     let mut harness = Harness::new_ui(|ui| {
         for badge in [

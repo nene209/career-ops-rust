@@ -622,6 +622,8 @@ pub enum PortalsAction {
     /// Fetch the draft URL + config without saving, and report what it finds.
     TestConfig(PortalFormData),
     ShowInPipeline,
+    /// Open the Logs screen: the detail behind an error line.
+    ShowLogs,
 }
 
 /// A **Fetch all pages** walk that stopped at a page the site refused.
@@ -686,6 +688,13 @@ pub fn show(
     if let Some(error) = state.error {
         ui.horizontal(|ui| {
             ui.colored_label(Color32::from_rgb(0xc0, 0x39, 0x2b), error);
+            if ui
+                .button("View logs")
+                .on_hover_text("Open the Logs screen, where the fetch's per-page lines are")
+                .clicked()
+            {
+                action = Some(PortalsAction::ShowLogs);
+            }
             if ui.button("Retry").clicked() {
                 action = Some(PortalsAction::Reload);
             }
@@ -716,6 +725,9 @@ pub fn show(
                     .weak()
                     .small(),
             );
+            if ui.button("View logs").clicked() {
+                action = Some(PortalsAction::ShowLogs);
+            }
         });
     }
 

@@ -8,5 +8,6 @@
 //! code is replaceable; the view-model code is the application.
 
 pub mod cv_profile;
+pub mod logs;
 pub mod pipeline;
 pub mod portals;

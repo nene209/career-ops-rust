@@ -36,8 +36,8 @@ mod panic_hook;
 
 pub use buffer::{BufferLayer, LogBuffer, Wake, DEFAULT_CAPACITY};
 pub use file::{
-    prune_archives, rotate_if_needed, should_rotate, LogFile, KEEP_ARCHIVES, LOG_FILE_NAME,
-    ROTATE_BYTES,
+    delete_logs, prune_archives, rotate_if_needed, should_rotate, LogFile, KEEP_ARCHIVES,
+    LOG_FILE_NAME, ROTATE_BYTES,
 };
 pub use line::LogLine;
 pub use panic_hook::install_panic_hook;

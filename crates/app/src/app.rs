@@ -37,6 +37,7 @@ use career_ops_core::acquisition::router::{
     FetchError, FetchOutcome, FetchSource, HttpFetchSource, PreviewReport,
 };
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
+use career_ops_core::logging::{self, LogHandle, LogLine};
 use career_ops_core::model::{ApplicationStatus, CvEntry, FetchTier, JobDescription, Profile};
 use career_ops_core::portals::health::suggested_action;
 use career_ops_core::portals::service::{
@@ -57,6 +58,7 @@ use crate::recovery;
 use crate::screens;
 use crate::screens::cv_profile::{CvProfileAction, CvProfileRenderState, CvProfileView};
 use crate::screens::lock::{LockAction, LockView, RESET_PHRASE};
+use crate::screens::logs::{LogsAction, LogsRenderState};
 use crate::screens::pipeline::{PipelineAction, PipelineRenderState, PipelineView};
 use crate::screens::portals::{
     ConfigPreview, ManualSuccess, PortalForm, PortalFormData, PortalModal, PortalsAction,
@@ -64,6 +66,7 @@ use crate::screens::portals::{
 };
 use crate::state::{AppState, Screen};
 use crate::view_models::cv_profile::{CvEntryDraft, CvProfileViewModel};
+use crate::view_models::logs::LogsView;
 use crate::view_models::pipeline::{PipelineViewModel, StatusLabel};
 use crate::view_models::portals::{BatchProgress, PortalsViewModel};
 
@@ -95,6 +98,7 @@ enum ScreenAction {
     Portals(PortalsAction),
     Pipeline(PipelineAction),
     CvProfile(CvProfileAction),
+    Logs(LogsAction),
 }
 
 /// One write against the CV entry table.
@@ -221,6 +225,17 @@ pub struct CareerOpsApp {
     cv_profile_save_task: Option<AsyncTask<CoreResult<Profile>>>,
     cv_profile_entry_task: Option<EntryTask>,
     cv_profile_deleting: Option<i64>,
+
+    /// The logging seam. `main` installs the file sink; tests get the buffer.
+    logs: LogHandle,
+    logs_view: LogsView,
+    /// The rendered lines, refreshed only when a new one arrives.
+    logs_snapshot: Vec<LogLine>,
+    logs_snapshot_seq: u64,
+    logs_message: Option<String>,
+    logs_confirm_delete: bool,
+    /// Set once the wake callback is installed; it needs an egui context.
+    logs_wake_installed: bool,
 }
 
 impl CareerOpsApp {
@@ -243,6 +258,9 @@ impl CareerOpsApp {
         fetch_source: Arc<dyn FetchSource>,
     ) -> Self {
         let data_dir = state.data_dir().clone();
+        // `main` has already installed the file sink in production; in tests this
+        // lazily installs the in-process buffer only.
+        let logs = logging::handle();
 
         Self {
             state: Some(state),
@@ -290,6 +308,13 @@ impl CareerOpsApp {
             cv_profile_save_task: None,
             cv_profile_entry_task: None,
             cv_profile_deleting: None,
+            logs,
+            logs_view: LogsView::default(),
+            logs_snapshot: Vec::new(),
+            logs_snapshot_seq: 0,
+            logs_message: None,
+            logs_confirm_delete: false,
+            logs_wake_installed: false,
         }
     }
 
@@ -439,6 +464,11 @@ impl CareerOpsApp {
                 self.portals_view.modal = None;
                 self.navigation.navigate_to(MainScreen::Pipeline);
             }
+            PortalsAction::ShowLogs => {
+                // The drawer would sit on top of the screen it duplicates.
+                self.logs_view.drawer_open = false;
+                self.navigation.navigate_to(MainScreen::Logs);
+            }
         }
     }
 
@@ -454,6 +484,106 @@ impl CareerOpsApp {
             PipelineAction::RefreshJob(job_id) => self.start_job_refresh(job_id),
             PipelineAction::MarkNotAMatch(job_id) => self.start_not_a_match(job_id),
             PipelineAction::DeleteJob(job_id) => self.start_job_delete(job_id),
+        }
+    }
+
+    /// Refresh the rendered lines only when a new one arrived.
+    ///
+    /// egui is immediate-mode, so cloning a 2,000-line ring every frame would be
+    /// pure waste; the snapshot is keyed on the sequence number instead.
+    fn refresh_logs_snapshot(&mut self) {
+        let latest = self.logs.latest_seq();
+        if latest != self.logs_snapshot_seq {
+            self.logs_snapshot = self.logs.snapshot();
+            self.logs_snapshot_seq = latest;
+        }
+    }
+
+    fn reset_logs_snapshot(&mut self) {
+        self.logs_snapshot.clear();
+        self.logs_snapshot_seq = self.logs.latest_seq();
+    }
+
+    /// Ask for a repaint when a line arrives.
+    ///
+    /// Without this, a line emitted by a background task would sit in the buffer
+    /// until the next incidental frame, which reads as a broken drawer.
+    fn install_logs_wake(&mut self, ctx: &egui::Context) {
+        if self.logs_wake_installed {
+            return;
+        }
+        let ctx = ctx.clone();
+        self.logs.set_wake(Arc::new(move || ctx.request_repaint()));
+        self.logs_wake_installed = true;
+    }
+
+    /// Execute an intent emitted by the Logs screen or the drawer.
+    pub fn handle_logs_action(&mut self, action: LogsAction) {
+        match action {
+            LogsAction::OpenFolder => self.open_log_folder(),
+            LogsAction::RequestDelete => self.logs_confirm_delete = true,
+            LogsAction::CancelDelete => self.logs_confirm_delete = false,
+            LogsAction::ConfirmDelete => self.delete_logs(),
+            LogsAction::OpenScreen => {
+                self.logs_view.drawer_open = false;
+                self.navigation.navigate_to(MainScreen::Logs);
+            }
+            LogsAction::CloseDrawer => self.logs_view.drawer_open = false,
+        }
+    }
+
+    fn open_log_folder(&mut self) {
+        let Some(dir) = self
+            .logs
+            .path()
+            .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
+        else {
+            self.logs_message =
+                Some("No log file this session; these lines live in memory only.".into());
+            return;
+        };
+
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(target_os = "windows") {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        if let Err(error) = std::process::Command::new(opener).arg(dir).spawn() {
+            self.logs_message = Some(format!("Could not open the log folder: {error}"));
+        }
+    }
+
+    /// Delete the log file and its archives, then clear the buffer.
+    ///
+    /// The writer keeps its open handle, so the file is unlinked rather than
+    /// emptied and a fresh one appears on the next launch. The message says so
+    /// instead of implying that file logging stopped for good.
+    fn delete_logs(&mut self) {
+        self.logs_confirm_delete = false;
+        let Some(dir) = self
+            .logs
+            .path()
+            .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
+        else {
+            self.logs.clear();
+            self.reset_logs_snapshot();
+            self.logs_message =
+                Some("No log file this session; the in-memory lines were cleared.".into());
+            return;
+        };
+
+        match logging::delete_logs(&dir) {
+            Ok(0) => self.logs_message = Some("There was no log file to delete.".into()),
+            Ok(removed) => {
+                self.logs.clear();
+                self.reset_logs_snapshot();
+                self.logs_message = Some(format!(
+                    "Deleted {removed} log file(s). A new one starts the next time the app launches."
+                ));
+            }
+            Err(error) => self.logs_message = Some(format!("Could not delete the logs: {error}")),
         }
     }
 
@@ -2044,6 +2174,18 @@ impl eframe::App for CareerOpsApp {
                 self.poll_cv_profile_entry(ui.ctx());
                 self.drain_batch_progress();
 
+                // The buffer is where background tasks report; without a wake
+                // callback a line would wait for the next incidental frame.
+                self.install_logs_wake(ui.ctx());
+                self.refresh_logs_snapshot();
+
+                // Cmd+L (Ctrl+L) toggles the drawer, unless the user is typing.
+                if !ui.ctx().egui_wants_keyboard_input()
+                    && ui.input(|input| input.modifiers.command && input.key_pressed(egui::Key::L))
+                {
+                    self.logs_view.drawer_open = !self.logs_view.drawer_open;
+                }
+
                 if self.navigation.current() == MainScreen::Portals
                     && self.portals_task.is_none()
                     && !self.portals_loaded
@@ -2100,30 +2242,77 @@ impl eframe::App for CareerOpsApp {
                     deleting: self.cv_profile_deleting,
                 };
 
+                let log_path = self.logs.path().map(|path| path.display().to_string());
+                let logs_state = LogsRenderState {
+                    path: log_path.as_deref(),
+                    policy: self.logs.policy().label(),
+                    latest_seq: self.logs.latest_seq(),
+                    dropped: self.logs.dropped(),
+                    confirming_delete: self.logs_confirm_delete,
+                    message: self.logs_message.as_deref(),
+                };
+
+                // Shown before the shell panels, so it claims the full-width
+                // bottom strip and the sidebar/central panels fill the rest.
+                let mut drawer_action = None;
+                if self.logs_view.drawer_open {
+                    drawer_action = egui::Panel::bottom("career_ops_logs_drawer")
+                        .resizable(true)
+                        .default_size(180.0)
+                        .show(ui, |ui| {
+                            screens::logs::drawer(
+                                ui,
+                                &self.logs_snapshot,
+                                &mut self.logs_view,
+                                logs_state,
+                            )
+                        })
+                        .inner;
+                }
+
+                // The sidebar toggle edits a local copy: the closure below also
+                // borrows `logs_view`, and the two cannot share a field borrow.
+                let mut drawer_open = self.logs_view.drawer_open;
+
                 let navigation = &mut self.navigation;
                 let portals = &self.portals;
                 let pipeline = &self.pipeline;
                 let pipeline_view = &mut self.pipeline_view;
                 let cv_profile = &mut self.cv_profile;
                 let cv_profile_view = &mut self.cv_profile_view;
+                let logs_snapshot = &self.logs_snapshot;
+                let logs_view = &mut self.logs_view;
 
-                let action = screens::shell::show_with(ui, navigation, |ui, screen| match screen {
-                    MainScreen::Portals => {
-                        screens::portals::show(ui, portals, render_state).map(ScreenAction::Portals)
-                    }
-                    MainScreen::Pipeline => {
-                        screens::pipeline::show(ui, pipeline, pipeline_view, pipeline_state)
-                            .map(ScreenAction::Pipeline)
-                    }
-                    MainScreen::CvProfile => {
-                        screens::cv_profile::show(ui, cv_profile, cv_profile_view, cv_profile_state)
-                            .map(ScreenAction::CvProfile)
-                    }
-                    other => {
-                        screens::shell::placeholder(ui, other);
-                        None
-                    }
-                });
+                let action =
+                    screens::shell::show_with(ui, navigation, &mut drawer_open, |ui, screen| {
+                        match screen {
+                            MainScreen::Portals => {
+                                screens::portals::show(ui, portals, render_state)
+                                    .map(ScreenAction::Portals)
+                            }
+                            MainScreen::Pipeline => {
+                                screens::pipeline::show(ui, pipeline, pipeline_view, pipeline_state)
+                                    .map(ScreenAction::Pipeline)
+                            }
+                            MainScreen::CvProfile => screens::cv_profile::show(
+                                ui,
+                                cv_profile,
+                                cv_profile_view,
+                                cv_profile_state,
+                            )
+                            .map(ScreenAction::CvProfile),
+                            MainScreen::Logs => {
+                                screens::logs::show(ui, logs_snapshot, logs_view, logs_state)
+                                    .map(ScreenAction::Logs)
+                            }
+                            other => {
+                                screens::shell::placeholder(ui, other);
+                                None
+                            }
+                        }
+                    });
+
+                self.logs_view.drawer_open = drawer_open;
 
                 // The modal is app-level chrome: it is reachable from both
                 // Portals and Pipeline, so it renders after the active screen.
@@ -2137,7 +2326,12 @@ impl eframe::App for CareerOpsApp {
                     Some(ScreenAction::Portals(action)) => self.handle_portals_action(action),
                     Some(ScreenAction::Pipeline(action)) => self.handle_pipeline_action(action),
                     Some(ScreenAction::CvProfile(action)) => self.handle_cv_profile_action(action),
+                    Some(ScreenAction::Logs(action)) => self.handle_logs_action(action),
                     None => {}
+                }
+
+                if let Some(action) = drawer_action {
+                    self.handle_logs_action(action);
                 }
 
                 if let Some(action) = modal_action {
@@ -2528,6 +2722,70 @@ mod tests {
 
         assert_eq!(app.pipeline.filter, JobFilter::Rejected);
         assert!(!app.pipeline_loaded, "changing a filter must not load");
+    }
+
+    /// The Logs screen is one click from a fetch failure, and opening it must
+    /// not leave the drawer that would duplicate it on top.
+    #[test]
+    fn show_logs_opens_the_logs_screen_and_closes_the_drawer() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, _ctx) = unlocked_app(dir.path());
+
+        assert_eq!(app.navigation().current(), MainScreen::Pipeline);
+        app.logs_view.drawer_open = true;
+
+        app.handle_portals_action(PortalsAction::ShowLogs);
+
+        assert_eq!(app.navigation().current(), MainScreen::Logs);
+        assert!(
+            !app.logs_view.drawer_open,
+            "the drawer would sit on top of the screen it duplicates"
+        );
+    }
+
+    /// The snapshot is keyed on the sequence number, so a line emitted after the
+    /// last refresh is picked up exactly once.
+    #[test]
+    fn the_logs_snapshot_follows_the_buffer() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, _ctx) = unlocked_app(dir.path());
+
+        app.refresh_logs_snapshot();
+        let before = app.logs_snapshot.len();
+
+        tracing::info!(target: "career_ops_core::test", "snapshot-marker");
+        app.refresh_logs_snapshot();
+
+        assert!(
+            app.logs_snapshot
+                .iter()
+                .any(|line| line.message == "snapshot-marker"),
+            "a line emitted since the last refresh must reach the snapshot"
+        );
+        assert!(app.logs_snapshot.len() > before);
+    }
+
+    /// Print the captured log when a live test fails.
+    ///
+    /// The app installs the only subscriber now, so a second `try_init` would
+    /// fail silently and the old `RUST_LOG` stderr setup would be dead. Cargo
+    /// captures stderr and shows it only for a failing test, so dropping this
+    /// guard is silent on success and prints the whole run on failure.
+    struct LogsOnFailure(career_ops_core::logging::LogHandle);
+
+    impl Drop for LogsOnFailure {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                eprintln!("--- captured log ---");
+                for line in self.0.snapshot() {
+                    eprintln!("{}", line.compact());
+                }
+            }
+        }
     }
 
     /// Create a vault in `dir` and return an app that has unlocked it.
@@ -4163,12 +4421,9 @@ mod tests {
     #[test]
     #[ignore = "hits the network; run with --ignored"]
     fn live_fetch_reaches_the_pipeline() {
-        // Let `RUST_LOG=warn` reach the service layer when a live run fails.
-        // Without this the router's config error is swallowed and the test only
-        // shows the final classification.
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .try_init();
+        // Let the app's own subscriber carry the diagnostics; the guard prints
+        // them if this test fails.
+        let _logs = LogsOnFailure(career_ops_core::logging::handle());
 
         let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
         career_ops_test_support::install();
@@ -4606,11 +4861,9 @@ mod tests {
     #[test]
     #[ignore = "hits the network; run with --ignored"]
     fn live_fetch_with_pagination_and_details() {
-        // Same opt-in as the other live test: RUST_LOG=info shows the router's
-        // per-portal enrichment line.
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .try_init();
+        // Same guard as the other live test: the captured log is printed only
+        // if something fails.
+        let _logs = LogsOnFailure(career_ops_core::logging::handle());
 
         let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
         career_ops_test_support::install();
@@ -4794,9 +5047,9 @@ mod tests {
             return;
         }
 
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .try_init();
+        // Same guard as the other live tests: the captured log is printed only
+        // if something fails.
+        let _logs = LogsOnFailure(career_ops_core::logging::handle());
 
         let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
         career_ops_test_support::install();

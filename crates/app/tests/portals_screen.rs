@@ -1158,6 +1158,65 @@ fn a_walk_without_a_stall_offers_no_skip() {
 }
 
 #[test]
+fn a_failed_fetch_is_one_click_from_its_log() {
+    let view_model = PortalsViewModel {
+        rows: vec![row(
+            1,
+            "Acme",
+            HealthBadge::Broken {
+                cause: "timeout".into(),
+            },
+        )],
+        ..Default::default()
+    };
+    let state = PortalsRenderState {
+        error: Some("The site took too long to respond. Try again later."),
+        ..idle_state()
+    };
+
+    let mut harness = test_harness(&view_model, PortalsView::default(), state);
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "View logs")
+        .click();
+    harness.run();
+
+    assert!(harness.state().actions.contains(&PortalsAction::ShowLogs));
+}
+
+#[test]
+fn a_stalled_walk_also_offers_its_log() {
+    let view_model = PortalsViewModel {
+        rows: vec![row(
+            1,
+            "Acme",
+            HealthBadge::Degraded {
+                cause: "partial".into(),
+            },
+        )],
+        ..Default::default()
+    };
+    let state = PortalsRenderState {
+        stalled: Some(StalledWalk {
+            portal_id: 1,
+            page: 30,
+        }),
+        ..idle_state()
+    };
+
+    let mut harness = test_harness(&view_model, PortalsView::default(), state);
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "View logs")
+        .click();
+    harness.run();
+
+    assert!(harness.state().actions.contains(&PortalsAction::ShowLogs));
+}
+
+#[test]
 fn the_detail_toggle_is_off_and_usable_for_a_fresh_portal() {
     let view = PortalsView {
         modal: Some(PortalModal::Add(PortalForm {

@@ -170,6 +170,21 @@ pub fn prune_archives(dir: &Path, keep: usize) -> io::Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
+/// Delete the current log file and its archives; returns how many files went.
+///
+/// The writer keeps its open handle, so the unlinked file is only really gone
+/// once the process exits and a fresh file appears on the next launch. Callers
+/// that say otherwise would be lying.
+pub fn delete_logs(dir: &Path) -> io::Result<usize> {
+    let mut removed = prune_archives(dir, 0)?.len();
+    match fs::remove_file(dir.join(LOG_FILE_NAME)) {
+        Ok(()) => removed += 1,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(removed)
+}
+
 /// The next free archive path for "now".
 fn next_archive_path(dir: &Path) -> PathBuf {
     let prefix = ARCHIVE_PREFIX;
@@ -235,6 +250,30 @@ mod tests {
         let name = archive.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with("career-ops."));
         assert!(name.ends_with(".log"));
+    }
+
+    #[test]
+    fn deleting_removes_the_current_file_and_every_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(LOG_FILE_NAME), b"current").unwrap();
+        for day in 1..=3 {
+            fs::write(
+                dir.path()
+                    .join(format!("career-ops.2026010{day}-000000.000.log")),
+                b"archive",
+            )
+            .unwrap();
+        }
+
+        let removed = delete_logs(dir.path()).unwrap();
+
+        assert_eq!(removed, 4);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(
+            delete_logs(dir.path()).unwrap(),
+            0,
+            "deleting again is a no-op, not an error"
+        );
     }
 
     #[test]

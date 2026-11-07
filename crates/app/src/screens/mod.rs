@@ -12,6 +12,7 @@
 pub mod components;
 pub mod cv_profile;
 pub mod lock;
+pub mod logs;
 pub mod pipeline;
 pub mod portals;
 pub mod shell;
