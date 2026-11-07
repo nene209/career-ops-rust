@@ -226,6 +226,46 @@ side effect.
 - The detail view reads `source_url` and `raw_text` from the row, not from a
   second query.
 
+## Logs drawer
+
+The Logs screen and the drawer are two mounts of one view
+(`view_models::logs::LogsView`), so pausing in one pauses the other. The drawer
+is a root-level panel shown **before** the shell:
+
+```rust
+if self.logs_view.drawer_open {
+    egui::Panel::bottom("career_ops_logs_drawer")
+        .resizable(true)
+        .default_size(180.0)
+        .show(ui, |ui| logs::drawer(ui, &self.logs_snapshot, &mut self.logs_view, state));
+}
+```
+
+Shown first, it claims the bottom strip of the whole window and the sidebar and
+central panels fill the rest. Shown inside the central panel it would only span
+one screen.
+
+Two rules keep it from fighting the user:
+
+- **Follow the tail without stealing the scrollbar.** `ScrollArea::stick_to_bottom`
+  is enabled only while `follow` is set; after the frame, `follow` is cleared
+  when `state.clamped_offset()` shows the view is not at the bottom. There is no
+  manual offset bookkeeping — egui already persists scroll per widget id, and
+  the two mounts have different ids because they live under different parents.
+- **Snapshot on change, not per frame.** `CareerOpsApp` keeps
+  `logs_snapshot: Vec<LogLine>` and refreshes it only when
+  `LogHandle::latest_seq()` differs from the seq it last read. Cloning a
+  2,000-line ring every frame is the usual immediate-mode mistake.
+
+Background lines need a repaint request, or the drawer only updates when
+something else asks for a frame: `CareerOpsApp::install_logs_wake` gives the
+handle `ctx.request_repaint()` once, and the buffer calls it after storing a
+line. This is the same "egui sleeps" rule as the async pattern above.
+
+`Copy visible` calls `ctx.copy_text` directly; the screen returns a
+`LogsAction` only for what a view cannot do (`OpenFolder`, the two-step delete,
+`OpenScreen`, `CloseDrawer`).
+
 ## State-mutating async work
 
 `AppState` methods such as `try_passphrase`, `try_keychain`, and

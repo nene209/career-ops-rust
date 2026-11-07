@@ -1,6 +1,6 @@
 # Live (Network) Tests
 
-**Last reviewed:** 2026-11-05
+**Last reviewed:** 2026-11-06
 **Why this file exists:** the default test suite must be offline, deterministic,
 and fast. A few tests cannot be any of those things because their subject is the
 outside world: a job board changed its JSON, a detail page is no longer served,
@@ -32,6 +32,11 @@ Add a row here in the same change that adds or removes a live test.
 5. **Don't mock what only the network can prove.** A fixture can prove the
    parser handles a saved response; it cannot prove the provider still sends
    that response. Keep one weak live test per external contract.
+6. **Let the app's log carry the diagnostics.** The app installs the only
+   `tracing` subscriber, so a live test cannot install a second one. Use the
+   `LogsOnFailure` guard (see `app.rs`): it prints
+   `logging::handle().snapshot()` while the test unwinds, and `cargo test` shows
+   that output exactly when the test fails.
 
 ---
 
