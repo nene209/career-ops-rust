@@ -307,6 +307,33 @@ impl PipelineViewModel {
         self.rows.iter().find(|row| row.id == id)
     }
 
+    /// Postings the user flagged for a full description. This is the count the
+    /// header's batch button offers, so it covers the whole page rather than the
+    /// current filter: the batch is about the queue, not the view.
+    pub fn details_needed(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| row.queue == QueueState::DetailsNeeded)
+            .count()
+    }
+
+    /// Replace a row's stored text after a fetch.
+    ///
+    /// This repeats what `rows_from_jobs` derives for a freshly loaded row, so
+    /// the detail view and the raw toggle agree with the database without a
+    /// reload. Returns `false` when the row is no longer loaded.
+    pub fn set_description(&mut self, id: i64, raw_text: String) -> bool {
+        let Some(row) = self.rows.iter_mut().find(|row| row.id == id) else {
+            return false;
+        };
+
+        let description = text::plain_text(&raw_text, usize::MAX);
+        row.stored_is_markup = raw_text.contains('<') && description.text.trim() != raw_text.trim();
+        row.plain_text = description.text;
+        row.raw_text = raw_text;
+        true
+    }
+
     /// Apply a queue decision to a loaded row.
     ///
     /// Returns `false` when the row is no longer in the page, which tells the
@@ -899,6 +926,42 @@ mod tests {
         assert!(JobFilter::Dismissed.matches(&both));
         assert!(JobFilter::Excluded.matches(&both));
         assert!(!JobFilter::All.matches(&both));
+    }
+
+    #[test]
+    fn details_needed_counts_only_the_flagged_rows() {
+        let mut flagged = row(1, None);
+        flagged.queue = QueueState::DetailsNeeded;
+        let mut dismissed = row(2, None);
+        dismissed.queue = QueueState::Dismissed;
+
+        let view_model = PipelineViewModel {
+            rows: vec![flagged, dismissed, row(3, None)],
+            ..Default::default()
+        };
+
+        assert_eq!(view_model.details_needed(), 1);
+    }
+
+    #[test]
+    fn set_description_rederives_the_plain_text_and_the_markup_flag() {
+        let mut view_model = PipelineViewModel {
+            rows: vec![row(1, None)],
+            ..Default::default()
+        };
+        assert_eq!(view_model.row(1).unwrap().plain_text, "body");
+
+        assert!(view_model.set_description(1, "<p>New <b>body</b>.</p>".into()));
+
+        let row = view_model.row(1).unwrap();
+        assert_eq!(row.raw_text, "<p>New <b>body</b>.</p>");
+        assert_eq!(row.plain_text, "New body.");
+        assert!(
+            row.stored_is_markup,
+            "the raw toggle has to appear with the markup it reveals"
+        );
+
+        assert!(!view_model.set_description(99, "gone".into()));
     }
 
     #[test]

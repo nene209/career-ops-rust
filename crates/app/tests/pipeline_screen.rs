@@ -27,6 +27,7 @@ fn idle_state() -> PipelineRenderState<'static> {
         refreshing: None,
         marking: None,
         queueing: None,
+        descriptions: None,
         deleting: None,
     }
 }
@@ -387,6 +388,7 @@ fn refreshing_disables_the_button_and_reports_the_result() {
         refreshing: Some(1),
         marking: None,
         queueing: None,
+        descriptions: None,
         deleting: None,
     };
     let mut harness = test_harness(&view_model, selected(1), render_state);
@@ -677,6 +679,7 @@ fn first_load_shows_a_spinner_instead_of_the_empty_state() {
         refreshing: None,
         marking: None,
         queueing: None,
+        descriptions: None,
         deleting: None,
     };
 
@@ -698,6 +701,7 @@ fn an_error_offers_a_retry() {
         refreshing: None,
         marking: None,
         queueing: None,
+        descriptions: None,
         deleting: None,
     };
 
@@ -944,6 +948,95 @@ fn a_new_row_has_no_queue_badge() {
     assert!(
         harness.query_by_label("New").is_none(),
         "the default state is not a badge"
+    );
+}
+
+#[test]
+fn fetch_descriptions_is_disabled_with_nothing_flagged() {
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let button = harness.get_by_role_and_label(Role::Button, "Fetch descriptions (0)");
+    assert!(
+        button.accesskit_node().is_disabled(),
+        "an empty queue offers nothing to fetch"
+    );
+}
+
+#[test]
+fn fetch_descriptions_counts_the_flagged_rows_and_emits_the_action() {
+    let view_model = view_model(
+        vec![
+            with_queue(
+                row(1, "Engineer", None, TierLabel::Ats),
+                QueueState::DetailsNeeded,
+            ),
+            with_queue(
+                row(2, "Designer", None, TierLabel::Ats),
+                QueueState::DetailsNeeded,
+            ),
+            row(3, "Manager", None, TierLabel::Ats),
+        ],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Fetch descriptions (2)")
+        .click();
+    harness.run();
+
+    assert_eq!(
+        harness.state().actions,
+        vec![PipelineAction::FetchDescriptions]
+    );
+}
+
+#[test]
+fn a_running_batch_shows_progress_and_offers_stop() {
+    let view_model = view_model(
+        vec![with_queue(
+            row(1, "Engineer", None, TierLabel::Ats),
+            QueueState::DetailsNeeded,
+        )],
+        JobFilter::All,
+        "",
+    );
+    let state = PipelineRenderState {
+        descriptions: Some(pipeline::DescriptionProgress {
+            done: 1,
+            total: 3,
+            failed: 1,
+        }),
+        ..idle_state()
+    };
+    let mut harness = test_harness(&view_model, PipelineView::default(), state);
+    // The in-flight spinner keeps requesting repaints; `run()` would never
+    // settle.
+    harness.run_steps(2);
+
+    let _ = harness.get_by_label("Descriptions: 1 of 3…");
+    let _ = harness.get_by_label("1 failed");
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Button, "Fetch descriptions (1)")
+            .accesskit_node()
+            .is_disabled(),
+        "a second batch must not start while one runs"
+    );
+
+    harness.get_by_role_and_label(Role::Button, "Stop").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().actions,
+        vec![PipelineAction::CancelDescriptions]
     );
 }
 

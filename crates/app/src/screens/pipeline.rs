@@ -51,8 +51,23 @@ pub enum PipelineAction {
     MarkForDetails(i64),
     MarkForEvaluation(i64),
     Dismiss(i64),
+    /// Fetch the full description for every job marked for details.
+    FetchDescriptions,
+    /// Stop a running description batch between jobs.
+    CancelDescriptions,
     /// Delete the job, confirmed.
     DeleteJob(i64),
+}
+
+/// How far a running description batch has got.
+///
+/// Counts only: the header shows "3 of 12", and the per-job history is in the
+/// Logs screen rather than in a transient line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescriptionProgress {
+    pub done: usize,
+    pub total: usize,
+    pub failed: usize,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -67,6 +82,8 @@ pub struct PipelineRenderState<'a> {
     pub marking: Option<i64>,
     /// The job whose queue state is being changed.
     pub queueing: Option<i64>,
+    /// A description batch in flight.
+    pub descriptions: Option<DescriptionProgress>,
     /// The job being deleted.
     pub deleting: Option<i64>,
 }
@@ -154,6 +171,47 @@ fn header(
             *action = Some(PipelineAction::Reload);
         }
         if state.loading {
+            LoadingSpinner::show(ui);
+        }
+
+        // One click is a bounded batch, so the button says how much work it is
+        // about to do and refuses to start with nothing flagged.
+        let flagged = view_model.details_needed();
+        if ui
+            .add_enabled(
+                !state.loading && state.descriptions.is_none() && flagged > 0,
+                Button::new(format!("Fetch descriptions ({flagged})")),
+            )
+            .on_hover_text(
+                "Fetch the full description for each job marked for details, up to 20 per click",
+            )
+            .on_disabled_hover_text(if flagged == 0 {
+                "No jobs are marked for details"
+            } else {
+                "A description batch is already running"
+            })
+            .clicked()
+        {
+            *action = Some(PipelineAction::FetchDescriptions);
+        }
+        if let Some(progress) = state.descriptions {
+            ui.label(
+                RichText::new(format!(
+                    "Descriptions: {} of {}…",
+                    progress.done, progress.total
+                ))
+                .weak(),
+            );
+            if progress.failed > 0 {
+                ui.label(
+                    RichText::new(format!("{} failed", progress.failed))
+                        .small()
+                        .color(Color32::from_rgb(0xc9, 0x8a, 0x00)),
+                );
+            }
+            if ui.button("Stop").clicked() {
+                *action = Some(PipelineAction::CancelDescriptions);
+            }
             LoadingSpinner::show(ui);
         }
 

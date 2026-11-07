@@ -36,6 +36,7 @@
 //!   so pasting twice yields one row.
 
 use sqlx::SqlitePool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use url::Url;
 
 use super::ats::{self, NormalizedJob};
@@ -47,7 +48,7 @@ use super::known_sites;
 use super::router::FetchSource;
 use crate::backend::BrowserBackend;
 use crate::error::{CoreError, Result};
-use crate::model::{FetchTier, JobDescription};
+use crate::model::{FetchTier, JobDescription, QueueState};
 use crate::repo::{content_hash, job_descriptions, portals as portal_repo};
 
 /// Result of a manual URL fetch.
@@ -386,6 +387,117 @@ pub async fn refresh_job(
     job_descriptions::get(pool, job_id)
         .await?
         .ok_or_else(|| CoreError::Message(format!("job {job_id} vanished")))
+}
+
+/// The per-click ceiling on a description batch.
+///
+/// Twenty is a click's worth of work, not a crawl: every entry is at least one
+/// real HTTP request, and the flagged set can be the whole page. A user who
+/// wants the rest clicks again.
+pub const DESCRIPTION_BATCH_LIMIT: usize = 20;
+
+/// One posting's outcome within a description batch.
+#[derive(Debug, Clone)]
+pub struct DescriptionEntry {
+    pub job_id: i64,
+    /// The text that is now stored, or the cause on failure.
+    ///
+    /// The text travels with the entry so the Pipeline can render the new
+    /// description without a reload; a byte count would leave the detail view
+    /// showing the teaser it just replaced.
+    pub result: std::result::Result<String, String>,
+}
+
+/// Result of a description batch.
+#[derive(Debug, Clone, Default)]
+pub struct DescriptionBatchReport {
+    pub entries: Vec<DescriptionEntry>,
+    /// The caller's flag stopped the batch before it ran out of postings.
+    pub cancelled: bool,
+    /// Postings this call did not attempt, because the ceiling was reached or
+    /// the batch was stopped. They stay in the queue for the next click.
+    pub remaining: usize,
+}
+
+impl DescriptionBatchReport {
+    pub fn succeeded(&self) -> usize {
+        self.entries.iter().filter(|e| e.result.is_ok()).count()
+    }
+
+    pub fn failed(&self) -> usize {
+        self.entries.iter().filter(|e| e.result.is_err()).count()
+    }
+
+    /// The first failure's cause, for the header's one-line explanation.
+    pub fn first_error(&self) -> Option<&str> {
+        self.entries
+            .iter()
+            .find_map(|entry| entry.result.as_ref().err().map(String::as_str))
+    }
+}
+
+/// Fetch the full description for each flagged posting, in order.
+///
+/// This runs `refresh_job` for every id — the same repair path the detail view
+/// exposes one posting at a time — and advances each succeeded row from
+/// `details_needed` to `evaluate`, in one transaction, because the user flagged
+/// it for exactly this. A failure leaves the row where it is: the state is the
+/// record of what is still wanted.
+///
+/// `cancel` is checked between postings, so a stop never leaves one half
+/// written. `progress` sees every completed attempt, which is what lets the
+/// header count as the batch runs instead of waiting for the whole thing.
+pub async fn fetch_descriptions_batch<F>(
+    pool: &SqlitePool,
+    job_ids: &[i64],
+    source: &dyn FetchSource,
+    cancel: &AtomicBool,
+    mut progress: F,
+) -> Result<DescriptionBatchReport>
+where
+    F: FnMut(&DescriptionEntry),
+{
+    let mut entries = Vec::with_capacity(job_ids.len().min(DESCRIPTION_BATCH_LIMIT));
+    let mut cancelled = false;
+
+    for &job_id in job_ids.iter().take(DESCRIPTION_BATCH_LIMIT) {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+
+        let result = match refresh_job(pool, job_id, source).await {
+            Ok(job) => {
+                tracing::info!(
+                    job = job_id,
+                    bytes = job.raw_text.len(),
+                    "description fetched"
+                );
+                Ok(job.raw_text)
+            }
+            Err(error) => {
+                tracing::warn!(job = job_id, detail = %error, "description fetch failed");
+                Err(error.to_string())
+            }
+        };
+
+        let entry = DescriptionEntry { job_id, result };
+        progress(&entry);
+        entries.push(entry);
+    }
+
+    let advanced: Vec<i64> = entries
+        .iter()
+        .filter(|entry| entry.result.is_ok())
+        .map(|entry| entry.job_id)
+        .collect();
+    job_descriptions::set_queue_states(pool, &advanced, QueueState::Evaluate, None).await?;
+
+    Ok(DescriptionBatchReport {
+        remaining: job_ids.len().saturating_sub(entries.len()),
+        entries,
+        cancelled,
+    })
 }
 
 async fn fetch_description(

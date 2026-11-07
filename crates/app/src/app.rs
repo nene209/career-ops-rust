@@ -62,7 +62,9 @@ use crate::screens;
 use crate::screens::cv_profile::{CvProfileAction, CvProfileRenderState, CvProfileView};
 use crate::screens::lock::{LockAction, LockView, RESET_PHRASE};
 use crate::screens::logs::{LogsAction, LogsRenderState};
-use crate::screens::pipeline::{PipelineAction, PipelineRenderState, PipelineView};
+use crate::screens::pipeline::{
+    DescriptionProgress, PipelineAction, PipelineRenderState, PipelineView,
+};
 use crate::screens::portals::{
     ConfigPreview, ManualSuccess, PortalForm, PortalFormData, PortalModal, PortalsAction,
     PortalsRenderState, PortalsView, PreviewInputs, PreviewSample, StalledWalk,
@@ -222,6 +224,9 @@ pub struct CareerOpsApp {
     marking_job: Option<i64>,
     pipeline_queue_task: Option<AsyncTask<CoreResult<QueueState>>>,
     queueing_job: Option<i64>,
+    descriptions_task: Option<AsyncTask<CoreResult<manual::DescriptionBatchReport>>>,
+    descriptions_progress: Arc<Mutex<Option<DescriptionProgress>>>,
+    descriptions_cancel: Arc<AtomicBool>,
     pipeline_delete_task: Option<AsyncTask<CoreResult<()>>>,
     deleting_job: Option<i64>,
 
@@ -316,6 +321,9 @@ impl CareerOpsApp {
             marking_job: None,
             pipeline_queue_task: None,
             queueing_job: None,
+            descriptions_task: None,
+            descriptions_progress: Arc::new(Mutex::new(None)),
+            descriptions_cancel: Arc::new(AtomicBool::new(false)),
             pipeline_delete_task: None,
             deleting_job: None,
             cv_profile: CvProfileViewModel::default(),
@@ -517,6 +525,8 @@ impl CareerOpsApp {
             PipelineAction::Dismiss(job_id) => {
                 self.start_queue_change(job_id, QueueState::Dismissed)
             }
+            PipelineAction::FetchDescriptions => self.start_descriptions_batch(),
+            PipelineAction::CancelDescriptions => self.cancel_descriptions_batch(),
             PipelineAction::DeleteJob(job_id) => self.start_job_delete(job_id),
         }
     }
@@ -870,6 +880,9 @@ impl CareerOpsApp {
         self.marking_job = None;
         self.pipeline_queue_task = None;
         self.queueing_job = None;
+        self.descriptions_task = None;
+        self.descriptions_progress = Arc::new(Mutex::new(None));
+        self.descriptions_cancel = Arc::new(AtomicBool::new(false));
         self.pipeline_delete_task = None;
         self.deleting_job = None;
 
@@ -1645,11 +1658,9 @@ impl CareerOpsApp {
                 self.refreshing_job = None;
                 match result {
                     Ok(job) => {
-                        if let Some(row) =
-                            self.pipeline.rows.iter_mut().find(|row| row.id == job.id)
-                        {
-                            row.raw_text = job.raw_text.clone();
-                        }
+                        // The same derivation a reload would do, so the plain
+                        // view and the raw toggle follow the new text.
+                        self.pipeline.set_description(job.id, job.raw_text.clone());
                         self.pipeline_message = Some(format!(
                             "Description refreshed: {} bytes.",
                             job.raw_text.len()
@@ -1829,6 +1840,125 @@ impl CareerOpsApp {
                 self.pipeline_queue_task = None;
                 self.queueing_job = None;
                 self.pipeline_error = Some("The queue update was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Fetch the full description for every row marked for details.
+    ///
+    /// One click is one bounded batch (`DESCRIPTION_BATCH_LIMIT`), the same
+    /// shape as the portal walk: a click is a decision, not a crawl. The rows
+    /// are taken from the loaded page in the order the list shows them.
+    fn start_descriptions_batch(&mut self) {
+        if self.descriptions_task.is_some() {
+            return;
+        }
+
+        let job_ids: Vec<i64> = self
+            .pipeline
+            .rows
+            .iter()
+            .filter(|row| row.queue == QueueState::DetailsNeeded)
+            .map(|row| row.id)
+            .take(manual::DESCRIPTION_BATCH_LIMIT)
+            .collect();
+        if job_ids.is_empty() {
+            self.pipeline_message = Some("No jobs are marked for details.".into());
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.pipeline_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let source = Arc::clone(&self.fetch_source);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(Mutex::new(Some(DescriptionProgress {
+            done: 0,
+            total: job_ids.len(),
+            failed: 0,
+        })));
+
+        let task_cancel = Arc::clone(&cancel);
+        let task_progress = Arc::clone(&progress);
+        let task = self.spawn(async move {
+            manual::fetch_descriptions_batch(
+                &pool,
+                &job_ids,
+                source.as_ref(),
+                &task_cancel,
+                |entry| {
+                    if let Ok(mut slot) = task_progress.lock() {
+                        if let Some(progress) = slot.as_mut() {
+                            progress.done += 1;
+                            if entry.result.is_err() {
+                                progress.failed += 1;
+                            }
+                        }
+                    }
+                },
+            )
+            .await
+        });
+
+        self.pipeline_error = None;
+        self.pipeline_message = None;
+        self.descriptions_cancel = cancel;
+        self.descriptions_progress = progress;
+        self.descriptions_task = Some(task);
+    }
+
+    /// Stop a running batch between jobs. The task keeps its own flag, so a
+    /// press after the last job lands is harmless.
+    fn cancel_descriptions_batch(&mut self) {
+        self.descriptions_cancel.store(true, Ordering::Relaxed);
+    }
+
+    fn poll_descriptions_batch(&mut self, ctx: &egui::Context) {
+        let poll = match self.descriptions_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                // The progress cell changes without the task finishing.
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            TaskPoll::Ready(result) => {
+                self.descriptions_task = None;
+                self.descriptions_progress = Arc::new(Mutex::new(None));
+
+                match result {
+                    Ok(report) => {
+                        for entry in &report.entries {
+                            if let Ok(text) = &entry.result {
+                                self.pipeline.set_description(entry.job_id, text.clone());
+                                self.pipeline.set_queue(entry.job_id, QueueState::Evaluate);
+                            }
+                        }
+                        self.pipeline_message = Some(description_batch_summary(&report));
+                        self.pipeline_error =
+                            report.first_error().map(|cause| match report.failed() {
+                                1 => format!("One description could not be fetched: {cause}"),
+                                failed => format!(
+                                    "{failed} descriptions could not be fetched. First: {cause}"
+                                ),
+                            });
+                    }
+                    Err(error) => {
+                        self.pipeline_message = None;
+                        self.pipeline_error = Some(error.to_string());
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.descriptions_task = None;
+                self.descriptions_progress = Arc::new(Mutex::new(None));
+                self.pipeline_error = Some("The description batch was interrupted.".into());
                 ctx.request_repaint();
             }
         }
@@ -2316,6 +2446,44 @@ fn fetch_all_summary(report: &FetchAllPagesReport) -> String {
     }
 }
 
+/// The one-line result shown after a description batch.
+///
+/// The batch is bounded, so "there is more" has to be sayable without making a
+/// complete run and a capped one read the same.
+fn description_batch_summary(report: &manual::DescriptionBatchReport) -> String {
+    if report.cancelled {
+        let attempted = report.entries.len();
+        let total = attempted + report.remaining;
+        let mut summary = format!("Stopped after {attempted} of {total} descriptions.");
+        if report.failed() > 0 {
+            summary.push_str(&format!(
+                " {} failed and stay marked for details.",
+                report.failed()
+            ));
+        }
+        return summary;
+    }
+
+    let mut summary = format!(
+        "Fetched {} of {} descriptions.",
+        report.succeeded(),
+        report.entries.len()
+    );
+    if report.failed() > 0 {
+        summary.push_str(&format!(
+            " {} failed and stay marked for details.",
+            report.failed()
+        ));
+    }
+    if report.remaining > 0 {
+        summary.push_str(&format!(
+            " {} still flagged; click again for the next batch.",
+            report.remaining
+        ));
+    }
+    summary
+}
+
 /// The one-line result shown after a single-portal fetch.
 ///
 /// Description counts appear only when the portal has a `detail` config, so a
@@ -2426,6 +2594,7 @@ impl eframe::App for CareerOpsApp {
                 self.poll_pipeline_refresh(ui.ctx());
                 self.poll_pipeline_status(ui.ctx());
                 self.poll_pipeline_queue(ui.ctx());
+                self.poll_descriptions_batch(ui.ctx());
                 self.poll_pipeline_delete(ui.ctx());
                 self.poll_cv_profile_task(ui.ctx());
                 self.poll_cv_profile_save(ui.ctx());
@@ -2500,6 +2669,11 @@ impl eframe::App for CareerOpsApp {
                     refreshing: self.refreshing_job,
                     marking: self.marking_job,
                     queueing: self.queueing_job,
+                    descriptions: self
+                        .descriptions_progress
+                        .lock()
+                        .ok()
+                        .and_then(|progress| *progress),
                     deleting: self.deleting_job,
                 };
                 let cv_profile_state = CvProfileRenderState {
@@ -3331,6 +3505,7 @@ mod tests {
             app.poll_pipeline_refresh(ctx);
             app.poll_pipeline_status(ctx);
             app.poll_pipeline_queue(ctx);
+            app.poll_descriptions_batch(ctx);
             app.poll_pipeline_delete(ctx);
             app.poll_cv_profile_task(ctx);
             app.poll_cv_profile_save(ctx);
@@ -4140,6 +4315,176 @@ mod tests {
             .pipeline_message
             .as_deref()
             .is_some_and(|message| message.starts_with("Dismissed.")));
+    }
+
+    /// The description batch through the app: both flagged rows get text and
+    /// move to `evaluate`; a second click has nothing to do.
+    #[test]
+    fn fetch_descriptions_updates_the_rows_and_advances_the_queue() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::default());
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source.clone());
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        // The portal supplies the description selector for this host, which is
+        // what `refresh_job` looks up per posting.
+        app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
+            company_name: "Acme".into(),
+            url: "https://example.com/careers".into(),
+            render_mode: "static".into(),
+            scraper_config: Some(
+                r#"{"list":"article.job","fields":{"title":"h3 a"},"detail":{"fields":{"description":".job-description"},"max_jobs":3}}"#
+                    .into(),
+            ),
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals.rows.len() == 1 && app.portals_task.is_none()
+        });
+
+        let pool = app.pool().expect("pool");
+        let mut stored = Vec::new();
+        for (index, title) in ["Engineer", "Designer"].iter().enumerate() {
+            let job = app
+                .runtime()
+                .block_on(job_repo::upsert(
+                    &pool,
+                    job_repo::NewJobDescription {
+                        title: (*title).into(),
+                        company: "Acme".into(),
+                        source_url: format!("https://example.com/jobs/{index}"),
+                        raw_text: String::new(),
+                        fetch_tier: FetchTier::Tier1bHtml,
+                        external_id: None,
+                    },
+                ))
+                .expect("store");
+            app.runtime()
+                .block_on(job_repo::set_queue_state(
+                    &pool,
+                    job.id,
+                    QueueState::DetailsNeeded,
+                    None,
+                ))
+                .expect("flag for details");
+            stored.push(job);
+        }
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+        assert_eq!(app.pipeline.details_needed(), 2);
+
+        app.handle_pipeline_action(PipelineAction::FetchDescriptions);
+        wait_until(&mut app, &ctx, |app| {
+            app.descriptions_task.is_none() && app.pipeline_message.is_some()
+        });
+
+        assert_eq!(source.page_calls().len(), 2, "one request per flagged row");
+        assert!(app.pipeline_error.is_none());
+        assert_eq!(
+            app.pipeline_message.as_deref(),
+            Some("Fetched 2 of 2 descriptions.")
+        );
+        for row in &app.pipeline.rows {
+            assert_eq!(
+                row.raw_text, "Full description from the detail page.",
+                "the stored text is replaced in place"
+            );
+            assert_eq!(
+                row.queue,
+                QueueState::Evaluate,
+                "a fetched description is ready to evaluate"
+            );
+        }
+        for job in &stored {
+            let row = app
+                .runtime()
+                .block_on(job_repo::get(&pool, job.id))
+                .expect("get")
+                .expect("row");
+            assert_eq!(row.queue_state, "evaluate");
+        }
+
+        // Nothing is flagged now, so the next click is refused instead of
+        // spawning an empty batch.
+        app.pipeline_message = None;
+        app.handle_pipeline_action(PipelineAction::FetchDescriptions);
+        assert!(app.descriptions_task.is_none());
+        assert_eq!(
+            app.pipeline_message.as_deref(),
+            Some("No jobs are marked for details.")
+        );
+
+        // Stop is a flag the task reads between jobs; the action must reach it.
+        assert!(!app.descriptions_cancel.load(Ordering::Relaxed));
+        app.handle_pipeline_action(PipelineAction::CancelDescriptions);
+        assert!(app.descriptions_cancel.load(Ordering::Relaxed));
+    }
+
+    /// A complete batch, a partial one, a stopped one and a capped one have to
+    /// read differently: "Fetched 20 of 20" alone would hide the rest.
+    #[test]
+    fn description_batch_summary_names_what_is_left() {
+        let ok = |job_id| manual::DescriptionEntry {
+            job_id,
+            result: Ok("body".into()),
+        };
+        let failed = |job_id| manual::DescriptionEntry {
+            job_id,
+            result: Err("no description was found".into()),
+        };
+
+        let report = |entries, cancelled, remaining| manual::DescriptionBatchReport {
+            entries,
+            cancelled,
+            remaining,
+        };
+
+        assert_eq!(
+            description_batch_summary(&report(vec![ok(1), ok(2)], false, 0)),
+            "Fetched 2 of 2 descriptions."
+        );
+        assert_eq!(
+            description_batch_summary(&report(vec![ok(1), failed(2)], false, 0)),
+            "Fetched 1 of 2 descriptions. 1 failed and stay marked for details."
+        );
+        assert_eq!(
+            description_batch_summary(&report(vec![ok(1)], true, 2)),
+            "Stopped after 1 of 3 descriptions."
+        );
+        assert_eq!(
+            description_batch_summary(&report(vec![ok(1)], false, 5)),
+            "Fetched 1 of 1 descriptions. 5 still flagged; click again for the next batch."
+        );
     }
 
     /// Deleting through the app removes the row from the view model, clears the
