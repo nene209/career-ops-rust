@@ -181,7 +181,19 @@ async fn fetch_pages_from(
         };
 
         pages_fetched += 1;
+        let page_job_count = page_jobs.len();
         let added = push_unique(&mut jobs, &mut seen, page_jobs);
+        // One line per page read. `bytes` is what separates "the site answered"
+        // from "the site answered with a shell": Waymo's WAF serves a 202 with an
+        // empty body, and before this line the only evidence was a stalled walk.
+        tracing::info!(
+            page,
+            url = %page_url,
+            bytes = body.len(),
+            jobs = page_job_count,
+            added,
+            "page read"
+        );
         if added == 0 && offset > 0 {
             // The site ignored the page parameter and served the same page,
             // or the next link points back at content we already have.
@@ -418,6 +430,56 @@ mod tests {
             value["max_pages"] = serde_json::json!(max_pages);
         }
         value
+    }
+
+    /// One line per page read: page number, URL, size, and job count. This is
+    /// the signal Phase 2.8's stall was missing — `bytes` is what separates
+    /// "the site answered" from "the site answered with a shell".
+    #[tokio::test]
+    async fn a_page_is_logged_with_its_size_and_job_count() {
+        let handle = crate::logging::handle();
+        let before = handle.latest_seq();
+        let source =
+            ScriptedPages::new(vec![Ok(page(&[("A", "/jobs/a"), ("B", "/jobs/b")], None))]);
+
+        fetch_pages(
+            &source,
+            &url("https://logged.example/jobs"),
+            "Acme",
+            Some(&config(None)),
+        )
+        .await
+        .expect("fetch");
+
+        let lines = handle.snapshot();
+        let line = lines
+            .iter()
+            .find(|line| {
+                line.seq > before
+                    && line.message == "page read"
+                    && line
+                        .fields
+                        .iter()
+                        .any(|(key, value)| key == "url" && value == "https://logged.example/jobs")
+            })
+            .expect("the page was logged");
+
+        let field = |name: &str| {
+            line.fields
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(field("page"), Some("1"));
+        assert_eq!(field("jobs"), Some("2"));
+        assert_eq!(field("added"), Some("2"));
+        assert!(
+            field("bytes")
+                .and_then(|bytes| bytes.parse::<usize>().ok())
+                .is_some_and(|bytes| bytes > 0),
+            "the page's size is recorded: {:?}",
+            field("bytes")
+        );
     }
 
     #[tokio::test]

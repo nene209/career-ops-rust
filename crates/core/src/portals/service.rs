@@ -213,6 +213,22 @@ where
             budget: FETCH_ALL_PAGE_BUDGET,
         });
 
+        // One line per chunk: the walk's own account of what it read. The range
+        // starts at `first_page` because that is how the user sees it, and
+        // `deepest` is the page the cursor now covers.
+        tracing::info!(
+            portal = portal_id,
+            first_page = outcome.first_page,
+            pages = chunk_pages,
+            deepest = outcome.first_page + chunk_pages.saturating_sub(1),
+            jobs = outcome.jobs_fetched,
+            stop = outcome
+                .pagination_stopped
+                .map(PaginationStop::as_str)
+                .unwrap_or("provider"),
+            "fetch-all chunk"
+        );
+
         if outcome.end_of_list {
             break FetchAllStop::EndOfList;
         }

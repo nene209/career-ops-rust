@@ -1,7 +1,7 @@
 # Phase 2.8.1: Logging and Diagnostics — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.16), §12
-**Status:** In progress — WS1 (the logging core) implemented; WS2–WS4 pending
+**Status:** In progress — WS1 and WS2 implemented; WS3–WS4 pending
 **Last updated:** 2026-11-06
 **Duration:** 2–3 days
 **Depends on:** Phase 2.8 (the walk, its stop reasons, and the failures this phase makes readable)
@@ -15,6 +15,7 @@
 | :--- | :--- |
 | v0.1 | Initial plan. Implements **Option B** from the phase review — a durable log file plus an in-app Logs screen — with the owner's four decisions recorded: **Option B, with Option C deferred** to its own section; numbered **2.8.1** and sequenced before 2.9; the screen **visible in release builds** at `info`; and the **bottom drawer in scope now**, not later. No migration, no new external dependency, no change to fetch behavior. |
 | v0.2 | WS1 implemented. Two details the code settled. **The `log` bridge needs no direct dependency:** `SubscriberInitExt::try_init` installs `LogTracer` itself, and `the_log_bridge_carries_log_crate_records` pins it, so `tracing-log` is not added. **One level policy, not per-event logic:** the subscriber's global `EnvFilter` is the union (`info`, plus `debug` for `career_ops_core`/`career_ops_app`) and the file layer adds its own `info` filter on top, which is what makes the buffer deeper than the file without any branch in the layer. `LogHandle` also exposes `policy()` (so the screen can state where its level came from) and `dropped()`. `Cargo.lock` gains two dependency edges on the core package and no new packages. |
+| v0.3 | WS2 implemented. Three deviations, all recorded rather than left as drift. **The per-page line lives in the engines, not the router:** `fetch_portal_inner` delegates paging, so it logs one line per *call* (tier, pages, jobs, details, stop, elapsed) and the page loops log per page — which also folds the old enrichment-only line into one. **No `status` field on a successful page:** a successful page is 2xx by construction, the non-2xx cases already carry the status through the classified error, and adding it would mean changing the `PageSource` seam and ~20 fixtures for a constant; `bytes` is the field that distinguishes "answered" from "answered with a shell". **CDP message chatter is not logged per message:** it is a firehose with large payloads, and the sidecar's own diagnostics are on stderr, which is now captured. The sidecar target is the module path so the default debug policy keeps those lines in the buffer. |
 
 ---
 
@@ -24,18 +25,18 @@ This phase adds no product feature. It exists because of a specific failure: the
 
 Three gaps, each independently sufficient to explain that:
 
-1. **The sink is invisible.** `crates/app/src/main.rs:13-16` initialises `tracing_subscriber::fmt()` with `EnvFilter::from_default_env()`. `fmt()` writes to **stderr**, and a windowed `.app` launched from Finder discards stderr. The logger exists; nobody can read it.
+1. **The sink was invisible.** `crates/app/src/main.rs` used to initialise `tracing_subscriber::fmt()` with `EnvFilter::from_default_env()` (replaced in WS1). `fmt()` writes to **stderr**, and a windowed `.app` launched from Finder discards stderr. The logger existed; nobody could read it.
 2. **The level is off unless an environment variable says otherwise.** With `RUST_LOG` unset the app produced no output during the stall, and setting it for a bundled app means launching from a terminal — a step the user should not have to know.
 3. **The events are failure-only.** Almost every call site is `warn!` *at* a failure (`router.rs`, `eightfold.rs`, `router::detail`). There is no per-page line and no walk-chunk line, so "it stalled after 40 jobs" is the most the log can ever say. F10 was diagnosed only because the `serde_json` error text happened to reach the UI inside a fetch error — not because anyone could read a log.
 
-A fourth gap will bite next: **the browser backend is mute by construction.** `crates/core/src/backend/obscura.rs:144-148` sends the sidecar's stdout and stderr to `Stdio::null()`, and the connection handler is `while handler.next().await.is_some() {}` — messages are discarded, not logged. When a Tier 2 fetch fails, the sidecar's own diagnostics are gone.
+A fourth gap was going to bite next: **the browser backend was mute by construction.** `crates/core/src/backend/obscura.rs` sent the sidecar's stdout and stderr to `Stdio::null()`, and the connection handler discarded its messages. When a Tier 2 fetch failed, the sidecar's own diagnostics were gone. WS2 captures the stderr; the CDP chatter stays unlogged on purpose (see v0.3).
 
 The goal is not "logging". It is: **when something goes wrong during manual testing, the answer is on screen in one click, and it survives a crash.**
 
 ### Evidence
 
-- `crates/app/src/main.rs:13-16` — `fmt()` + `EnvFilter::from_default_env()`, stderr, no file.
-- `crates/core/src/backend/obscura.rs:144-148`, `:167` — sidecar `stdout`/`stderr` are `Stdio::null()`; WS messages are dropped.
+- `crates/app/src/main.rs` — the old `fmt()` + `EnvFilter::from_default_env()` subscriber (stderr, no file; replaced by `logging::init` in WS1).
+- `crates/core/src/backend/obscura.rs` — the sidecar's `stdout`/`stderr` were `Stdio::null()` and its messages were discarded (stderr is captured in WS2).
 - `crates/core/src/portals/service.rs` — `FetchAllPagesReport` carries `stopped_reason`, but only the app's one-line summary reads it.
 - `crates/core/src/lib.rs:28-36` — `data_dir()`, with the `CAREER_OPS_DATA_DIR` override that makes file logging testable.
 - `crates/app/src/screens/shell.rs:30-41` — the shell is `Panel::left` + `CentralPanel`; a root-level `Panel::bottom` is the natural drawer.
@@ -147,11 +148,11 @@ Egui's `Panel::bottom` inside the root `Ui` is the one structural unknown. It is
 
 | Where | Event | Why |
 | :--- | :--- | :--- |
-| `acquisition::router::fetch_portal_inner` | per page, `info!`: `portal`, `page`, `url`, `status`, `tier`, `bytes`, `jobs`, `details_attempted`, `details_enriched`, `elapsed_ms` | The missing signal for F8/F10 |
-| `eightfold::fetch_jobs_with` / `html::fetch_pages` | per page, `info!`: `page`/`start`, `jobs`, `stop` | Covers both engines, not just Eightfold |
-| `portals::service::fetch_all_pages` | per chunk, `info!`: `first_page`, `pages`, `cursor`, `stop` | Turns "it stalled" into "it read 26–29 and stopped at 30" |
-| `eightfold::parse_page` | existing `warn!` gains `offset`, `positions`, `skipped` | Payload bug vs. transport bug becomes obvious |
-| `backend::obscura::spawn_sidecar` | stderr piped and drained into `tracing` (target `obscura`), WS messages at `trace` | The sidecar stops being a black box |
+| `acquisition::router::fetch_portal_inner` | per fetch call, `info!`: `portal`, `tier`, `first_page`, `pages`, `jobs`, `details_attempted`, `details_enriched`, `stop`, `elapsed_ms` | The missing signal for F8/F10; it replaces the old enrichment-only line, so a fetch is one line |
+| `html` / `eightfold` page loops | per page, `info!`: `page`, `jobs`, `added`, plus `url` and `bytes` (HTML) or `offset` (Eightfold) | Covers both engines, and one query finds both because `page`/`jobs`/`added` are shared |
+| `portals::service::fetch_all_pages` | per chunk, `info!`: `portal`, `first_page`, `pages`, `deepest`, `jobs`, `stop` | Turns "it stalled" into "it read 26–29 and stopped at 30" |
+| `eightfold::parse_page` | the skip `warn!` gains `index` and `positions`; a second `warn!` carries `positions`/`skipped` | Payload bug vs. transport bug becomes obvious |
+| `backend::obscura::spawn_sidecar` | stderr piped and drained into `tracing` at `debug` (module target, so the default policy keeps it in the buffer) | The sidecar stops being a black box |
 | `main.rs` | one startup `info!`: version, profile, data dir, log path | Makes every future bug report reproducible |
 
 Per-job enrichment detail stays at `debug`; it is the one event that would otherwise multiply by the detail cap.
@@ -218,24 +219,26 @@ No schema change. No change to any fetch, stop reason, cursor, or health rule. T
 
 ### Deliverables
 
-1. Per-page `info!` in `router::fetch_portal_inner`, with the field set in decision 10. Elapsed time measured around the request, not the whole portal.
-2. Per-page `info!` in the Eightfold list loop and in `html::fetch_pages`, sharing the field names above so one query finds both.
-3. Per-chunk `info!` in `portals::service::fetch_all_pages` before each stop is reported, including the stop label.
-4. `eightfold::parse_page`'s skip warning gains `offset`, `positions`, and `skipped`.
-5. `obscura::spawn_sidecar`: `Stdio::piped()` for stderr plus a drain task (`tracing::debug!(target: "obscura", ...)`), and `trace!` for WS messages the handler currently discards. The drain task must end when the pipe closes; `stdout` stays null.
+1. One `info!` per fetch call in `router::fetch_portal_inner` (tier, first page, pages read, jobs, details, stop, elapsed). The router does not page — it delegates to the engines — so this is the call-level line, not a per-page one. It replaces the old "enriched job descriptions" line, so a fetch stays one line.
+2. Per-page `info!` in the Eightfold list loop and in the HTML page loop, sharing `page`/`jobs`/`added` so one query finds both; the HTML loop adds `url` and `bytes`, the Eightfold loop adds `offset`.
+3. Per-chunk `info!` in `portals::service::fetch_all_pages`, with the range and the stop label.
+4. `eightfold::parse_page`: the per-posting skip warning names `index` and `positions`; a second warning reports `positions`/`skipped` for the page.
+5. `obscura::spawn_sidecar`: `Stdio::piped()` for stderr plus a drain task, `stdout` still null. The target is the module path, so the default debug policy keeps these lines in the buffer; a bare `obscura` target would be filtered out.
 6. The startup line in `main.rs`, after `logging::init`, before `AppState::bootstrap`.
-7. Tests:
-   - `crates/core/tests/portals_service.rs`: `a_walk_logs_the_page_it_stopped_at` — the scripted 4-page-then-`FetchFailed` source from Phase 2.8's `fetch_all_pages_reports_an_unreadable_page`, asserting the buffer contains a chunk line with `stop` naming the page. This is F8 expressed as a log assertion.
-   - `crates/core/src/acquisition/eightfold.rs` (unit): a page with a `postedTs: 0.0` posting followed by an unparseable one produces one skip warning whose message names the index, and the page still parses.
-   - A test that the sidecar stderr drain task logs a line and terminates when the writer closes (no child process required — drive the drain function directly).
+7. `PaginationStop::as_str()` as the one stable label used by the router, the walk, and any summary.
+8. Tests:
+   - `crates/core/tests/portals_service.rs`: `a_walk_logs_the_page_it_stopped_at` — a four-page chunk stopping at `FetchFailed`, asserting the chunk line's range and stop. The walk resumes from page 41 so the assertion cannot pick up a parallel test's line.
+   - `crates/core/src/acquisition/html/mod.rs` (unit): `a_page_is_logged_with_its_size_and_job_count`.
+   - `crates/core/src/acquisition/eightfold.rs` (unit): `a_skipped_posting_names_its_index_and_the_page_size`, asserting one skip warning and the page summary.
+   - `crates/core/src/backend/obscura.rs` (unit): `sidecar_stderr_lines_are_forwarded_to_the_log` drives the drain function over a `tokio::io::duplex` pipe; no child process.
 
 ### Acceptance criteria
 
 | Criterion | Verification |
 | :--- | :--- |
-| One page of a walk produces exactly one `info!` line with page number, status, and job count | Scripted-source test |
-| A stalled walk's log names the page and the stop reason | `a_walk_logs_the_page_it_stopped_at` |
-| A parse failure is diagnosable from the log alone (offset + index) | Unit test |
+| One page of a walk produces exactly one `info!` line with page number, URL, size, and job count | Scripted-source test |
+| A stalled walk's log names the page range and the stop reason | `a_walk_logs_the_page_it_stopped_at` |
+| A parse failure is diagnosable from the log alone (index + page size) | Unit test |
 | Sidecar stderr is captured instead of discarded | Drain-function test |
 | A 50-page walk adds roughly 50 lines, not 500 | Manual check in the drawer; per-job lines stay `debug` |
 

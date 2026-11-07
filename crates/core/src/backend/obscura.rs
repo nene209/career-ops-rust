@@ -33,6 +33,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chromiumoxide::browser::Browser;
 use futures_util::StreamExt;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -132,7 +133,7 @@ impl ObscuraBrowserBackend {
 
         let port = allocate_port()?;
 
-        let child = Command::new(&self.config.binary)
+        let mut child = Command::new(&self.config.binary)
             .arg("serve")
             .arg("--port")
             .arg(port.to_string())
@@ -143,7 +144,7 @@ impl ObscuraBrowserBackend {
             .arg("--stealth")
             .kill_on_drop(true)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| {
                 CoreError::Message(format!(
@@ -153,6 +154,13 @@ impl ObscuraBrowserBackend {
                     self.config.binary.display()
                 ))
             })?;
+
+        // The sidecar's own diagnostics used to be `Stdio::null()`, which made a
+        // Tier 2 failure a guess. Drain them into the log instead. The task ends
+        // when the pipe closes, which is when the child exits.
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(drain_stderr(stderr));
+        }
 
         write_lock_file(&self.config.storage_dir, child.id());
 
@@ -388,6 +396,31 @@ async fn graceful_shutdown(child: &mut Child, timeout: Duration) {
 // Stale lock file
 // ----------------------------------------------------------------------
 
+/// Forward the sidecar's stderr into the log, one record per line.
+///
+/// Deliberately `debug`: the sidecar is chatty about its own startup and the
+/// file keeps `info`. Under the default policy the app's own targets are
+/// captured at `debug` in the in-app buffer, so these lines are readable in the
+/// Logs screen without touching `RUST_LOG`. The target is this module's path for
+/// that reason, not a bare `obscura` label the policy would filter out.
+async fn drain_stderr<R>(stderr: R)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut lines = BufReader::new(stderr).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => tracing::debug!(line, "sidecar stderr"),
+            // The pipe closing is how the child exiting looks from here.
+            Ok(None) => break,
+            Err(error) => {
+                tracing::debug!(%error, "sidecar stderr unreadable");
+                break;
+            }
+        }
+    }
+}
+
 fn lock_path(storage_dir: &Path) -> PathBuf {
     storage_dir.join(".obscura.lock")
 }
@@ -451,4 +484,44 @@ fn process_alive(_pid: u32) -> bool {
     // holds an ephemeral port we did not allocate, so it does not
     // conflict with the new sidecar.
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    /// The sidecar's own diagnostics must reach the log: before this, a Tier 2
+    /// failure could only be guessed at from the CDP side.
+    #[tokio::test]
+    async fn sidecar_stderr_lines_are_forwarded_to_the_log() {
+        let handle = crate::logging::handle();
+        let before = handle.latest_seq();
+        let marker = format!("sidecar-marker-{}", std::process::id());
+
+        let (mut writer, reader) = tokio::io::duplex(256);
+        let task = tokio::spawn(drain_stderr(reader));
+        writer
+            .write_all(format!("{marker}\n").as_bytes())
+            .await
+            .expect("write to the pipe");
+        drop(writer);
+        task.await
+            .expect("the drain task ends when the pipe closes");
+
+        let lines = handle.snapshot();
+        let line = lines
+            .iter()
+            .find(|line| {
+                line.seq > before
+                    && line
+                        .fields
+                        .iter()
+                        .any(|(key, value)| key == "line" && value.contains(&marker))
+            })
+            .expect("the sidecar's stderr reached the log");
+
+        assert_eq!(line.level, tracing::Level::DEBUG);
+        assert_eq!(line.target, "career_ops_core::backend::obscura");
+    }
 }

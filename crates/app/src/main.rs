@@ -14,9 +14,23 @@ fn main() -> Result<()> {
     // The file sink and the in-process buffer, from one `tracing` seam. This
     // must run before anything else so the bootstrap is recorded too; stderr
     // alone was invisible for a windowed build.
-    let _logs = logging::init(LogMode::File);
+    let logs = logging::init(LogMode::File);
 
-    let state = AppState::bootstrap(career_ops_core::data_dir())?;
+    let data_dir = career_ops_core::data_dir();
+    // One line that makes a bug report reproducible: which build, which data
+    // directory, and where the log for it is.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        profile = if cfg!(debug_assertions) { "debug" } else { "release" },
+        data_dir = %data_dir.display(),
+        log = %logs
+            .path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<in-app buffer only>".to_string()),
+        "career-ops starting"
+    );
+
+    let state = AppState::bootstrap(data_dir)?;
 
     // The runtime lives for the whole process. Screens spawn service-layer
     // work on it and poll the result from `eframe::App::ui`.

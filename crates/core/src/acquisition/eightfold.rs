@@ -179,14 +179,31 @@ pub fn parse_page(body: &str) -> AtsResult<ListPage> {
     }
 
     let RawListPage { count, positions } = envelope.data;
-    let mut parsed = Vec::with_capacity(positions.len());
+    let total = positions.len();
+    let mut skipped = 0usize;
+    let mut parsed = Vec::with_capacity(total);
     for (index, value) in positions.into_iter().enumerate() {
         match serde_json::from_value::<Position>(value) {
             Ok(position) => parsed.push(position),
             Err(error) => {
-                tracing::warn!(index, %error, "eightfold position skipped: it did not parse")
+                skipped += 1;
+                tracing::warn!(
+                    index,
+                    positions = total,
+                    %error,
+                    "eightfold position skipped: it did not parse"
+                )
             }
         }
+    }
+    if skipped > 0 {
+        // The page-level count is what tells a payload bug from a transport
+        // one: the response arrived, and this many postings did not survive it.
+        tracing::warn!(
+            positions = total,
+            skipped,
+            "eightfold page kept without the postings it could not parse"
+        );
     }
 
     Ok(ListPage {
@@ -460,6 +477,15 @@ async fn fetch_jobs_with(
             }
         }
         pages_fetched += 1;
+        // The same field names as the HTML loop, so one query finds both
+        // engines. `offset` is the `start` parameter the API was given.
+        tracing::info!(
+            page = pages_fetched,
+            offset = start,
+            positions = page.positions.len(),
+            added = jobs.len() - before,
+            "page read"
+        );
 
         if jobs.len() == before && pages_fetched > 1 {
             return Ok(PageReport {
@@ -733,6 +759,48 @@ mod tests {
             "only the complete posting survives"
         );
         assert_eq!(page.positions[0].id, "1");
+    }
+
+    /// A skipped posting is logged with its index and the page's size: that is
+    /// the pair that separates a payload bug from a transport one, and the pair
+    /// that was missing when Phase 2.8's page 30 stalled.
+    #[test]
+    fn a_skipped_posting_names_its_index_and_the_page_size() {
+        let handle = crate::logging::handle();
+        let before = handle.latest_seq();
+        let body = r#"{"status":200,"data":{"count":3,"positions":[
+            {"id":1,"name":"A"},
+            {"id":2,"name":"B"},
+            "not an object"
+        ]}}"#;
+
+        let page = parse_page(body).expect("the page still parses");
+        assert_eq!(page.positions.len(), 2);
+
+        let lines = handle.snapshot();
+        let skips: Vec<_> = lines
+            .iter()
+            .filter(|line| {
+                line.seq > before && line.message.starts_with("eightfold position skipped")
+            })
+            .collect();
+        assert_eq!(skips.len(), 1, "one warning per skipped posting");
+
+        fn field<'a>(line: &'a crate::logging::LogLine, name: &str) -> Option<&'a str> {
+            line.fields
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        }
+        assert_eq!(field(skips[0], "index"), Some("2"), "the array position");
+        assert_eq!(field(skips[0], "positions"), Some("3"), "the page size");
+
+        let summary = lines
+            .iter()
+            .find(|line| line.seq > before && line.message.starts_with("eightfold page kept"))
+            .expect("the page says how much it lost");
+        assert_eq!(field(summary, "positions"), Some("3"));
+        assert_eq!(field(summary, "skipped"), Some("1"));
     }
 
     #[test]

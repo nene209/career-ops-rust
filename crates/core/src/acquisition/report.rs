@@ -27,6 +27,23 @@ pub enum PaginationStop {
     RepeatedUrl,
 }
 
+impl PaginationStop {
+    /// A stable lowercase label for logs and summaries.
+    ///
+    /// Stable on purpose: the log is grepped, and a `Debug` repr would change
+    /// with a variant name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EndOfList => "end-of-list",
+            Self::LimitReached => "limit-reached",
+            Self::FetchFailed => "fetch-failed",
+            Self::ExtractionFailed => "extraction-failed",
+            Self::NoNewJobs => "no-new-jobs",
+            Self::RepeatedUrl => "repeated-url",
+        }
+    }
+}
+
 /// One list fetch: the jobs, how many pages produced them, and why the loop
 /// stopped.
 #[derive(Debug, Clone)]

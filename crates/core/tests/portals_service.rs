@@ -635,3 +635,70 @@ async fn fetch_all_pages_reports_an_unreadable_page() {
 
     db.close().await;
 }
+
+/// The walk's own log line is what turns "it stalled" into "it read pages 1-4
+/// and stopped at page 5". Phase 2.8's F8 was exactly this line being absent,
+/// so the walk had to be inferred from a single summary string.
+#[tokio::test]
+async fn a_walk_logs_the_page_it_stopped_at() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(&db.pool, eightfold_portal("Acme", 4))
+        .await
+        .unwrap();
+    // Start somewhere no other test in this binary starts, so the shared log
+    // buffer cannot hand us another walk's chunk line (every fresh database
+    // hands out portal id 1).
+    portals::set_last_page_fetched(&db.pool, portal.id, 40)
+        .await
+        .unwrap();
+    let source = Arc::new(MockFetchSource::sequence_eightfold([Ok(PageReport {
+        jobs: vec![sample_job("a")],
+        pages_fetched: 4,
+        stop: PaginationStop::FetchFailed,
+    })]));
+
+    let handle = career_ops_core::logging::handle();
+    let before = handle.latest_seq();
+    let cancel = AtomicBool::new(false);
+    service::fetch_all_pages(&db.pool, portal.id, source.as_ref(), None, &cancel, |_| {})
+        .await
+        .expect("fetch_all_pages");
+
+    let portal_id = portal.id.to_string();
+    let lines = handle.snapshot();
+    let line = lines
+        .iter()
+        .find(|line| {
+            line.seq > before
+                && line.message == "fetch-all chunk"
+                && line
+                    .fields
+                    .iter()
+                    .any(|(key, value)| key == "portal" && value == &portal_id)
+                // Every test in this binary has portal id 1, so the start page
+                // is what identifies this walk's line.
+                && line
+                    .fields
+                    .iter()
+                    .any(|(key, value)| key == "first_page" && value == "41")
+        })
+        .expect("the walk logged its chunk");
+
+    let field = |name: &str| {
+        line.fields
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    assert_eq!(field("first_page"), Some("41"));
+    assert_eq!(field("pages"), Some("4"));
+    assert_eq!(field("deepest"), Some("44"));
+    assert_eq!(field("jobs"), Some("1"));
+    assert_eq!(
+        field("stop"),
+        Some("fetch-failed"),
+        "the stop reason is named, not inferred from a missing cursor"
+    );
+
+    db.close().await;
+}

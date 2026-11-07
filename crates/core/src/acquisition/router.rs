@@ -452,6 +452,9 @@ pub async fn fetch_portal_inner(
         detail: format!("portal url is invalid: {e}"),
     })?;
 
+    // Measures this request and its enrichment, not the caller's queue wait.
+    let started = std::time::Instant::now();
+
     let first_page = match start {
         FetchStart::Beginning => 1,
         FetchStart::Resume => (portal.last_page_fetched.max(0) as usize) + 1,
@@ -624,15 +627,23 @@ pub async fn fetch_portal_inner(
         .await
         .map_err(|e| FetchError::internal(format!("could not store jobs: {e}")))?;
 
-    if details_attempted > 0 {
-        tracing::info!(
-            portal = portal_id,
-            jobs = count,
-            attempted = details_attempted,
-            enriched = details_enriched,
-            "enriched job descriptions"
-        );
-    }
+    // One line per fetch call: the tier that ran, how deep it read, and why it
+    // stopped. `pages = 0` means the provider owns pagination (an ATS adapter or
+    // Tier 2) — the same case in which the walk has no cursor to continue from.
+    tracing::info!(
+        portal = portal_id,
+        tier = tier.as_str(),
+        first_page,
+        pages = pages_fetched.unwrap_or(0),
+        jobs = count,
+        details_attempted,
+        details_enriched,
+        stop = pagination_stopped
+            .map(PaginationStop::as_str)
+            .unwrap_or("provider"),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "fetch finished"
+    );
 
     Ok(FetchOutcome {
         jobs_fetched: count,
