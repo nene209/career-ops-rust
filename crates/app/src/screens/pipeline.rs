@@ -62,6 +62,12 @@ pub enum PipelineAction {
     /// Fetch a full description first, then evaluate. WS6 emits this when the
     /// selected row is under the thin-description threshold.
     FetchDescriptionAndEvaluate(i64),
+    /// Write a cover letter for the job. `tone` is a soft register; `None`
+    /// leaves it to the prompt.
+    GenerateCoverLetter {
+        job_id: i64,
+        tone: Option<String>,
+    },
 }
 
 /// How far a running description batch has got.

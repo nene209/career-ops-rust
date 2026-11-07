@@ -1,13 +1,13 @@
-//! What the evaluation pipeline needs from a model.
+//! What a caller needs from a model: one completion.
 //!
-//! The trait exists so the pipeline can be tested without a network or a
-//! cassette: a fake returns a canned JSON object and records the prompts it
-//! was given. [`LlmClient`] is the production implementation, and the only one
-//! that knows about `rig`.
+//! The trait exists so the evaluation and cover-letter pipelines can be tested
+//! without a network or a cassette: a fake returns canned text and records the
+//! prompts it was given. [`LlmClient`] is the production implementation, and
+//! the only one that knows about `rig`.
 
 use async_trait::async_trait;
 
-use crate::llm::{DeltaSink, LlmClient, LlmError};
+use super::{DeltaSink, LlmClient, LlmError};
 
 #[async_trait]
 pub trait CompletionBackend: Send + Sync {
@@ -15,7 +15,7 @@ pub trait CompletionBackend: Send + Sync {
     ///
     /// `model` overrides the client's configured model for this call.
     /// `json_mode` asks the provider to constrain the reply to a JSON object;
-    /// the pipeline still parses and validates it. With `deltas`, the same text
+    /// the caller still parses and validates it. With `deltas`, the same text
     /// is also sent fragment by fragment for display; the return value stays
     /// authoritative.
     async fn complete(

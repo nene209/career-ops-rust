@@ -11,6 +11,31 @@
 
 use std::fmt;
 
+/// The CV summary's own budget, in characters (about 1.5k tokens). The job
+/// text has `llm.max_job_chars`; the CV is the other half of the prompt, and
+/// every flow that fills `{{cv_summary}}` uses this one number.
+pub const MAX_CV_CHARS: usize = 6_000;
+
+/// A character-based token estimate, using the same ~4 characters per token
+/// proxy as the budgets. It is deliberately conservative on the low side: the
+/// point is to refuse an obviously oversized prompt, not to price a call.
+pub fn estimated_tokens(chars: usize) -> usize {
+    chars.div_ceil(4)
+}
+
+/// Keep at most `max` characters, marking the cut with an ellipsis.
+///
+/// Used for a budget the user did not ask for (the CV summary), where silently
+/// dropping the tail would hide that it happened.
+pub fn take_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(max).collect();
+    cut.push('…');
+    cut
+}
+
 /// A variable a Phase 3 prompt may use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Variable {

@@ -16,14 +16,13 @@ use sqlx::SqlitePool;
 use crate::acquisition::manual;
 use crate::acquisition::router::FetchSource;
 use crate::error::{CoreError, Result};
-use crate::llm::{capabilities, DeltaSink, LlmConfig, LlmError};
+use crate::llm::{capabilities, CompletionBackend, DeltaSink, LlmConfig, LlmError};
 use crate::model::{ApplicationStatus, QueueState};
-use crate::prompt_render::{render, Variables};
+use crate::prompt_render::{estimated_tokens, render, take_chars, Variables};
 use crate::repo::evaluation_reports::{self, NewEvaluationReport};
 use crate::repo::{applications, job_descriptions, profile, prompts};
 use crate::text;
 
-use super::backend::CompletionBackend;
 use super::output::{parse as parse_output, EvaluationOutput, Recommendation};
 
 /// The prompt a request uses when it does not name one.
@@ -33,9 +32,8 @@ pub const DEFAULT_PROMPT: &str = "evaluate";
 /// this exists for tests and for a future UI, and a click should stay a click.
 pub const MAX_BATCH: usize = 10;
 
-/// The CV summary's own budget, in characters (about 1.5k tokens). The job text
-/// has `llm.max_job_chars`; the CV is the other half of the prompt.
-pub const MAX_CV_CHARS: usize = 6_000;
+/// The CV summary's own budget, shared with every prompt that sends one.
+pub use crate::prompt_render::MAX_CV_CHARS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvaluationRequest {
@@ -352,20 +350,4 @@ async fn ask(
 
 fn normalized_chars(raw: &str) -> usize {
     text::plain_text(raw, usize::MAX).text.chars().count()
-}
-
-/// A character-based token estimate, using the same ~4 characters per token
-/// proxy as the budgets. It is deliberately conservative on the low side: the
-/// point is to refuse an obviously oversized prompt, not to price a call.
-fn estimated_tokens(chars: usize) -> usize {
-    chars.div_ceil(4)
-}
-
-fn take_chars(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let mut cut: String = text.chars().take(max).collect();
-    cut.push('…');
-    cut
 }

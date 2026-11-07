@@ -7,6 +7,7 @@
 
 pub mod acquisition;
 pub mod backend;
+pub mod cover_letter;
 pub mod db;
 pub mod error;
 pub mod evaluation;

@@ -5,11 +5,10 @@
 //! with its provenance in one transaction. Streaming is optional and only
 //! changes how the reply reaches the screen, never what is stored.
 
-mod backend;
 mod output;
 mod service;
 
-pub use backend::CompletionBackend;
+pub use crate::llm::CompletionBackend;
 pub use output::{parse, EvaluationOutput, Recommendation};
 pub use service::{
     run_batch, run_evaluation, EvaluationRequest, EvaluationResult, DEFAULT_PROMPT, MAX_BATCH,

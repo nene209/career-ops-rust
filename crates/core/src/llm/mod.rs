@@ -22,6 +22,7 @@
 //! - [`retry`]: attempts and delays for transient failures.
 //! - [`keys`]: the OS-keychain namespace. API keys never touch the database.
 
+pub mod backend;
 pub mod capabilities;
 pub mod client;
 pub mod config;
@@ -29,6 +30,7 @@ pub mod error;
 pub mod keys;
 pub mod retry;
 
+pub use backend::CompletionBackend;
 pub use capabilities::{capabilities, ModelCapabilities, StructuredOutput};
 pub use client::{status, DeltaSink, LlmClient, LlmStatus};
 pub use config::{LlmConfig, LlmProvider};

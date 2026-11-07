@@ -37,6 +37,7 @@ use career_ops_core::acquisition::router::{
     FetchError, FetchOutcome, FetchSource, HttpFetchSource, PreviewReport,
 };
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
+use career_ops_core::cover_letter::{self, CoverLetterRequest, CoverLetterResult};
 use career_ops_core::evaluation::{self, EvaluationRequest, EvaluationResult, Recommendation};
 use career_ops_core::llm::{self, LlmConfig, LlmProvider, LlmStatus};
 use career_ops_core::logging::{self, LogHandle, LogLine};
@@ -244,9 +245,14 @@ pub struct CareerOpsApp {
     evaluation_fetched: bool,
     evaluation_deltas: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     evaluation_stream: String,
-    /// A test seam: when set, evaluation uses this backend instead of building
-    /// a provider client from the keychain. Production leaves it `None`.
-    evaluation_backend: Option<Arc<dyn evaluation::CompletionBackend>>,
+    /// A test seam: when set, evaluations and cover letters use this backend
+    /// instead of building a provider client from the keychain. Production
+    /// leaves it `None`.
+    completion_backend: Option<Arc<dyn llm::CompletionBackend>>,
+
+    /// The running cover-letter generation and its job.
+    cover_letter_task: Option<AsyncTask<CoreResult<CoverLetterResult>>>,
+    writing_cover_letter: Option<i64>,
 
     cv_profile: CvProfileViewModel,
     cv_profile_view: CvProfileView,
@@ -358,7 +364,9 @@ impl CareerOpsApp {
             evaluation_fetched: false,
             evaluation_deltas: None,
             evaluation_stream: String::new(),
-            evaluation_backend: None,
+            completion_backend: None,
+            cover_letter_task: None,
+            writing_cover_letter: None,
             cv_profile: CvProfileViewModel::default(),
             cv_profile_view: CvProfileView::default(),
             cv_profile_loaded: false,
@@ -389,16 +397,13 @@ impl CareerOpsApp {
         }
     }
 
-    /// Use `backend` for evaluations instead of building a provider client.
+    /// Use `backend` for model calls instead of building a provider client.
     ///
-    /// The same test seam as [`Self::with_fetch_source`]: the pipeline is real,
-    /// the model is scripted, and no keychain or network is involved. Production
-    /// never calls this.
-    pub fn with_evaluation_backend(
-        mut self,
-        backend: Arc<dyn evaluation::CompletionBackend>,
-    ) -> Self {
-        self.evaluation_backend = Some(backend);
+    /// The same test seam as [`Self::with_fetch_source`]: the pipelines are
+    /// real, the model is scripted, and no keychain or network is involved.
+    /// Production never calls this.
+    pub fn with_completion_backend(mut self, backend: Arc<dyn llm::CompletionBackend>) -> Self {
+        self.completion_backend = Some(backend);
         self
     }
 
@@ -582,6 +587,9 @@ impl CareerOpsApp {
             PipelineAction::Evaluate(job_id) => self.start_evaluation(job_id, false),
             PipelineAction::FetchDescriptionAndEvaluate(job_id) => {
                 self.start_evaluation(job_id, true)
+            }
+            PipelineAction::GenerateCoverLetter { job_id, tone } => {
+                self.start_cover_letter(job_id, tone)
             }
         }
     }
@@ -949,6 +957,8 @@ impl CareerOpsApp {
         self.evaluation_fetched = false;
         self.evaluation_deltas = None;
         self.evaluation_stream.clear();
+        self.cover_letter_task = None;
+        self.writing_cover_letter = None;
 
         self.cv_profile = CvProfileViewModel::default();
         self.cv_profile_view = CvProfileView::default();
@@ -2120,7 +2130,7 @@ impl CareerOpsApp {
         self.evaluation_deltas = Some(deltas_rx);
 
         let fetch_source = Arc::clone(&self.fetch_source);
-        let injected = self.evaluation_backend.clone();
+        let injected = self.completion_backend.clone();
         let task = self.spawn(async move {
             let request = EvaluationRequest {
                 fetch_description_if_thin,
@@ -2255,6 +2265,101 @@ impl CareerOpsApp {
     /// The job whose evaluation is running, if any.
     pub fn evaluating_job(&self) -> Option<i64> {
         self.evaluating_job
+    }
+
+    /// Write a cover letter for one job.
+    ///
+    /// The backend is built here for the same reason as an evaluation: the key
+    /// is read from the keychain and never reaches a database row.
+    fn start_cover_letter(&mut self, job_id: i64, tone: Option<String>) {
+        if self.cover_letter_task.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.pipeline_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.pipeline_error = None;
+        self.pipeline_message = Some("Writing cover letter…".into());
+        self.writing_cover_letter = Some(job_id);
+
+        let injected = self.completion_backend.clone();
+        let task = self.spawn(async move {
+            let request = CoverLetterRequest {
+                tone,
+                ..CoverLetterRequest::new(job_id)
+            };
+
+            if let Some(backend) = injected {
+                return cover_letter::run_cover_letter(&pool, &request, backend.as_ref()).await;
+            }
+
+            let config = LlmConfig::load(&pool).await?;
+            let Some(key) = llm::keys::get_api_key(config.provider)? else {
+                return Err(CoreError::from(llm::LlmError::MissingApiKey {
+                    provider: config.provider,
+                }));
+            };
+            let client = config.build_client(&key)?;
+            cover_letter::run_cover_letter(&pool, &request, &client).await
+        });
+
+        self.cover_letter_task = Some(task);
+    }
+
+    fn poll_cover_letter(&mut self, ctx: &egui::Context) {
+        let poll = match self.cover_letter_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.cover_letter_task = None;
+                let job_id = self.writing_cover_letter.take();
+                match result {
+                    Ok(letter) => {
+                        if let Some(id) = job_id {
+                            if let Some(row) =
+                                self.pipeline.rows.iter_mut().find(|row| row.id == id)
+                            {
+                                // A letter is user-authored state: deleting the
+                                // job must keep the typed gate.
+                                row.has_user_state = true;
+                            }
+                        }
+                        self.pipeline_error = None;
+                        self.pipeline_message = Some(format!(
+                            "Cover letter written ({} characters).",
+                            letter.content.chars().count()
+                        ));
+                    }
+                    Err(error) => {
+                        self.pipeline_message = None;
+                        self.pipeline_error =
+                            Some(format!("Could not write the cover letter: {error}"));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.cover_letter_task = None;
+                self.writing_cover_letter = None;
+                self.pipeline_message = None;
+                self.pipeline_error = Some("The cover letter was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// The job whose cover letter is being written, if any.
+    pub fn writing_cover_letter(&self) -> Option<i64> {
+        self.writing_cover_letter
     }
 
     // ------------------------------------------------------------------
@@ -3039,6 +3144,7 @@ impl eframe::App for CareerOpsApp {
                 self.poll_descriptions_batch(ui.ctx());
                 self.poll_pipeline_delete(ui.ctx());
                 self.poll_evaluation(ui.ctx());
+                self.poll_cover_letter(ui.ctx());
                 self.poll_cv_profile_task(ui.ctx());
                 self.poll_cv_profile_save(ui.ctx());
                 self.poll_cv_profile_entry(ui.ctx());
@@ -4034,6 +4140,7 @@ mod tests {
             app.poll_descriptions_batch(ctx);
             app.poll_pipeline_delete(ctx);
             app.poll_evaluation(ctx);
+            app.poll_cover_letter(ctx);
             app.poll_cv_profile_task(ctx);
             app.poll_cv_profile_save(ctx);
             app.poll_cv_profile_entry(ctx);
@@ -5047,7 +5154,7 @@ mod tests {
             reply: eval_reply(),
         });
         let mut app = CareerOpsApp::with_fetch_source(state, runtime, source)
-            .with_evaluation_backend(backend);
+            .with_completion_backend(backend);
         let ctx = egui::Context::default();
 
         app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
@@ -5132,6 +5239,194 @@ mod tests {
                 .expect("row")
                 .queue_state,
             "evaluated"
+        );
+    }
+
+    /// A generated letter is stored, the row's delete gate follows, and the
+    /// application's status is untouched.
+    #[test]
+    fn writing_a_cover_letter_stores_it_and_updates_the_gate() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::default());
+        let backend = Arc::new(FakeEvalBackend {
+            reply: "Dear Hiring Manager,\n\nI build offline-first software.".into(),
+        });
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source)
+            .with_completion_backend(backend);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        let pool = app.pool().expect("pool");
+        app.runtime()
+            .block_on(profile_repo::update_details(
+                &pool,
+                &ProfileDetails {
+                    name: "Ada Lovelace".into(),
+                    email: "ada@example.com".into(),
+                    phone: None,
+                    location: Some("London".into()),
+                    summary: Some("Mathematician.".into()),
+                },
+            ))
+            .expect("profile");
+
+        let stored = app
+            .runtime()
+            .block_on(job_repo::upsert(
+                &pool,
+                job_repo::NewJobDescription {
+                    title: "Engineer".into(),
+                    company: "Acme".into(),
+                    source_url: "https://example.com/jobs/letter".into(),
+                    raw_text: eval_text(),
+                    fetch_tier: FetchTier::Tier1bHtml,
+                    external_id: None,
+                },
+            ))
+            .expect("store");
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+
+        app.handle_pipeline_action(PipelineAction::GenerateCoverLetter {
+            job_id: stored.id,
+            tone: Some("warm".into()),
+        });
+        wait_until(&mut app, &ctx, |app| app.cover_letter_task.is_none());
+
+        assert!(app.pipeline_error.is_none(), "{:?}", app.pipeline_error);
+        assert!(
+            app.writing_cover_letter().is_none(),
+            "the job is no longer running"
+        );
+        assert!(
+            app.pipeline_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Cover letter written")),
+            "{:?}",
+            app.pipeline_message
+        );
+        assert!(
+            app.pipeline.rows[0].has_user_state,
+            "a stored letter makes deleting the row a gated action"
+        );
+
+        let application = app
+            .runtime()
+            .block_on(application_repo::ensure(&pool, stored.id))
+            .expect("ensure");
+        assert_eq!(application.status, "discovered", "a letter moves nothing");
+        let letters = app
+            .runtime()
+            .block_on(career_ops_core::repo::cover_letters::list_for_application(
+                &pool,
+                application.id,
+            ))
+            .expect("list");
+        assert_eq!(letters.len(), 1);
+        assert!(letters[0].content.starts_with("Dear Hiring Manager"));
+    }
+
+    /// Without a key and without the test seam, the failure names the missing
+    /// key instead of surfacing a transport error.
+    #[test]
+    fn writing_a_cover_letter_without_a_key_fails_cleanly() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+        // The mock keychain is process-global; another test may have saved one.
+        llm::keys::delete_api_key(LlmProvider::DeepSeek).expect("clean slate");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut app =
+            CareerOpsApp::with_fetch_source(state, runtime, Arc::new(StubFetchSource::default()));
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        let pool = app.pool().expect("pool");
+        let stored = app
+            .runtime()
+            .block_on(job_repo::upsert(
+                &pool,
+                job_repo::NewJobDescription {
+                    title: "Engineer".into(),
+                    company: "Acme".into(),
+                    source_url: "https://example.com/jobs/no-key".into(),
+                    raw_text: eval_text(),
+                    fetch_tier: FetchTier::Tier1bHtml,
+                    external_id: None,
+                },
+            ))
+            .expect("store");
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+
+        app.handle_pipeline_action(PipelineAction::GenerateCoverLetter {
+            job_id: stored.id,
+            tone: None,
+        });
+        wait_until(&mut app, &ctx, |app| app.cover_letter_task.is_none());
+
+        assert!(
+            app.pipeline_error
+                .as_deref()
+                .is_some_and(|error| error.contains("no API key")),
+            "{:?}",
+            app.pipeline_error
         );
     }
 

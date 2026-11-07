@@ -11,6 +11,7 @@
 //!   - templates     (versioned, same shape as prompts)
 
 pub mod applications;
+pub mod cover_letters;
 pub mod cv_entries;
 pub mod evaluation_reports;
 pub mod job_descriptions;
