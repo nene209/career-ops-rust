@@ -1,6 +1,6 @@
 # Phase 3.2: Assisted Triage — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.14), §12
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.22), §12
 **Status:** Planned — not started
 **Last updated:** 2026-11-06
 **Duration:** 5–7 days
@@ -15,6 +15,7 @@
 | :--- | :--- |
 | v0.1 | Initial plan. Adds LLM-assisted triage on top of Phase 2.9's manual queue, and suggest-and-approve portal additions on top of Phase 2.6's registry. Every action is advisory: the agent proposes, the user approves. It is explicitly not an autonomous agent, and it does not add web search, an aggregator, or autonomous portal addition. One migration (0007) for triage provenance. |
 | v0.2 | The queue phase was renumbered from 3.1 to **Phase 2.9** and now lands before Phase 3, so this plan depends on 2.9 (queue, preferences) and Phase 3 (`rig`) rather than on a phase that came after it. Migration 0007 is unchanged: 2.9 takes 0005, Phase 3 takes 0006. |
+| v0.3 | Phase 2.9 shipped, so the two inputs this plan only assumed are now code. **The queue exists** (`job_descriptions.queue_state`, migration 0005) with the three values triage writes, and a row is hidden from the default view once it is `dismissed`, which is what makes a triage decision reviewable rather than destructive. **`manual::fetch_descriptions_batch` exists** (20 per click, cancellable, `details_needed` → `evaluate`), so a `worth_details` decision has a batch to hand the work to instead of a second implementation. `PipelineViewModel::set_queue` updates one row in place, and `set_queue_states` writes a batch, so the review UI can apply accepted decisions without a reload. Entry Conditions records all of it. |
 
 ---
 
@@ -50,6 +51,21 @@ The distinction is deliberate and comes from Phase 2's trust model: every fetch 
 | Portal suggestions with a review modal (approve → add portal) | Automatic approval based on confidence |
 | Cassette-backed triage tests; live-gated portal suggestion test | A second LLM provider dedicated to triage |
 | Docs, verification, retrospective | A change to `applications.status` semantics |
+
+---
+
+## Entry Conditions
+
+| Input | State |
+| :--- | :--- |
+| Phase 3's `core::llm` | Client construction, capability registry, error taxonomy, and cassette test patterns. Triage reuses them; it adds no client code of its own. |
+| **Phase 2.9's queue** | ✅ Shipped. `job_descriptions.queue_state` holds `new` / `details_needed` / `evaluate` / `dismissed` / `evaluated`; the Pipeline detail view sets the first three by hand, and Phase 3's report write sets `evaluated` in the same transaction. Triage writes the same three values through `job_descriptions::set_queue_states`, which is one transaction for the whole decision set. |
+| **Phase 2.9's preferences** | ✅ Shipped. `repo::profile::preferences` reads the five lists the triage prompt derives from. They are advisory input to the prompt only: nothing here infers preferences. |
+| **Phase 2.9's description batch** | ✅ Shipped. `manual::fetch_descriptions_batch(pool, ids, source, cancel, progress)` is what a `worth_details` decision hands work to; the review UI does not need a second implementation of it. Its entries carry the stored text, so an accepted row can be re-rendered without a reload. |
+| **The Pipeline's row updates** | ✅ `PipelineViewModel::set_queue(id, state)` updates one loaded row and reports a stale id; the review UI uses it, or reloads when it returns `false`. |
+| `docs/LIVE_TESTS.md` conventions | Triage's live provider test is indexed there, `#[ignore]`d or env-gated, and never runs in the default offline suite. |
+
+**Triage runs on rows a portal already fetched.** Phase 2.9's queue is the review surface, and its `dismissed` state is what makes an agent decision reversible without deleting anything.
 
 ---
 

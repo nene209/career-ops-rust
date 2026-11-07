@@ -146,8 +146,8 @@ otherwise.
 | # | Step | Expected |
 | :-- | :--- | :--- |
 | 6.1 | ✅ Look at the list after 5.5. | One row per job: `Title — Company`, a tier label (ATS / HTML / Tier 2 / Manual), the status badge when an application exists, and a relative time. The header shows "N jobs". |
-| 6.2 | ✅ Click each filter: All, Not applied, Applied, Rejected, Not a match. | The list narrows without a reload. A filter with no matches shows "No jobs match this filter". |
-| 6.3 | ✅ Click a row. | The detail view replaces the list: title, company, tier, status, "Fetched …", the source URL in monospace, and the description as plain text (HTML tags are not shown). |
+| 6.2 | ✅ Click each filter: All, Preferred, Excluded, Not applied, Applied, Rejected, Not a match, Dismissed. | The list narrows without a reload. A filter with no matches shows "No jobs match this filter". **All** hides rows from an excluded company and rows you dismissed; **Excluded** and **Dismissed** are the only views that show them. |
+| 6.3 | ✅ Click a row. | The detail view replaces the list: title, company, tier, status, "Fetched …", the source URL in monospace, and the description as plain text (HTML tags are not shown). Below the title there is a **Queue** row with **Mark for details**, **Mark for evaluation**, and **Dismiss**. |
 | 6.4 | ✅ Hover **Evaluate** and **Generate cover letter**. | Both are disabled and the tooltip says "Available in a later phase". |
 | 6.5 | ✅ Click **Back to list**. | The list returns with the filter you had selected and the same scroll position you left. |
 | 6.6 | ✅ Open a detail view, then click a different filter. | The list returns (the filter applies to the list). |
@@ -175,6 +175,23 @@ otherwise.
 | 6a.10 | ✅ Click **Delete** on an entry, then **Cancel**. | "Delete this entry?" disappears, the row stays, and nothing is written. |
 | 6a.11 | ✅ Click **Delete** again and then **Confirm delete**. | The row and its trailing separator disappear, the header reports "Entry deleted.", and the preview drops the entry. |
 | 6a.12 | ✅ Delete every entry, clear the fields, and click **Save profile**. | The preview returns to the placeholder sentence: an empty profile is `None`, not an empty section. Reopening the screen shows the empty editor, not a spinner or an error. |
+
+## 6b. Preferences and Queue
+
+Two settings and three queue actions: the Pipeline answers "which of these do I
+care about?" (badges, never hidden rows) and "what do I want done with this
+one?" (a state that later batches and Phase 3 read).
+
+| # | Step | Expected |
+| :-- | :--- | :--- |
+| 6b.1 | Select **Settings**, fill in **Preferred companies** with a company that has jobs on the Pipeline, **Preferred locations** with a word that appears in a posting (for example `remote`), and **Excluded companies** with a company you do have jobs from. Click **Save preferences**. | A spinner runs and the header reports "Preferences saved." **Save preferences** disables, and leaving the screen and returning keeps every list. Re-spacing a list (`Acme, Beta` → `Acme ,  Beta`) does not count as a change. |
+| 6b.2 | Return to **Pipeline**. | Rows from a preferred company or matching a keyword show a small **Preferred** badge, and the header adds one line: "N preferred of M shown." when something is configured. Rows from an excluded company are gone from **All**, and the line ends "; 1 excluded company hidden." (or the plural). With nothing configured the line is absent, not "0 preferred". |
+| 6b.3 | Click **Preferred**, then **Excluded**. | **Preferred** shows exactly the badged rows; **Excluded** shows exactly the hidden rows, so the decision can be seen and reversed. Changing a preference back in Settings re-badges the loaded list without a reload. |
+| 6b.4 | Open a row's detail view and click **Mark for details**. | The row's metadata gains a "Details needed" badge and the header reports "Marked for details." The action is replaced by a disabled "Details needed" button, so a second click has nothing to do. **Mark for evaluation** and **Dismiss** behave the same way with their own labels. |
+| 6b.5 | With at least one row marked for details, look at the Pipeline header and click **Fetch descriptions (N)**. 🌐 | The button counts the flagged rows and is disabled at 0. While the batch runs the header shows "Descriptions: k of N…", the number that failed if any, and **Stop**. Afterwards: "Fetched N of N descriptions.", each fetched row's badge becomes "Evaluate", and the detail view shows the full text (the batch replaces a card teaser). A batch over 20 rows says "… still flagged; click again for the next batch." |
+| 6b.6 | Flag several rows, start **Fetch descriptions**, and press **Stop**. | The batch stops between postings (at most the one in flight completes), the header reports "Stopped after X of Y descriptions.", and the rows it did not reach stay "Details needed". |
+| 6b.7 | Open a row's detail view and click **Dismiss**. | The header reports "Dismissed. Find it again under the Dismissed filter.", the detail view returns to the list, and the row disappears from **All** but is still there under **Dismissed**. Nothing is deleted: a portal fetch does not need to bring it back. |
+| 6b.8 | Flag a row whose posting page has no extractable description (a dead or blocked URL) and run **Fetch descriptions**. 🌐 | The header reports how many failed and exits with the first cause, e.g. "One description could not be fetched: …", and that row is still badged "Details needed". The Logs screen has one `description fetch failed` line naming the job and the cause. |
 
 ## 7. Idle behaviour
 
