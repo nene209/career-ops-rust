@@ -38,10 +38,9 @@ pub struct NewPortal {
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Portal>> {
-    let rows =
-        sqlx::query_as::<_, Portal>("SELECT * FROM portals ORDER BY company_name ASC")
-            .fetch_all(pool)
-            .await?;
+    let rows = sqlx::query_as::<_, Portal>("SELECT * FROM portals ORDER BY company_name ASC")
+        .fetch_all(pool)
+        .await?;
     Ok(rows)
 }
 
@@ -80,7 +79,9 @@ pub async fn create(pool: &SqlitePool, input: NewPortal) -> Result<Portal> {
     .fetch_one(pool)
     .await?;
 
-    get(pool, id).await?.ok_or(CoreError::Internal("portals::create"))
+    get(pool, id)
+        .await?
+        .ok_or(CoreError::Internal("portals::create"))
 }
 
 pub async fn update(pool: &SqlitePool, id: i64, input: NewPortal) -> Result<Portal> {
@@ -107,7 +108,9 @@ pub async fn update(pool: &SqlitePool, id: i64, input: NewPortal) -> Result<Port
         return Err(CoreError::Internal("portals::update: row not found"));
     }
 
-    get(pool, id).await?.ok_or(CoreError::Internal("portals::update"))
+    get(pool, id)
+        .await?
+        .ok_or(CoreError::Internal("portals::update"))
 }
 
 pub async fn delete(pool: &SqlitePool, id: i64) -> Result<()> {
@@ -118,12 +121,83 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> Result<()> {
     Ok(())
 }
 
-pub async fn mark_verified(pool: &SqlitePool, id: i64) -> Result<()> {
+/// Record the outcome of a fetch attempt.
+///
+/// Always updates `last_fetch_attempt_at`. On success (`cause` is
+/// `None`), also updates `last_verified_at` and clears
+/// `last_failure_cause`. On failure, `last_verified_at` is left
+/// untouched — it records the last *successful* fetch, which is
+/// different from the last *attempted* one.
+///
+/// Supersedes the older `mark_verified`, which only handled the success
+/// path. Folding the two into one method means the three columns are
+/// always updated together, and there is no way to record a success
+/// without also recording the attempt.
+pub async fn record_fetch_attempt(
+    pool: &SqlitePool,
+    id: i64,
+    failure_cause: Option<&str>,
+) -> Result<()> {
     let now: DateTime<Utc> = Utc::now();
-    sqlx::query("UPDATE portals SET last_verified_at = ? WHERE id = ?")
-        .bind(now)
+
+    match failure_cause {
+        None => {
+            sqlx::query(
+                "UPDATE portals
+                 SET last_fetch_attempt_at = ?,
+                     last_verified_at = ?,
+                     last_failure_cause = NULL
+                 WHERE id = ?",
+            )
+            .bind(now)
+            .bind(now)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        }
+        Some(cause) => {
+            sqlx::query(
+                "UPDATE portals
+                 SET last_fetch_attempt_at = ?,
+                     last_failure_cause = ?
+                 WHERE id = ?",
+            )
+            .bind(now)
+            .bind(cause)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Record how far the list has been read, for a later **Fetch more**.
+pub async fn set_last_page_fetched(pool: &SqlitePool, id: i64, page: i64) -> Result<()> {
+    sqlx::query("UPDATE portals SET last_page_fetched = ? WHERE id = ?")
+        .bind(page.max(0))
         .bind(id)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// Raise the continuation cursor, never lower it.
+///
+/// A page-one fetch reads the top of the list and must not rewind a crawl that
+/// already reached deeper pages; only the pages it actually read beyond the
+/// stored cursor may move it. The comparison happens in SQL so two concurrent
+/// runs cannot lose the deeper value.
+pub async fn set_last_page_fetched_at_least(pool: &SqlitePool, id: i64, page: i64) -> Result<()> {
+    let page = page.max(0);
+    sqlx::query(
+        "UPDATE portals SET last_page_fetched = ?\n         WHERE id = ? AND last_page_fetched < ?",
+    )
+    .bind(page)
+    .bind(id)
+    .bind(page)
+    .execute(pool)
+    .await?;
     Ok(())
 }

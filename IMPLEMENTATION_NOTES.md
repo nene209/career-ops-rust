@@ -36,25 +36,64 @@ views are placeholders.
 
 ## What is stubbed
 
-- **GPUI views** — `crates/app/src/screens.rs` is placeholder text. The
-  state machine is real; the rendering is not.
-- **`data_dir()`** — reads `CAREER_OPS_DATA_DIR` from the environment. In
-  production, use the `directories` crate.
-- **Prompt and template seeding** — the mechanism exists
-  (`prompts::seed_if_empty`), but the embedded prompt list from
-  `modes/*.md` is not wired in. Enumerate the original project's files and
-  add them to the `SYSTEM_PROMPTS` constant.
-- **Recovery screen actions** — the state exists; the five actions
-  (unlock, retry, locate, export, reset) are not wired to UI events.
-- **First-launch wizard content** — the passphrase and acknowledgement
-  steps are described, not rendered.
-- **Keychain mock setup** — tests use `keyring::mock`; production builds
-  use the platform backend via the `keychain` feature. The sentinel test
-  guards against missing platform features.
+- **Template seeding** — the `templates` table and repository are in place,
+  but no template `.html` files exist yet. Seeding a template system is a
+  **Phase 4** deliverable, and Phase 4 should model it on `prompts_seed.rs`
+  (update-aware seeding) rather than the current
+  `templates::seed_if_empty` pattern, which does not handle content
+  changes across releases.
 - **Argon2id tuning** — parameters are the RustCrypto Book minimums
   (19 MiB, 2 iterations, 1 parallelism). They are safe but may not hit the
   250–500 ms target on all hardware. Benchmark on your target hardware
   before tuning (Q-3).
+
+## What is now implemented (moved out of "stubbed" since the first draft)
+
+- **`data_dir()`** — Phase 2.1 Workstream 1 resolves the OS-specific app data
+  directory via the `directories` crate. `CAREER_OPS_DATA_DIR` remains as a
+  development override.
+- **eframe shell** — `CareerOpsApp` runs the egui event loop, owns the tokio
+  runtime, renders the sidebar, and switches the central panel through
+  `NavigationState`.
+- **Lock screens** — Phase 2.1 Workstream 2 renders unlock, first-launch, and
+  recovery. Lock views return a `LockAction`; `CareerOpsApp` moves `AppState`
+  into the async task, restores it with the result, and applies the
+  filesystem recovery actions.
+- **Portals screen** — Phase 2.1 Workstream 3 renders the portal list with
+  health and sidecar badges, add/edit/delete forms, fetch-one, cancellable
+  batch fetch with progress, and the manual-entry modal. The app owns the
+  fetch source, browser backend, one `PortalsTask`, and the batch progress
+  channel; `fetch_batch_cancellable` stops between portals.
+- **Pipeline screen** — Phase 2.1 Workstream 4 renders the 500 most recent
+  jobs with tier labels and application-status badges, four client-side
+  filters, and a read-only detail view whose "Evaluate" and "Generate
+  cover letter" buttons are disabled until Phase 3. The load task joins
+  `job_descriptions::list_recent` with `applications::list`; the screen never
+  reads the database. The manual-entry modal is app-level chrome
+  (`portals::show_modal`), rendered after the active screen, so Portals and
+  Pipeline share one dialog. A successful manual add invalidates the loaded
+  page.
+
+- **Prompt seeding** — `crates/core/src/prompts_seed.rs` embeds the
+  original `modes/*.md` files at compile time and seeds them into the
+  `prompts` table. The seeding function is update-aware: it inserts new
+  versions when content changes between releases, preserving historical
+  reports that reference old content hashes. Wired into
+  `AppState::post_unlock` and `AppState::complete_first_launch`, non-fatal
+  on failure so a prompt-seeding error does not block the pipeline UI.
+- **Repositories** — `cv_entries`, `applications`, `job_descriptions`,
+  `portals`, `settings`, `templates`, `profile`, and `prompts` are all
+  implemented. `job_descriptions` includes content-hash dedup (added in
+  Phase 1 to remove the Phase 2 migration the original plan assumed).
+  `applications` enforces the human-in-the-loop invariant at the
+  repository layer: `mark_applied` is the only path to `applied`, and it
+  requires the current status to be `ready`.
+- **Test harness** — `crates/core/tests/common/mod.rs` provides
+  `TestDb::new_raw()` (no keystore, works without the `keychain` feature)
+  and `TestDb::new_via_keystore()` (full keystore flow, requires
+  `keychain`). Integration tests for prompt seeding are in
+  `crates/core/tests/prompts_seed.rs`.
+- **Keychain mock** — `setup_keyring_mock()` in the shared harness.
 
 ## Known risks to resolve during compilation
 
@@ -80,6 +119,13 @@ views are placeholders.
 6. **`sqlx::migrate!("./migrations")` path.** The macro resolves relative
    to `CARGO_MANIFEST_DIR` of the crate that invokes it. The path
    `./migrations` is correct for `crates/core`.
+7. **`templates::seed_if_empty` uses the pre-`prompts_seed.rs` pattern.**
+   It seeds only when the table is empty and does not handle content
+   changes across releases. Phase 4 must replace it with
+   `seed_or_update_system_templates` modeled on `prompts_seed.rs`, or the
+   same "how do we ship a template change in a new release?" problem will
+   surface. This is a Phase 4 concern, not a Phase 1 blocker, but it
+   should be tracked in the Phase 4 plan.
 
 ## What "done" would look like
 

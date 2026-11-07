@@ -1,0 +1,10 @@
+[package]
+name = "gpui-kit-unlock-spike"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gpui-kit = { git = "https://github.com/longbridge/gpui-kit", features = ["test-support"] }
+
+[dev-dependencies]
+gpui-kit = { git = "https://github.com/longbridge/gpui-kit", features = ["test-support"] }

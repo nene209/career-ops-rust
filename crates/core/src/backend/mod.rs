@@ -13,6 +13,16 @@ use url::Url;
 
 use crate::error::{CoreError, Result};
 
+pub mod obscura;
+
+#[cfg(feature = "chromium-fallback")]
+pub mod chromium;
+
+pub use obscura::{ObscuraBrowserBackend, ObscuraConfig};
+
+#[cfg(feature = "chromium-fallback")]
+pub use chromium::{ChromiumConfig, ChromiumoxideBrowserBackend};
+
 #[derive(Debug, Clone, Default)]
 pub struct RenderOpts {
     pub wait_for_selector: Option<String>,
@@ -38,7 +48,7 @@ pub struct PdfOptions {
 impl Default for PdfOptions {
     fn default() -> Self {
         Self {
-            page_width_mm: 210.0,  // A4
+            page_width_mm: 210.0, // A4
             page_height_mm: 297.0,
             margin_mm: 10.0,
             print_background: false,
@@ -51,13 +61,22 @@ impl Default for PdfOptions {
 pub trait BrowserBackend: Send + Sync {
     async fn fetch_rendered(&self, url: &Url, opts: RenderOpts) -> Result<RenderedPage>;
 
-    /// Default implementation returns `BackendUnsupported`. Implementations
-    /// that cannot render PDFs (Obscura) can rely on this default.
     async fn print_to_pdf(&self, _html: &str, _opts: PdfOptions) -> Result<Vec<u8>> {
-        Err(CoreError::BackendUnsupported("print_to_pdf not implemented"))
+        Err(CoreError::BackendUnsupported(
+            "print_to_pdf not implemented",
+        ))
     }
 
     fn name(&self) -> &'static str;
+
+    /// Gracefully shut down the backend. Default is a no-op.
+    ///
+    /// Implementations that own a subprocess should send SIGTERM, wait
+    /// for exit, and escalate to SIGKILL after a timeout. Called by
+    /// `AppState` on application exit.
+    async fn shutdown(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -82,7 +101,9 @@ impl BrowserBackend for MockBrowserBackend {
 
     async fn print_to_pdf(&self, _html: &str, _opts: PdfOptions) -> Result<Vec<u8>> {
         if self.pdf_unsupported {
-            Err(CoreError::BackendUnsupported("mock: print_to_pdf not supported"))
+            Err(CoreError::BackendUnsupported(
+                "mock: print_to_pdf not supported",
+            ))
         } else {
             Ok(b"%PDF-mock".to_vec())
         }

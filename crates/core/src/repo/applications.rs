@@ -27,11 +27,10 @@ pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<Application>> {
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Application>> {
-    let rows = sqlx::query_as::<_, Application>(
-        "SELECT * FROM applications ORDER BY updated_at DESC",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows =
+        sqlx::query_as::<_, Application>("SELECT * FROM applications ORDER BY updated_at DESC")
+            .fetch_all(pool)
+            .await?;
     Ok(rows)
 }
 
@@ -62,29 +61,28 @@ pub async fn create(pool: &SqlitePool, job_description_id: i64) -> Result<Applic
     .bind(now)
     .fetch_one(pool)
     .await?;
-    get(pool, id).await?.ok_or(CoreError::Internal("applications::create"))
+    get(pool, id)
+        .await?
+        .ok_or(CoreError::Internal("applications::create"))
 }
 
 /// Move an application to a new status.
 ///
 /// Rejects `to == Applied` with a clear error — use `mark_applied` instead.
 /// Uses compare-and-set on the current status to avoid a lost-update race.
-pub async fn transition(
-    pool: &SqlitePool,
-    id: i64,
-    to: ApplicationStatus,
-) -> Result<Application> {
+pub async fn transition(pool: &SqlitePool, id: i64, to: ApplicationStatus) -> Result<Application> {
     if to == ApplicationStatus::Applied {
         return Err(CoreError::Internal(
             "applications::transition cannot reach 'applied'; use mark_applied",
         ));
     }
 
-    let current = get(pool, id)
-        .await?
-        .ok_or(CoreError::Internal("applications::transition: row not found"))?;
-    let current_status = ApplicationStatus::parse(&current.status)
-        .ok_or(CoreError::Internal("applications::transition: unknown current status"))?;
+    let current = get(pool, id).await?.ok_or(CoreError::Internal(
+        "applications::transition: row not found",
+    ))?;
+    let current_status = ApplicationStatus::parse(&current.status).ok_or(CoreError::Internal(
+        "applications::transition: unknown current status",
+    ))?;
 
     if !is_valid_transition(current_status, to) {
         return Err(CoreError::Internal(
@@ -110,9 +108,9 @@ pub async fn transition(
         ));
     }
 
-    get(pool, id)
-        .await?
-        .ok_or(CoreError::Internal("applications::transition: row vanished"))
+    get(pool, id).await?.ok_or(CoreError::Internal(
+        "applications::transition: row vanished",
+    ))
 }
 
 /// Mark an application as applied. The only path to `applied`.
@@ -137,9 +135,9 @@ pub async fn mark_applied(pool: &SqlitePool, id: i64) -> Result<Application> {
         ));
     }
 
-    get(pool, id)
-        .await?
-        .ok_or(CoreError::Internal("applications::mark_applied: row vanished"))
+    get(pool, id).await?.ok_or(CoreError::Internal(
+        "applications::mark_applied: row vanished",
+    ))
 }
 
 pub async fn set_match_score(pool: &SqlitePool, id: i64, score: f64) -> Result<()> {
@@ -158,14 +156,12 @@ pub async fn set_match_score(pool: &SqlitePool, id: i64, score: f64) -> Result<(
 
 pub async fn attach_report(pool: &SqlitePool, id: i64, report_id: i64) -> Result<()> {
     let now: DateTime<Utc> = Utc::now();
-    sqlx::query(
-        "UPDATE applications SET evaluation_report_id = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(report_id)
-    .bind(now)
-    .bind(id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE applications SET evaluation_report_id = ?, updated_at = ? WHERE id = ?")
+        .bind(report_id)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -198,20 +194,55 @@ fn is_valid_transition(from: ApplicationStatus, to: ApplicationStatus) -> bool {
         (Discovered, Evaluating)
             | (Discovered, Ready)
             | (Discovered, Rejected)
+            | (Discovered, NotAMatch)
             | (Evaluating, Discovered)
             | (Evaluating, Ready)
             | (Evaluating, Rejected)
+            | (Evaluating, NotAMatch)
             | (Ready, Discovered)
             | (Ready, Evaluating)
             | (Ready, Rejected)
+            | (Ready, NotAMatch)
             | (Applied, Ready)
             | (Applied, Interviewing)
             | (Applied, Rejected)
-            | (Interviewing, Applied)
             | (Interviewing, Offer)
             | (Interviewing, Rejected)
             | (Rejected, Discovered)
+            | (NotAMatch, Discovered)
     )
+}
+
+/// The application for a job, creating it in `discovered` if absent.
+///
+/// Phase 2 never created one in production; this is the first writer. A second
+/// call returns the existing row rather than a second application.
+pub async fn ensure(pool: &SqlitePool, job_description_id: i64) -> Result<Application> {
+    let existing = sqlx::query_as::<_, Application>(
+        "SELECT * FROM applications
+         WHERE job_description_id = ?
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(job_description_id)
+    .fetch_optional(pool)
+    .await?;
+
+    match existing {
+        Some(application) => Ok(application),
+        None => create(pool, job_description_id).await,
+    }
+}
+
+/// Mark the job's application as `not_a_match`, creating the row if needed.
+///
+/// Idempotent: an application already in that state is returned unchanged.
+pub async fn mark_not_a_match(pool: &SqlitePool, job_description_id: i64) -> Result<Application> {
+    let application = ensure(pool, job_description_id).await?;
+    if application.status == ApplicationStatus::NotAMatch.as_str() {
+        return Ok(application);
+    }
+
+    transition(pool, application.id, ApplicationStatus::NotAMatch).await
 }
 
 #[cfg(test)]
@@ -234,6 +265,7 @@ mod tests {
             ApplicationStatus::Interviewing,
             ApplicationStatus::Rejected,
             ApplicationStatus::Offer,
+            ApplicationStatus::NotAMatch,
         ] {
             assert!(
                 !is_valid_transition(from, ApplicationStatus::Applied),
@@ -268,6 +300,22 @@ mod tests {
                 "Offer must be terminal; {to:?} should not be reachable"
             );
         }
+    }
+
+    #[test]
+    fn not_a_match_is_reachable_before_applying_and_reversible() {
+        use ApplicationStatus::*;
+
+        for from in [Discovered, Evaluating, Ready] {
+            assert!(is_valid_transition(from, NotAMatch), "{from:?}");
+        }
+        assert!(
+            !is_valid_transition(Applied, NotAMatch),
+            "a submitted application is not a mis-filed posting"
+        );
+        assert!(!is_valid_transition(Interviewing, NotAMatch));
+        assert!(!is_valid_transition(Offer, NotAMatch));
+        assert!(is_valid_transition(NotAMatch, Discovered));
     }
 
     #[test]

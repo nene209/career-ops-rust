@@ -1,38 +1,55 @@
-//! Career-Ops desktop application — Phase 1 skeleton.
+//! Career-Ops desktop application entry point.
 //!
-//! The state machine (`state.rs`) is fully implemented and testable without
-//! GPUI. The GPUI view layer (`screens.rs`) is a placeholder. When GPUI's
-//! API stabilises, the views will be filled in against the same state.
-
-mod screens;
-mod state;
+//! Phase 2.1 Workstream 1 replaces the Phase 1 state-bootstrap placeholder
+//! with the `eframe::run_native` entry point. The framework-independent
+//! pieces — `AppState`, `NavigationState`, `AsyncTask` — live in the library
+//! and are tested without a window.
 
 use anyhow::Result;
-use tracing_subscriber::EnvFilter;
-
-use state::AppState;
+use career_ops_app::app::CareerOpsApp;
+use career_ops_app::state::AppState;
+use career_ops_core::logging::{self, LogMode};
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    // The file sink and the in-process buffer, from one `tracing` seam. This
+    // must run before anything else so the bootstrap is recorded too; stderr
+    // alone was invisible for a windowed build.
+    let logs = logging::init(LogMode::File);
 
     let data_dir = career_ops_core::data_dir();
+    // One line that makes a bug report reproducible: which build, which data
+    // directory, and where the log for it is.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        profile = if cfg!(debug_assertions) { "debug" } else { "release" },
+        data_dir = %data_dir.display(),
+        log = %logs
+            .path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<in-app buffer only>".to_string()),
+        "career-ops starting"
+    );
 
-    // Phase 1: construct the state machine. The GPUI event loop is where the
-    // view rendering would attach — see `screens.rs`.
-    let mut state = AppState::bootstrap(data_dir)?;
+    let state = AppState::bootstrap(data_dir)?;
 
-    // In the finished application, this would be:
-    //     gpui::Application::new().run(move |cx| {
-    //         cx.open_window(Default::default(), |_window, cx| {
-    //             cx.new(|_cx| screens::RootView::new(state))
-    //         });
-    //     });
-    //
-    // Left commented out because GPUI's API is pre-1.0 and the exact call
-    // signature is unstable.
-    tracing::info!(state = ?state.current(), "app state initialized");
+    // The runtime lives for the whole process. Screens spawn service-layer
+    // work on it and poll the result from `eframe::App::ui`.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1024.0, 720.0])
+            .with_min_inner_size([640.0, 480.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Career-Ops",
+        options,
+        Box::new(move |_cc| Ok(Box::new(CareerOpsApp::new(state, runtime)))),
+    )?;
 
     Ok(())
 }

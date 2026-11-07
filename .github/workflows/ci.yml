@@ -2,9 +2,13 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
 
+# Cache saves are restricted to main and dev. Pull requests and any
+# other branches restore from cache but do not write new entries.
 jobs:
   test:
     name: test (${{ matrix.os }})
@@ -16,6 +20,72 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
+      # Obscura is only needed by the obscura_spike test. It is cached
+      # per (os, arch) because the binary is platform-specific.
+      - name: Cache Obscura binary
+        id: cache-obscura
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: obscura-${{ runner.os }}-${{ runner.arch }}-v0.2.5
+
+      - name: Download Obscura
+        if: steps.cache-obscura.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p vendor
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)     PATTERN="obscura-x86_64-linux*" ;;
+            Linux-ARM64)   PATTERN="obscura-aarch64-linux*" ;;
+            macOS-X64)     PATTERN="obscura-x86_64-macos*" ;;
+            macOS-ARM64)   PATTERN="obscura-aarch64-macos*" ;;
+            Windows-X64)   PATTERN="obscura-x86_64-windows*" ;;
+            *) echo "Unsupported runner: ${{ runner.os }}/${{ runner.arch }}" >&2; exit 1 ;;
+          esac
+          gh release download \
+            --repo h4ckf0r0day/obscura \
+            --pattern "$PATTERN" \
+            --dir /tmp/obscura-archive
+          ARCHIVE=$(find /tmp/obscura-archive -type f | head -n1)
+          case "$ARCHIVE" in
+            *.tar.gz|*.tgz) tar -xzf "$ARCHIVE" -C vendor ;;
+            *.zip)          unzip -o "$ARCHIVE" -d vendor ;;
+            *) echo "Unknown archive: $ARCHIVE" >&2; exit 1 ;;
+          esac
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Configure Obscura binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f vendor/obscura.exe ]; then
+            BIN="$(pwd)/vendor/obscura.exe"
+          elif [ -f vendor/obscura ]; then
+            chmod +x vendor/obscura
+            BIN="$(pwd)/vendor/obscura"
+          else
+            echo "::error::Obscura binary not found in vendor/"
+            ls -la vendor/ || true
+            exit 1
+          fi
+          if [ ! -s "$BIN" ]; then
+            echo "::error::Obscura binary is empty at $BIN"
+            exit 1
+          fi
+          # Git Bash on Windows returns POSIX paths like /d/a/repo/repo
+          # from $(pwd). Bash can use them; Rust's Command::new cannot.
+          # cygpath -w converts to a native path like D:\a\repo\repo.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN="$(cygpath -w "$BIN")"
+          fi
+          echo "OBSCURA_BIN=$BIN" >> "$GITHUB_ENV"
+          echo "Obscura binary ready at $BIN"
 
       - name: Install Linux deps (libsecret, openssl)
         if: runner.os == 'Linux'
@@ -26,18 +96,113 @@ jobs:
       - name: cargo test (keychain feature enabled)
         run: cargo test --workspace --features career-ops-app/keychain
 
-  test-no-secret-service:
-    name: test (no secret service, Linux)
+  # Verifies that career-ops-core compiles and its tests pass when the
+  # optional `keyring` dependency is not linked in. This is a compile-time
+  # property, not a runtime one: it confirms the crate's code does not
+  # accidentally depend on the keychain feature being present.
+  #
+  # Also needs Obscura, because `obscura_spike` is part of the
+  # career-ops-core test suite and does not depend on any feature flag.
+  test-no-keychain-feature:
+    name: test (no keychain feature, Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
+      - name: Cache Obscura binary
+        id: cache-obscura
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: obscura-${{ runner.os }}-${{ runner.arch }}-v0.2.5
+
+      - name: Download Obscura
+        if: steps.cache-obscura.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p vendor
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)     PATTERN="obscura-x86_64-linux*" ;;
+            Linux-ARM64)   PATTERN="obscura-aarch64-linux*" ;;
+            *) echo "Unsupported runner: ${{ runner.os }}/${{ runner.arch }}" >&2; exit 1 ;;
+          esac
+          gh release download \
+            --repo h4ckf0r0day/obscura \
+            --pattern "$PATTERN" \
+            --dir /tmp/obscura-archive
+          ARCHIVE=$(find /tmp/obscura-archive -type f | head -n1)
+          case "$ARCHIVE" in
+            *.tar.gz|*.tgz) tar -xzf "$ARCHIVE" -C vendor ;;
+            *.zip)          unzip -o "$ARCHIVE" -d vendor ;;
+            *) echo "Unknown archive: $ARCHIVE" >&2; exit 1 ;;
+          esac
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Configure Obscura binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f vendor/obscura.exe ]; then
+            BIN="$(pwd)/vendor/obscura.exe"
+          elif [ -f vendor/obscura ]; then
+            chmod +x vendor/obscura
+            BIN="$(pwd)/vendor/obscura"
+          else
+            echo "::error::Obscura binary not found in vendor/"
+            ls -la vendor/ || true
+            exit 1
+          fi
+          if [ ! -s "$BIN" ]; then
+            echo "::error::Obscura binary is empty at $BIN"
+            exit 1
+          fi
+          echo "OBSCURA_BIN=$BIN" >> "$GITHUB_ENV"
+          echo "Obscura binary ready at $BIN"
 
       - name: cargo test without keychain feature
         run: cargo test -p career-ops-core --no-default-features
 
+  # Verifies the application's runtime behavior when the OS keychain is
+  # present but broken. Uses career-ops-test-support's failure injection
+  # to make the test keychain return PlatformFailure on read, which is
+  # the same error a locked keychain or a missing Secret Service daemon
+  # produces. The tests then verify that:
+  #   - The state machine transitions to KeychainUnavailable, not Ready.
+  #   - The passphrase fallback still reaches Ready.
+  #   - A transient failure recovers on retry.
+  #
+  # This is distinct from `test-no-keychain-feature`, which tests the
+  # compile-time absence of the feature. This job tests runtime failure.
+  keychain-failure-injection:
+    name: keychain failure injection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev pkg-config libssl-dev
+
+      - name: Run failure-injection tests
+        run: cargo test -p career-ops-app --test state_flow keychain
+
+  # Verifies that the real platform keychain round-trips a value. This
+  # is the only job that exercises the actual OS keychain, and it would
+  # fail if the `keyring` crate were built without the platform backends
+  # enabled (which causes every read to silently return NoEntry).
   keychain-sentinel:
-    name: keychain sentinel round-trip
+    name: keychain sentinel round-trip (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +211,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
 
       - name: Install Linux deps
         if: runner.os == 'Linux'
@@ -62,7 +230,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p career-ops-core --features keychain initialize_refuses_when_wrapped_file_exists
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
+      - name: Run never-reinitialize test
+        run: cargo test -p career-ops-core --features keychain initialize_refuses_when_wrapped_file_exists
 
   fmt-clippy:
     name: fmt + clippy
@@ -72,5 +245,48 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  browser-fallback:
+    name: browser fallback (chromiumoxide)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+      - name: Install Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
+      - name: Compile-check the fallback backend
+        run: cargo check -p career-ops-core --features chromium-fallback
+      - name: Run fallback tests (live, requires Chrome)
+        env:
+          RUN_CHROMIUM_FALLBACK_TESTS: "1"
+        run: cargo test -p career-ops-core --features chromium-fallback --test backend_fallback -- --nocapture
+
+  portals-service:
+    name: portals service layer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+
+      # These tests use MockFetchSource and MockBrowserBackend, so no
+      # Obscura binary and no libsecret are needed. The job exists to
+      # give the service layer a named green check independent of the
+      # full workspace test run.
+      - name: Run portals service tests
+        run: |
+          cargo test -p career-ops-core --test portals_service
+          cargo test -p career-ops-core --test manual_entry
