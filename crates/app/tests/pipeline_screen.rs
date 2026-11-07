@@ -8,6 +8,7 @@ use career_ops_app::screens::pipeline::{self, PipelineAction, PipelineRenderStat
 use career_ops_app::view_models::pipeline::{
     JobFilter, JobRow, PipelineViewModel, StatusLabel, TierLabel,
 };
+use career_ops_core::model::QueueState;
 use career_ops_core::preferences::Preferences;
 use egui::accesskit::Role;
 use egui_kittest::kittest::{NodeT, Queryable};
@@ -25,6 +26,7 @@ fn idle_state() -> PipelineRenderState<'static> {
         message: None,
         refreshing: None,
         marking: None,
+        queueing: None,
         deleting: None,
     }
 }
@@ -64,7 +66,14 @@ fn row(id: i64, title: &str, status: Option<StatusLabel>, tier: TierLabel) -> Jo
         has_user_state: status.is_some_and(|status| status != StatusLabel::Discovered),
         preferred: false,
         excluded: false,
+        queue: QueueState::New,
     }
+}
+
+/// The same row, in a queue state the user already chose.
+fn with_queue(mut row: JobRow, queue: QueueState) -> JobRow {
+    row.queue = queue;
+    row
 }
 
 fn selected(id: i64) -> PipelineView {
@@ -377,6 +386,7 @@ fn refreshing_disables_the_button_and_reports_the_result() {
         message: Some("Description refreshed: 2048 bytes."),
         refreshing: Some(1),
         marking: None,
+        queueing: None,
         deleting: None,
     };
     let mut harness = test_harness(&view_model, selected(1), render_state);
@@ -666,6 +676,7 @@ fn first_load_shows_a_spinner_instead_of_the_empty_state() {
         message: None,
         refreshing: None,
         marking: None,
+        queueing: None,
         deleting: None,
     };
 
@@ -686,6 +697,7 @@ fn an_error_offers_a_retry() {
         message: None,
         refreshing: None,
         marking: None,
+        queueing: None,
         deleting: None,
     };
 
@@ -819,5 +831,151 @@ fn no_summary_without_preferences() {
     assert!(
         harness.query_by_label("0 preferred of 1 shown.").is_none(),
         "nothing configured, nothing to say"
+    );
+}
+
+#[test]
+fn the_queue_actions_emit_their_states() {
+    let cases = [
+        ("Mark for details", PipelineAction::MarkForDetails(1)),
+        ("Mark for evaluation", PipelineAction::MarkForEvaluation(1)),
+        ("Dismiss", PipelineAction::Dismiss(1)),
+    ];
+
+    for (label, expected) in cases {
+        let view_model = view_model(
+            vec![row(1, "Engineer", None, TierLabel::Ats)],
+            JobFilter::All,
+            "",
+        );
+        let mut harness = test_harness(&view_model, selected(1), idle_state());
+        harness.run();
+
+        harness.get_by_role_and_label(Role::Button, label).click();
+        harness.run();
+
+        assert_eq!(harness.state().actions, vec![expected], "{label}");
+    }
+}
+
+/// Once the state is applied, the action is replaced by the state label, so a
+/// second click has nothing to emit.
+#[test]
+fn a_queue_action_becomes_the_state_label_once_applied() {
+    let row = with_queue(
+        row(1, "Engineer", None, TierLabel::Ats),
+        QueueState::DetailsNeeded,
+    );
+    let view_model = view_model(vec![row], JobFilter::All, "");
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
+    harness.run();
+
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Mark for details")
+            .is_none(),
+        "the applied action must not stay clickable"
+    );
+    let applied = harness.get_by_role_and_label(Role::Button, "Details needed");
+    assert!(applied.accesskit_node().is_disabled());
+
+    applied.click();
+    harness.run();
+    assert!(harness.state().actions.is_empty());
+}
+
+#[test]
+fn a_queue_action_is_disabled_while_a_queue_write_is_in_flight() {
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let state = PipelineRenderState {
+        queueing: Some(1),
+        ..idle_state()
+    };
+    let mut harness = test_harness(&view_model, selected(1), state);
+    // The in-flight spinner keeps requesting repaints; `run()` would never
+    // settle.
+    harness.run_steps(2);
+
+    for label in ["Mark for details", "Mark for evaluation", "Dismiss"] {
+        let button = harness.get_by_role_and_label(Role::Button, label);
+        assert!(button.accesskit_node().is_disabled(), "{label}");
+    }
+}
+
+#[test]
+fn the_queue_badge_renders_beside_the_status_badge() {
+    let row = with_queue(
+        row(1, "Engineer", Some(StatusLabel::Ready), TierLabel::Ats),
+        QueueState::Evaluate,
+    );
+    let view_model = view_model(vec![row], JobFilter::All, "");
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    // The filter chips do not include `Evaluate`, so the label is the badge.
+    assert_eq!(
+        harness
+            .get_all_by_role_and_label(Role::Label, "Evaluate")
+            .count(),
+        1
+    );
+    assert_eq!(
+        harness
+            .get_all_by_role_and_label(Role::Label, "Ready")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_new_row_has_no_queue_badge() {
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    assert!(
+        harness.query_by_label("New").is_none(),
+        "the default state is not a badge"
+    );
+}
+
+/// Dismissing is a decision, not a delete: the row leaves the default view and
+/// stays findable under `Dismissed`.
+#[test]
+fn dismissed_rows_are_hidden_from_all_and_shown_under_the_dismissed_filter() {
+    let rows = || {
+        vec![
+            row(1, "Engineer", None, TierLabel::Ats),
+            with_queue(
+                row(2, "Dismissed role", None, TierLabel::Ats),
+                QueueState::Dismissed,
+            ),
+        ]
+    };
+
+    let all = view_model(rows(), JobFilter::All, "");
+    let mut harness = test_harness(&all, PipelineView::default(), idle_state());
+    harness.run();
+    let _ = harness.get_by_label("Engineer — Acme");
+    assert!(
+        harness.query_by_label("Dismissed role — Acme").is_none(),
+        "All hides a dismissed row"
+    );
+
+    let dismissed = view_model(rows(), JobFilter::Dismissed, "");
+    let mut harness = test_harness(&dismissed, PipelineView::default(), idle_state());
+    harness.run();
+    let _ = harness.get_by_label("Dismissed role — Acme");
+    assert!(
+        harness.query_by_label("Engineer — Acme").is_none(),
+        "the Dismissed view shows only the dismissed rows"
     );
 }

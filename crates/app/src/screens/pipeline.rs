@@ -6,6 +6,8 @@
 
 use egui::{Align2, Button, Color32, RichText, Ui, Window};
 
+use career_ops_core::model::QueueState;
+
 use crate::view_models::pipeline::{JobFilter, JobRow, PipelineViewModel, StatusLabel, TierLabel};
 
 use super::components::{labelled_input, EmptyState, LoadingSpinner, StatusBadge};
@@ -45,6 +47,10 @@ pub enum PipelineAction {
     RefreshJob(i64),
     /// Mark the job's application as not worth pursuing.
     MarkNotAMatch(i64),
+    /// Queue states: the work the user wants done before an evaluation.
+    MarkForDetails(i64),
+    MarkForEvaluation(i64),
+    Dismiss(i64),
     /// Delete the job, confirmed.
     DeleteJob(i64),
 }
@@ -59,6 +65,8 @@ pub struct PipelineRenderState<'a> {
     pub refreshing: Option<i64>,
     /// The job whose status is being changed.
     pub marking: Option<i64>,
+    /// The job whose queue state is being changed.
+    pub queueing: Option<i64>,
     /// The job being deleted.
     pub deleting: Option<i64>,
 }
@@ -285,6 +293,7 @@ fn row_ui(ui: &mut Ui, row: &JobRow, view: &mut PipelineView) {
         if let Some(status) = row.status {
             status_badge(ui, status);
         }
+        queue_badge(ui, row.queue);
         ui.label(RichText::new(&row.fetched_at).weak());
     });
     ui.separator();
@@ -311,7 +320,10 @@ fn detail(
             .on_disabled_hover_text("Available in a later phase");
 
         let deleting = state.deleting == Some(row.id);
-        let busy = state.refreshing == Some(row.id) || state.marking == Some(row.id) || deleting;
+        let busy = state.refreshing == Some(row.id)
+            || state.marking == Some(row.id)
+            || state.queueing == Some(row.id)
+            || deleting;
 
         if ui
             .add_enabled(
@@ -385,7 +397,20 @@ fn detail(
         if let Some(status) = row.status {
             status_badge(ui, status);
         }
+        queue_badge(ui, row.queue);
         ui.label(RichText::new(format!("Fetched {}", row.fetched_at)).weak());
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Queue").weak());
+        let busy = state.queueing == Some(row.id) || state.marking == Some(row.id);
+        for (target, label, hover) in QUEUE_ACTIONS {
+            queue_action(ui, row, target, label, hover, busy, action);
+        }
+        if state.queueing == Some(row.id) {
+            LoadingSpinner::show(ui);
+        }
     });
 
     ui.add_space(4.0);
@@ -477,6 +502,80 @@ fn delete_gate(
 
 fn tier_label(ui: &mut Ui, tier: TierLabel) {
     ui.label(RichText::new(tier.label()).monospace().small().weak());
+}
+
+/// The three queue actions the detail view offers, in order.
+const QUEUE_ACTIONS: [(QueueState, &str, &str); 3] = [
+    (
+        QueueState::DetailsNeeded,
+        "Mark for details",
+        "Wants the full description before deciding",
+    ),
+    (
+        QueueState::Evaluate,
+        "Mark for evaluation",
+        "Wants an evaluation in a later phase",
+    ),
+    (
+        QueueState::Dismissed,
+        "Dismiss",
+        "Hide this posting; find it again under the Dismissed filter",
+    ),
+];
+
+/// One queue action, e.g. **Mark for details**.
+///
+/// A row already in the target state shows the state's label instead of a
+/// button: the action would write the same value, so offering it would be a
+/// dead click. `New` is the default and `Evaluated` is written by an evaluation
+/// report, so neither is offered here.
+fn queue_action(
+    ui: &mut Ui,
+    row: &JobRow,
+    target: QueueState,
+    label: &str,
+    hover: &str,
+    busy: bool,
+    action: &mut Option<PipelineAction>,
+) {
+    let intent = match target {
+        QueueState::DetailsNeeded => PipelineAction::MarkForDetails(row.id),
+        QueueState::Evaluate => PipelineAction::MarkForEvaluation(row.id),
+        QueueState::Dismissed => PipelineAction::Dismiss(row.id),
+        QueueState::New | QueueState::Evaluated => return,
+    };
+
+    if row.queue == target {
+        ui.add_enabled(false, Button::new(target.label()))
+            .on_disabled_hover_text("Already in this state");
+        return;
+    }
+
+    if ui
+        .add_enabled(!busy, Button::new(label))
+        .on_hover_text(hover)
+        .clicked()
+    {
+        *action = Some(intent);
+    }
+}
+
+/// The queue state beside the status badge. `New` is the default and is not
+/// worth a badge; the other states are a decision the user can see and reverse
+/// from the detail view.
+fn queue_badge(ui: &mut Ui, queue: QueueState) {
+    if queue == QueueState::New {
+        return;
+    }
+
+    let color = match queue {
+        QueueState::New => Color32::GRAY,
+        QueueState::DetailsNeeded => Color32::from_rgb(0x1f, 0x6f, 0xeb),
+        QueueState::Evaluate => Color32::from_rgb(0x7c, 0x3a, 0xed),
+        QueueState::Dismissed => Color32::from_rgb(0x6b, 0x72, 0x80),
+        QueueState::Evaluated => Color32::from_rgb(0x2e, 0xa0, 0x43),
+    };
+    ui.label(RichText::new(queue.label()).small().color(color));
 }
 
 fn status_badge(ui: &mut Ui, status: StatusLabel) {

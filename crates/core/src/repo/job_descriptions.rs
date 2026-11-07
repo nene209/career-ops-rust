@@ -36,7 +36,7 @@ use url::Url;
 
 use crate::acquisition::identity;
 use crate::error::{CoreError, Result};
-use crate::model::{FetchTier, JobDescription};
+use crate::model::{FetchTier, JobDescription, QueueState};
 
 use super::content_hash;
 
@@ -238,6 +238,62 @@ pub async fn set_raw_text(pool: &SqlitePool, id: i64, raw_text: &str) -> Result<
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Move one posting to a queue state.
+///
+/// Errors when the row does not exist: unlike a re-fetch, a queue decision on a
+/// vanished row means the caller is working from a stale list, and silently
+/// writing nothing would leave the badge and the database disagreeing.
+pub async fn set_queue_state(
+    pool: &SqlitePool,
+    id: i64,
+    state: QueueState,
+    reason: Option<&str>,
+) -> Result<()> {
+    if set_queue_states(pool, &[id], state, reason).await? == 0 {
+        return Err(CoreError::Internal(
+            "job_descriptions::set_queue_state: row not found",
+        ));
+    }
+    Ok(())
+}
+
+/// Move several postings to one state in a single transaction.
+///
+/// Returns how many rows changed. Used by the batch in WS4 (describe these
+/// jobs, then advance them together) and by anything that reclassifies a
+/// selection.
+pub async fn set_queue_states(
+    pool: &SqlitePool,
+    ids: &[i64],
+    state: QueueState,
+    reason: Option<&str>,
+) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let now = Utc::now();
+    let mut transaction = pool.begin().await?;
+    let mut updated = 0usize;
+    for &id in ids {
+        let result = sqlx::query(
+            "UPDATE job_descriptions
+             SET queue_state = ?, queue_reason = ?, queued_at = ?
+             WHERE id = ?",
+        )
+        .bind(state.as_str())
+        .bind(reason)
+        .bind(now)
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+        updated += result.rows_affected() as usize;
+    }
+    transaction.commit().await?;
+
+    Ok(updated)
 }
 
 /// Delete a job description. Its application, evaluations, and cover letters

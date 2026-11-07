@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use career_ops_core::model::{ApplicationStatus, JobDescription};
+use career_ops_core::model::{ApplicationStatus, JobDescription, QueueState};
 use career_ops_core::preferences::{PreferenceFacts, Preferences};
 use career_ops_core::text;
 use chrono::Utc;
@@ -53,6 +53,9 @@ pub struct JobRow {
     /// The company is on the exclusion list. Hidden everywhere except the
     /// `Excluded` filter.
     pub excluded: bool,
+    /// The pre-evaluation queue state. `Dismissed` rows are hidden everywhere
+    /// except the `Dismissed` filter.
+    pub queue: QueueState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +154,8 @@ pub enum JobFilter {
     Applied,
     Rejected,
     NotAMatch,
+    /// The only view in which a dismissed row is visible.
+    Dismissed,
 }
 
 impl JobFilter {
@@ -163,6 +168,7 @@ impl JobFilter {
             JobFilter::Applied,
             JobFilter::Rejected,
             JobFilter::NotAMatch,
+            JobFilter::Dismissed,
         ]
     }
 
@@ -175,21 +181,20 @@ impl JobFilter {
             Self::Applied => "Applied",
             Self::Rejected => "Rejected",
             Self::NotAMatch => "Not a match",
+            Self::Dismissed => "Dismissed",
         }
     }
 
     pub fn matches(self, row: &JobRow) -> bool {
-        // An exclusion is a decision the user made once, so it wins over every
-        // other view: the row is reachable only through `Excluded`, where it
-        // can be seen and reversed.
-        if row.excluded {
-            return self == Self::Excluded;
-        }
-
+        // Two decisions hide a row, and each has exactly one view that shows it
+        // again so the decision can be seen and reversed. A row that carries
+        // both decisions appears in both of those views and nowhere else.
         match self {
+            Self::Excluded => row.excluded,
+            Self::Dismissed => row.queue == QueueState::Dismissed,
+            _ if row.excluded || row.queue == QueueState::Dismissed => false,
             Self::All => true,
             Self::Preferred => row.preferred,
-            Self::Excluded => false,
             Self::NotApplied => match row.status {
                 None => true,
                 Some(status) => {
@@ -301,6 +306,20 @@ impl PipelineViewModel {
     pub fn row(&self, id: i64) -> Option<&JobRow> {
         self.rows.iter().find(|row| row.id == id)
     }
+
+    /// Apply a queue decision to a loaded row.
+    ///
+    /// Returns `false` when the row is no longer in the page, which tells the
+    /// app its list is stale.
+    pub fn set_queue(&mut self, id: i64, state: QueueState) -> bool {
+        match self.rows.iter_mut().find(|row| row.id == id) {
+            Some(row) => {
+                row.queue = state;
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 impl JobRow {
@@ -352,6 +371,9 @@ fn rows_from_jobs(
                 has_user_state,
                 preferred: false,
                 excluded: false,
+                // A state written by a build that knows more than this one
+                // reads as `new`: the badge is a hint, not a contract.
+                queue: QueueState::parse(&job.queue_state).unwrap_or_default(),
             };
 
             let matched = preferences.matches(row.preference_facts());
@@ -378,6 +400,9 @@ mod tests {
             fetch_tier: tier.into(),
             external_id: None,
             content_hash: None,
+            queue_state: "new".into(),
+            queue_reason: None,
+            queued_at: None,
         }
     }
 
@@ -396,6 +421,7 @@ mod tests {
             has_user_state: status.is_some_and(|status| status != StatusLabel::Discovered),
             preferred: false,
             excluded: false,
+            queue: QueueState::New,
         }
     }
 
@@ -810,5 +836,81 @@ mod tests {
             .collect();
         let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
         assert_eq!(labels.len(), unique.len(), "duplicate labels: {labels:?}");
+    }
+
+    #[test]
+    fn rows_parse_the_stored_queue_state() {
+        let mut job = job(1, "Engineer", "tier1a:ats");
+        job.queue_state = "evaluate".into();
+        let view_model = PipelineViewModel::from_jobs(
+            vec![job],
+            &HashMap::new(),
+            &HashSet::new(),
+            Preferences::default(),
+        );
+
+        assert_eq!(view_model.rows[0].queue, QueueState::Evaluate);
+    }
+
+    /// A state written by a newer build is a hint, not a contract: the row
+    /// still renders, as `new`.
+    #[test]
+    fn an_unknown_queue_state_reads_as_new() {
+        let mut job = job(1, "Engineer", "tier1a:ats");
+        job.queue_state = "someday_state".into();
+        let view_model = PipelineViewModel::from_jobs(
+            vec![job],
+            &HashMap::new(),
+            &HashSet::new(),
+            Preferences::default(),
+        );
+
+        assert_eq!(view_model.rows[0].queue, QueueState::New);
+    }
+
+    #[test]
+    fn a_dismissed_row_is_hidden_everywhere_but_the_dismissed_filter() {
+        let mut dismissed = row(1, None);
+        dismissed.queue = QueueState::Dismissed;
+
+        for filter in JobFilter::all() {
+            let visible = filter.matches(&dismissed);
+            assert_eq!(
+                visible,
+                *filter == JobFilter::Dismissed,
+                "{filter:?} must {}",
+                if *filter == JobFilter::Dismissed {
+                    "show a dismissed row"
+                } else {
+                    "hide a dismissed row"
+                }
+            );
+        }
+    }
+
+    /// A row can be both excluded and dismissed. Each decision has one view
+    /// that reveals it, so the row is findable in either.
+    #[test]
+    fn a_dismissed_row_that_is_also_excluded_is_findable_under_both_filters() {
+        let mut both = row(1, None);
+        both.excluded = true;
+        both.queue = QueueState::Dismissed;
+
+        assert!(JobFilter::Dismissed.matches(&both));
+        assert!(JobFilter::Excluded.matches(&both));
+        assert!(!JobFilter::All.matches(&both));
+    }
+
+    #[test]
+    fn set_queue_updates_a_loaded_row_and_reports_a_missing_one() {
+        let mut view_model = PipelineViewModel {
+            rows: vec![row(1, None)],
+            ..Default::default()
+        };
+
+        assert!(view_model.set_queue(1, QueueState::DetailsNeeded));
+        assert_eq!(view_model.row(1).unwrap().queue, QueueState::DetailsNeeded);
+
+        assert!(!view_model.set_queue(99, QueueState::Evaluate));
     }
 }

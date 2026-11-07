@@ -38,7 +38,9 @@ use career_ops_core::acquisition::router::{
 };
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
 use career_ops_core::logging::{self, LogHandle, LogLine};
-use career_ops_core::model::{ApplicationStatus, CvEntry, FetchTier, JobDescription, Profile};
+use career_ops_core::model::{
+    ApplicationStatus, CvEntry, FetchTier, JobDescription, Profile, QueueState,
+};
 use career_ops_core::portals::health::suggested_action;
 use career_ops_core::portals::service::{
     self, BatchEntry, BatchReport, FetchAllPagesReport, FetchAllProgress, FetchAllStop,
@@ -218,6 +220,8 @@ pub struct CareerOpsApp {
     refreshing_job: Option<i64>,
     pipeline_status_task: Option<AsyncTask<CoreResult<()>>>,
     marking_job: Option<i64>,
+    pipeline_queue_task: Option<AsyncTask<CoreResult<QueueState>>>,
+    queueing_job: Option<i64>,
     pipeline_delete_task: Option<AsyncTask<CoreResult<()>>>,
     deleting_job: Option<i64>,
 
@@ -310,6 +314,8 @@ impl CareerOpsApp {
             refreshing_job: None,
             pipeline_status_task: None,
             marking_job: None,
+            pipeline_queue_task: None,
+            queueing_job: None,
             pipeline_delete_task: None,
             deleting_job: None,
             cv_profile: CvProfileViewModel::default(),
@@ -502,6 +508,15 @@ impl CareerOpsApp {
             PipelineAction::SetSearch(query) => self.pipeline.search = query,
             PipelineAction::RefreshJob(job_id) => self.start_job_refresh(job_id),
             PipelineAction::MarkNotAMatch(job_id) => self.start_not_a_match(job_id),
+            PipelineAction::MarkForDetails(job_id) => {
+                self.start_queue_change(job_id, QueueState::DetailsNeeded)
+            }
+            PipelineAction::MarkForEvaluation(job_id) => {
+                self.start_queue_change(job_id, QueueState::Evaluate)
+            }
+            PipelineAction::Dismiss(job_id) => {
+                self.start_queue_change(job_id, QueueState::Dismissed)
+            }
             PipelineAction::DeleteJob(job_id) => self.start_job_delete(job_id),
         }
     }
@@ -853,6 +868,8 @@ impl CareerOpsApp {
         self.refreshing_job = None;
         self.pipeline_status_task = None;
         self.marking_job = None;
+        self.pipeline_queue_task = None;
+        self.queueing_job = None;
         self.pipeline_delete_task = None;
         self.deleting_job = None;
 
@@ -1724,6 +1741,99 @@ impl CareerOpsApp {
         }
     }
 
+    /// Move a job to a queue state.
+    ///
+    /// Marking is cheap and reversible: the work the state asks for happens
+    /// from a separate action (WS4's batch, Phase 3's evaluation), which is the
+    /// same separation the delete gate uses.
+    fn start_queue_change(&mut self, job_id: i64, state: QueueState) {
+        if self.queueing_job.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.pipeline_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let task = self.spawn(async move {
+            job_repo::set_queue_state(&pool, job_id, state, None)
+                .await
+                .map(|()| state)
+        });
+
+        self.pipeline_error = None;
+        self.pipeline_message = None;
+        self.queueing_job = Some(job_id);
+        self.pipeline_queue_task = Some(task);
+    }
+
+    fn poll_pipeline_queue(&mut self, ctx: &egui::Context) {
+        let poll = match self.pipeline_queue_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.pipeline_queue_task = None;
+                let job_id = self.queueing_job.take();
+                match result {
+                    Ok(state) => {
+                        if !job_id.is_some_and(|id| self.pipeline.set_queue(id, state)) {
+                            // The row left the loaded page while the write was in
+                            // flight; the list no longer describes the database.
+                            self.start_pipeline_load();
+                        }
+
+                        // Dismissing moves the row out of most views. Return to
+                        // the list rather than leaving the detail panel open on
+                        // a row the filter now hides.
+                        let hidden = self.pipeline_view.selected.is_some_and(|id| {
+                            match self.pipeline.row(id) {
+                                Some(row) => !self.pipeline.filter.matches(row),
+                                None => true,
+                            }
+                        });
+                        if hidden {
+                            self.pipeline_view.selected = None;
+                            self.pipeline_view.show_raw = false;
+                        }
+
+                        self.pipeline_message = Some(match state {
+                            QueueState::DetailsNeeded => "Marked for details.".to_string(),
+                            QueueState::Evaluate => "Marked for evaluation.".to_string(),
+                            QueueState::Dismissed => {
+                                "Dismissed. Find it again under the Dismissed filter.".to_string()
+                            }
+                            QueueState::New | QueueState::Evaluated => {
+                                "Queue state updated.".to_string()
+                            }
+                        });
+                        self.pipeline_error = None;
+                    }
+                    Err(error) => {
+                        self.pipeline_message = None;
+                        // A missing row is the common cause, and a reload is
+                        // both the fix and the way to make the list true again.
+                        self.start_pipeline_load();
+                        self.pipeline_error = Some(format!("Could not update the queue: {error}"));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.pipeline_queue_task = None;
+                self.queueing_job = None;
+                self.pipeline_error = Some("The queue update was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
     /// Delete a job description. Its application, evaluation reports, and cover
     /// letters cascade, which is why a touched row is gated.
     fn start_job_delete(&mut self, job_id: i64) {
@@ -2315,6 +2425,7 @@ impl eframe::App for CareerOpsApp {
                 self.poll_pipeline_task(ui.ctx());
                 self.poll_pipeline_refresh(ui.ctx());
                 self.poll_pipeline_status(ui.ctx());
+                self.poll_pipeline_queue(ui.ctx());
                 self.poll_pipeline_delete(ui.ctx());
                 self.poll_cv_profile_task(ui.ctx());
                 self.poll_cv_profile_save(ui.ctx());
@@ -2388,6 +2499,7 @@ impl eframe::App for CareerOpsApp {
                     message: self.pipeline_message.as_deref(),
                     refreshing: self.refreshing_job,
                     marking: self.marking_job,
+                    queueing: self.queueing_job,
                     deleting: self.deleting_job,
                 };
                 let cv_profile_state = CvProfileRenderState {
@@ -3218,6 +3330,7 @@ mod tests {
             app.poll_pipeline_task(ctx);
             app.poll_pipeline_refresh(ctx);
             app.poll_pipeline_status(ctx);
+            app.poll_pipeline_queue(ctx);
             app.poll_pipeline_delete(ctx);
             app.poll_cv_profile_task(ctx);
             app.poll_cv_profile_save(ctx);
@@ -3924,6 +4037,109 @@ mod tests {
         assert_eq!(applications.len(), 1);
         assert_eq!(applications[0].job_description_id, stored.id);
         assert_eq!(applications[0].status, "not_a_match");
+    }
+
+    /// The three queue actions write the state, update the row in place, and
+    /// dismiss returns to the list because `All` hides the row.
+    #[test]
+    fn queue_actions_update_the_row_and_the_database() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::default());
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, source);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        let pool = app.pool().expect("pool");
+        let stored = app
+            .runtime()
+            .block_on(job_repo::upsert(
+                &pool,
+                job_repo::NewJobDescription {
+                    title: "Engineer".into(),
+                    company: "Acme".into(),
+                    source_url: "https://example.com/jobs/queue".into(),
+                    raw_text: "body".into(),
+                    fetch_tier: FetchTier::Tier1bHtml,
+                    external_id: None,
+                },
+            ))
+            .expect("store");
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+        assert_eq!(app.pipeline.rows[0].queue, QueueState::New);
+
+        app.pipeline_view.selected = Some(stored.id);
+        app.handle_pipeline_action(PipelineAction::MarkForDetails(stored.id));
+        wait_until(&mut app, &ctx, |app| {
+            app.queueing_job.is_none() && app.pipeline_message.is_some()
+        });
+
+        assert_eq!(app.pipeline.rows[0].queue, QueueState::DetailsNeeded);
+        assert_eq!(app.pipeline_message.as_deref(), Some("Marked for details."));
+        assert_eq!(
+            app.pipeline_view.selected,
+            Some(stored.id),
+            "a state that stays in the current view keeps the detail open"
+        );
+        assert_eq!(
+            app.runtime()
+                .block_on(job_repo::get(&pool, stored.id))
+                .expect("get")
+                .expect("row")
+                .queue_state,
+            "details_needed"
+        );
+
+        app.pipeline_message = None;
+        app.handle_pipeline_action(PipelineAction::Dismiss(stored.id));
+        wait_until(&mut app, &ctx, |app| {
+            app.queueing_job.is_none() && app.pipeline_message.is_some()
+        });
+
+        assert_eq!(app.pipeline.rows[0].queue, QueueState::Dismissed);
+        assert_eq!(
+            app.pipeline_view.selected, None,
+            "All hides a dismissed row, so the detail must close"
+        );
+        assert_eq!(
+            app.pipeline.apply_filter().count(),
+            0,
+            "the row is gone from the default view but still loaded"
+        );
+        assert!(app
+            .pipeline_message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("Dismissed.")));
     }
 
     /// Deleting through the app removes the row from the view model, clears the

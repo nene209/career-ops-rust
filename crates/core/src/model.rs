@@ -112,6 +112,73 @@ pub struct JobDescription {
     pub fetch_tier: String,
     pub external_id: Option<String>,
     pub content_hash: Option<String>,
+    /// One of [`QueueState`]; `new` for a freshly fetched posting (migration
+    /// 0005's default).
+    pub queue_state: String,
+    /// A short note attached to the queue decision, for the user (and, later,
+    /// Phase 3.2's triage).
+    pub queue_reason: Option<String>,
+    pub queued_at: Option<DateTime<Utc>>,
+}
+
+/// The pre-evaluation queue state of a posting.
+///
+/// Deliberately separate from [`ApplicationStatus`]: a row can be `new` with no
+/// application, and only enters the application lifecycle once an evaluation or
+/// a submission happens. `evaluated` is written by Phase 3 when a report exists;
+/// the other four are the user's (and later the triage's) to set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueState {
+    /// Untouched.
+    #[default]
+    New,
+    /// Wants the full description before deciding.
+    DetailsNeeded,
+    /// Wants an evaluation.
+    Evaluate,
+    /// Decided against looking further.
+    Dismissed,
+    /// An evaluation report exists.
+    Evaluated,
+}
+
+impl QueueState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::DetailsNeeded => "details_needed",
+            Self::Evaluate => "evaluate",
+            Self::Dismissed => "dismissed",
+            Self::Evaluated => "evaluated",
+        }
+    }
+
+    /// `None` for a value this build does not know.
+    ///
+    /// The column is free text so a later phase can add a state without a
+    /// migration; a build that predates it must not guess.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "new" => Some(Self::New),
+            "details_needed" => Some(Self::DetailsNeeded),
+            "evaluate" => Some(Self::Evaluate),
+            "dismissed" => Some(Self::Dismissed),
+            "evaluated" => Some(Self::Evaluated),
+            _ => None,
+        }
+    }
+
+    /// The user-facing label, used by the badge and the detail actions.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::New => "New",
+            Self::DetailsNeeded => "Details needed",
+            Self::Evaluate => "Evaluate",
+            Self::Dismissed => "Dismissed",
+            Self::Evaluated => "Evaluated",
+        }
+    }
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
