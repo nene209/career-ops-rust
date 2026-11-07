@@ -5,6 +5,7 @@
 //! [`Preferences`] is the source of truth for the dirty comparison, so
 //! re-typing the same list with different spacing does not count as a change.
 
+use career_ops_core::llm::{LlmConfig, LlmProvider};
 use career_ops_core::preferences::Preferences;
 
 /// The preferences as the form holds them.
@@ -44,12 +45,40 @@ impl PreferencesForm {
     }
 }
 
+/// The AI section as the form holds it.
+///
+/// The API key is write-only: it is typed, handed to the app, and cleared. The
+/// stored key is represented by `has_api_key`, never by its text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmForm {
+    pub provider: LlmProvider,
+    pub model: String,
+    pub api_key: String,
+    pub has_api_key: bool,
+}
+
+impl Default for LlmForm {
+    fn default() -> Self {
+        let config = LlmConfig::default();
+        Self {
+            provider: config.provider,
+            model: config.model,
+            api_key: String::new(),
+            has_api_key: false,
+        }
+    }
+}
+
 /// The preferences screen's state.
 #[derive(Debug, Clone, Default)]
 pub struct SettingsViewModel {
     pub form: PreferencesForm,
     /// What storage currently holds, for the dirty comparison.
     saved: Preferences,
+    pub llm: LlmForm,
+    /// The whole LLM configuration as stored, so saving a provider or model
+    /// does not reset the budget fields the form does not edit.
+    saved_llm: LlmConfig,
 }
 
 impl SettingsViewModel {
@@ -57,6 +86,8 @@ impl SettingsViewModel {
         Self {
             form: PreferencesForm::from_preferences(&saved),
             saved,
+            llm: LlmForm::default(),
+            saved_llm: LlmConfig::default(),
         }
     }
 
@@ -79,6 +110,49 @@ impl SettingsViewModel {
     /// whether the preference summary is worth showing.
     pub fn is_configured(&self) -> bool {
         !self.saved.is_empty()
+    }
+
+    /// Adopt the stored LLM configuration and whether a key is present.
+    pub fn set_llm(&mut self, saved: LlmConfig, has_api_key: bool) {
+        self.llm.provider = saved.provider;
+        self.llm.model = saved.model.clone();
+        self.llm.api_key.clear();
+        self.llm.has_api_key = has_api_key;
+        self.saved_llm = saved;
+    }
+
+    /// `true` when the provider or model differs from what is stored.
+    pub fn is_llm_dirty(&self) -> bool {
+        self.llm_config() != self.saved_llm
+    }
+
+    /// The configuration the form describes, with the stored temperature and
+    /// budgets preserved and the model sanitized.
+    pub fn llm_config(&self) -> LlmConfig {
+        LlmConfig {
+            provider: self.llm.provider,
+            model: self.llm.model.trim().to_string(),
+            ..self.saved_llm.clone()
+        }
+    }
+
+    /// Adopt the value that was just stored.
+    pub fn mark_llm_saved(&mut self, saved: LlmConfig) {
+        self.llm.provider = saved.provider;
+        self.llm.model = saved.model.clone();
+        self.saved_llm = saved;
+    }
+
+    /// Record that the keychain now holds (or no longer holds) a key. A saved
+    /// key is never echoed back into the field.
+    pub fn set_api_key_present(&mut self, present: bool) {
+        self.llm.has_api_key = present;
+        self.llm.api_key.clear();
+    }
+
+    /// Take the typed key for storage, leaving the field empty.
+    pub fn take_api_key(&mut self) -> String {
+        std::mem::take(&mut self.llm.api_key)
     }
 }
 
@@ -178,5 +252,53 @@ mod tests {
 
         assert!(!view.is_configured());
         assert!(!view.is_dirty());
+    }
+
+    #[test]
+    fn an_llm_form_tracks_provider_and_model_changes() {
+        let mut view = SettingsViewModel::default();
+        view.set_llm(LlmConfig::default(), false);
+        assert!(!view.is_llm_dirty());
+
+        view.llm.model = "deepseek-v4-pro".into();
+        assert!(view.is_llm_dirty());
+        assert_eq!(view.llm_config().model, "deepseek-v4-pro");
+
+        view.mark_llm_saved(view.llm_config());
+        assert!(!view.is_llm_dirty());
+        assert_eq!(view.llm.model, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn saving_a_model_preserves_the_fields_the_form_does_not_edit() {
+        let stored = LlmConfig {
+            temperature: 0.9,
+            max_tokens: Some(1_024),
+            max_job_chars: 7_000,
+            ..LlmConfig::default()
+        };
+        let mut view = SettingsViewModel::default();
+        view.set_llm(stored.clone(), true);
+
+        view.llm.model = "deepseek-v4-pro".into();
+        let form = view.llm_config();
+
+        assert_eq!(form.temperature, 0.9);
+        assert_eq!(form.max_tokens, Some(1_024));
+        assert_eq!(form.max_job_chars, 7_000);
+    }
+
+    #[test]
+    fn a_saved_key_is_never_echoed_back_into_the_field() {
+        let mut view = SettingsViewModel::default();
+        view.llm.api_key = "sk-typed".into();
+
+        assert_eq!(view.take_api_key(), "sk-typed");
+        assert!(view.llm.api_key.is_empty(), "typed text is consumed");
+
+        view.llm.api_key = "sk-typed-again".into();
+        view.set_api_key_present(true);
+        assert!(view.llm.has_api_key);
+        assert!(view.llm.api_key.is_empty(), "a stored key is not shown");
     }
 }

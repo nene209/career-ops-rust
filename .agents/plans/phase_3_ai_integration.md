@@ -1,7 +1,7 @@
 # Phase 3: AI Integration — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.24), §12
-**Status:** Ready v0.9 — every entry condition is met (Phases 2.7, 2.8, and 2.9 are complete) and Q-43 is resolved; WS1 can start
+**Status:** In progress v0.10 — WS1 (LLM provider, keys, capabilities, Settings) is complete; WS2 can start
 **Last updated:** 2026-11-06
 **Duration:** 3–4 weeks
 **Depends on:** Phase 2 completion, Phase 2.7 (CV/Profile editor), Phase 2.8 (fetch controls and detail opt-in), Phase 2.9 (queue state and preferences); see Entry Conditions
@@ -21,6 +21,7 @@
 | v0.7 | Records the Phase 2.8 and Phase 2.9 inputs and resolves the ordering. **2.9 was renumbered from 3.1 and now lands before Phase 3**, which removes the circular dependency: Phase 3's entry conditions had assumed the queue existed while 2.9/3.1 had assumed Phase 3 did. 2.9's own inputs were Phase 2.5 deliverables, so nothing from `rig` was ever required there. Consequences: the report write sets `queue_state = 'evaluated'` unconditionally in the same transaction (note 13 no longer needs a compile-time guard), and the migration is renumbered **0005 → 0006** because 2.9 takes 0005. WS3 item 11 (combined fetch-then-evaluate) and 6.1a (thin-row button text) respond to Phase 2.8's detail opt-in. |
 | v0.8 | Checked against the shipped 2.7–2.9 code, with one correctness fix and four corrections. **The "same transaction" claim in note 13 was not expressible:** `job_descriptions::set_queue_states` opens and commits its own transaction, so WS3 adds a transaction-scoped variant (`set_queue_state_tx(&mut Transaction, ..)`) and calls it inside the report insert; otherwise a crash between the two writes leaves a report on a row still marked `evaluate`. Corrections: **Settings is a real screen** since 2.9 (acquisition preferences), so WS1 extends it with an AI section instead of replacing a placeholder; **the Pipeline detail already has a Queue row** (**Mark for details** / **Mark for evaluation** / **Dismiss**) and the header a bounded **Fetch descriptions (N)** batch, so WS6 composes with both and its thin-row path reuses `manual::refresh_job`; **`core::text::plain_text` matches the documented signature exactly** (`PlainText { text, truncated, source_chars }`), so WS3 item 3 is a call, not new code; and **`core::logging` + `docs/logging.md` already forbid logging prompts and completions**, so WS1 adds one count-and-outcome line per call rather than a second logging story. Also adds exit criterion 16 (the queue write), and **Q-43** — the plan never said what happens to `applications.status` during an evaluation, and `Discovered → Evaluating → Ready` is already permitted, so the owner has to confirm the intended behavior. |
 | v0.9 | **Q-43 resolved by the owner: the evaluation moves the application through its lifecycle.** `discovered` and `ready` enter `evaluating` before the call, and success returns to `ready` — all three transitions are already permitted by `applications::is_valid_transition`. Any other status is left alone, a failure or cancellation returns to the status the row had, and a `NoMatch` report goes straight to `mark_not_a_match` instead of passing through `ready`. WS3 gains deliverable 12 and an acceptance criterion; exit criterion 17 pins it. **`rig` is pinned to `0.46.0`**, the current release as of this date; note 1 and P3-R1 now record the checked version instead of asking for one. Also corrects WS3 item 10: `mark_not_a_match` refuses a submitted application with an `Err` rather than acting as a silent no-op, so the caller treats that error as "leave the status alone" and still stores the report. |
+| v0.10 | **WS1 implemented.** `core::llm` is the only module that names a `rig` type: `LlmProvider`/`LlmConfig` (stored in `settings`, keys `llm.*`), `capabilities()` (DeepSeek chat = JSON mode + tools + streaming + 64K; reasoner = no structured output and no tools; unknown models get provider defaults), `LlmError` (the planned taxonomy, with context-window detection from status 413 and body markers), `retry` (3 attempts, provider `Retry-After` wins over the computed backoff), `keys` (`com.career-ops.app` / `llm-api-key-{provider}-v1`, write-only, `keychain`-gated), and `status()` (the first unmet condition, in the order a user would fix it). The Settings screen gains an **AI evaluation** section with its own save: provider, model, a write-only key field, **Save key** / **Delete key**, **Test connection**, and the data-sharing disclosure. **Test connection is free:** `verify()` asks DeepSeek's `/user/balance`, so it spends no tokens and returns no completion. Only DeepSeek is constructible; OpenAI/Anthropic/Gemini are shown disabled rather than hidden, and they parse so a stored choice survives. **Deviation:** `rig` 0.46.0 requires rustc **1.97.1**, so the workspace MSRV moved from 1.83 to 1.97.1, and the tree now carries two `reqwest` versions (0.12 for acquisition, 0.13 for `rig-reqwest`) — recorded in the risk table rather than silently accepted. `LlmClient` exposes only `provider`, `model`, and `verify()` until WS3 adds completion and streaming. Live coverage: `deepseek_accepts_the_configured_key`, `#[ignore]`d and indexed in `docs/LIVE_TESTS.md`. |
 
 ---
 
@@ -186,12 +187,29 @@ pub struct LlmConfig {
     pub model: String,
     pub temperature: f32,
     pub max_tokens: Option<u32>,
+    /// Character budget for the job text (WS3's proxy for tokens).
+    pub max_job_chars: usize,
 }
 
+/// The only `rig`-typed value in the crate; the app never names one.
+pub struct LlmClient { /* provider, model, rig::providers::openai::OpenAI */ }
+
 impl LlmConfig {
-    pub fn build_client(&self, api_key: &Zeroizing<String>) -> Result<rig::client::Client>;
+    pub fn build_client(&self, api_key: &Zeroizing<String>) -> Result<LlmClient, LlmError>;
+}
+
+impl LlmClient {
+    pub fn provider(&self) -> LlmProvider;
+    pub fn model(&self) -> &str;
+    /// The credential check. DeepSeek answers `/user/balance`, so it is free.
+    pub async fn verify(&self) -> Result<(), LlmError>;
 }
 ```
+
+   `rig` 0.46 constructs a DeepSeek client as
+   `OpenAIConfig::with_key(&wire::DEEPSEEK, key).client()`, and the same type
+   serves OpenAI; that is why `build_client` returns a wrapper rather than a
+   `rig` type. Completion and streaming are added to the wrapper in WS3.
 
 2. API key storage in a **dedicated keychain namespace**, not in `core::keystore`:
 
@@ -270,7 +288,7 @@ pub fn delete_api_key(provider: LlmProvider) -> Result<()>;
 | Criterion | Verification |
 | :--- | :--- |
 | Client construction succeeds for DeepSeek | Integration test (environment-gated) |
-| DeepSeek returns a schema-valid `EvaluationOutput` (tool or JSON mode) | Integration test (environment-gated) |
+| DeepSeek returns a schema-valid `EvaluationOutput` (tool or JSON mode) | Integration test (environment-gated) — asserted with WS3's pipeline, once completions exist |
 | API key round-trips through OS keychain | Integration test |
 | Missing API key produces `MissingApiKey`, not a panic | Unit test |
 | Invalid API key produces a typed provider error | Integration test |
@@ -278,7 +296,7 @@ pub fn delete_api_key(provider: LlmProvider) -> Result<()>;
 | Retry policy handles 429 and 503 | Unit test with mock transport |
 | Settings saves the provider/model and a key, and the key is never rendered after save | UI test |
 | Test connection reports success and a typed failure | Integration test (environment-gated) |
-| An unconfigured provider disables the Pipeline actions with a reason | `egui_kittest` |
+| An unconfigured provider disables the Pipeline actions with a reason | `egui_kittest` — WS1 ships `llm.status()` and the Settings line; WS6 replaces the placeholder buttons and reads it |
 | No API key appears in logs or error messages | Log audit test |
 
 ---
@@ -903,6 +921,7 @@ End-to-end flows:
 | P3-R13 | **Auto `Not a match` overrides the user.** A model opinion changes a status the user set, or a submitted application. | Low | Use `applications::mark_not_a_match`, which refuses submitted states; the status remains visible and editable, and the report is stored even when the transition is refused. |
 | P3-R14 | **DeepSeek's structured-output path is uncertain.** Tool-calling and strict JSON schemas may differ from OpenAI's. | High | Verify in Week 1 before building on it. Prefer tool/JSON-schema output; fall back to `response_format: json_object` plus schema validation and one retry. Never parse free prose. |
 | P3-R15 | **Single-provider dependency and jurisdiction.** DeepSeek is the only provider at launch and is PRC-hosted. | Medium | Keep `core::llm` provider-agnostic and add a second provider behind the same boundary. Disclose the jurisdiction in Settings. Do not log prompts. |
+| P3-R16 | **`rig` raises the toolchain and duplicates a dependency.** 0.46.0 requires rustc **1.97.1** (the workspace MSRV moved from 1.83), and `rig-reqwest` pulls `reqwest` **0.13** beside acquisition's 0.12. | Medium | MSRV is declared as 1.97.1 rather than left stale. The two `reqwest` versions coexist until acquisition can move; revisit at the next `rig` bump, and treat the pairing as a size cost, not a correctness one. |
 
 ---
 

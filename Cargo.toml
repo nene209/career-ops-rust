@@ -5,7 +5,10 @@ exclude = ["spikes"]
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.83"
+# `rig` 0.46 requires rustc 1.97.1, so the workspace MSRV follows the
+# dependency rather than the other way round. Check `rig`'s `rust-version`
+# before any future bump.
+rust-version = "1.97.1"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]

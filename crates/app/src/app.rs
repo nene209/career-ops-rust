@@ -37,6 +37,7 @@ use career_ops_core::acquisition::router::{
     FetchError, FetchOutcome, FetchSource, HttpFetchSource, PreviewReport,
 };
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
+use career_ops_core::llm::{self, LlmConfig, LlmProvider, LlmStatus};
 use career_ops_core::logging::{self, LogHandle, LogLine};
 use career_ops_core::model::{
     ApplicationStatus, CvEntry, FetchTier, JobDescription, Profile, QueueState,
@@ -78,6 +79,10 @@ use crate::view_models::portals::{BatchProgress, PortalsViewModel};
 use crate::view_models::settings::SettingsViewModel;
 
 type StateTask = AsyncTask<(AppState, CoreResult<()>)>;
+
+/// A finished key write: the stored config, whether a key is now present, and
+/// the line to show.
+type KeyTask = AsyncTask<CoreResult<(LlmConfig, bool, &'static str)>>;
 
 /// A page of recent jobs, paired with the status of the application attached
 /// to each job id and the ids that carry user-authored state.
@@ -245,8 +250,17 @@ pub struct CareerOpsApp {
     settings_loaded: bool,
     settings_error: Option<String>,
     settings_message: Option<String>,
-    settings_task: Option<AsyncTask<CoreResult<Preferences>>>,
+    settings_task: Option<AsyncTask<CoreResult<(Preferences, LlmStatus)>>>,
     settings_save_task: Option<AsyncTask<CoreResult<Preferences>>>,
+    /// The AI configuration and whether a key is present, as last loaded.
+    llm_status: Option<LlmStatus>,
+    llm_save_task: Option<AsyncTask<CoreResult<(LlmConfig, bool)>>>,
+    /// Stores or deletes a key. Returns the stored config, whether a key is now
+    /// present, and the message to show.
+    api_key_task: Option<KeyTask>,
+    llm_test_task: Option<AsyncTask<CoreResult<()>>>,
+    /// The provider a running connection test is for, for its message.
+    llm_testing: Option<LlmProvider>,
 
     /// The logging seam. `main` installs the file sink; tests get the buffer.
     logs: LogHandle,
@@ -341,6 +355,11 @@ impl CareerOpsApp {
             settings_message: None,
             settings_task: None,
             settings_save_task: None,
+            llm_status: None,
+            llm_save_task: None,
+            api_key_task: None,
+            llm_test_task: None,
+            llm_testing: None,
             logs,
             logs_view: LogsView::default(),
             logs_snapshot: Vec::new(),
@@ -641,6 +660,10 @@ impl CareerOpsApp {
                 self.start_settings_load();
             }
             SettingsAction::Save(preferences) => self.start_preferences_save(preferences),
+            SettingsAction::SaveLlm(config) => self.start_llm_save(config),
+            SettingsAction::SaveApiKey { key, config } => self.start_api_key_write(key, config),
+            SettingsAction::DeleteApiKey(provider) => self.start_api_key_delete(provider),
+            SettingsAction::TestConnection(config) => self.start_llm_test(config),
         }
     }
 
@@ -902,6 +925,11 @@ impl CareerOpsApp {
         self.settings_message = None;
         self.settings_task = None;
         self.settings_save_task = None;
+        self.llm_status = None;
+        self.llm_save_task = None;
+        self.api_key_task = None;
+        self.llm_test_task = None;
+        self.llm_testing = None;
     }
 
     fn pool(&self) -> Option<sqlx::SqlitePool> {
@@ -2150,7 +2178,13 @@ impl CareerOpsApp {
         };
 
         self.settings_error = None;
-        let task = self.spawn(async move { profile_repo::preferences(&pool).await });
+        let task = self.spawn(async move {
+            let preferences = profile_repo::preferences(&pool).await?;
+            // One round trip: the AI section and the key presence load with
+            // the preferences, so a reload cannot show a half-updated screen.
+            let status = llm::status(&pool).await?;
+            Ok((preferences, status))
+        });
         self.settings_task = Some(task);
     }
 
@@ -2164,8 +2198,11 @@ impl CareerOpsApp {
             TaskPoll::Ready(result) => {
                 self.settings_task = None;
                 match result {
-                    Ok(preferences) => {
+                    Ok((preferences, status)) => {
                         self.settings = SettingsViewModel::from_preferences(preferences);
+                        self.settings
+                            .set_llm(status.config.clone(), status.has_api_key);
+                        self.llm_status = Some(status);
                         self.settings_loaded = true;
                         self.settings_error = None;
                     }
@@ -2241,6 +2278,200 @@ impl CareerOpsApp {
                 ctx.request_repaint();
             }
         }
+    }
+
+    /// Save the provider and model, then re-read whether a key exists for the
+    /// (possibly new) provider so the status line cannot be stale.
+    fn start_llm_save(&mut self, config: LlmConfig) {
+        if self.llm_save_task.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.settings_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.settings_error = None;
+        self.settings_message = None;
+        self.llm_save_task = Some(self.spawn(async move {
+            let saved = config.save(&pool).await?;
+            let has_api_key = llm::keys::has_api_key(saved.provider)?;
+            Ok((saved, has_api_key))
+        }));
+    }
+
+    /// Store a key for `config.provider`, persisting the config first so the
+    /// key and the provider it belongs to cannot disagree.
+    fn start_api_key_write(&mut self, key: String, config: LlmConfig) {
+        if self.api_key_task.is_some() {
+            return;
+        }
+        let Some(pool) = self.pool() else {
+            self.settings_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.settings_error = None;
+        self.settings_message = None;
+        self.api_key_task = Some(self.spawn(async move {
+            let saved = config.save(&pool).await?;
+            llm::keys::set_api_key(saved.provider, &key)?;
+            let present = llm::keys::has_api_key(saved.provider)?;
+            Ok((saved, present, "API key saved."))
+        }));
+    }
+
+    fn start_api_key_delete(&mut self, provider: LlmProvider) {
+        if self.api_key_task.is_some() {
+            return;
+        }
+        let Some(pool) = self.pool() else {
+            self.settings_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.settings_error = None;
+        self.settings_message = None;
+        self.api_key_task = Some(self.spawn(async move {
+            let config = LlmConfig::load(&pool).await?;
+            llm::keys::delete_api_key(provider)?;
+            let present = llm::keys::has_api_key(config.provider)?;
+            Ok((config, present, "API key deleted."))
+        }));
+    }
+
+    /// Verify the key without spending tokens: DeepSeek answers `verify()`
+    /// with its balance endpoint.
+    fn start_llm_test(&mut self, config: LlmConfig) {
+        if self.llm_test_task.is_some() {
+            return;
+        }
+
+        let provider = config.provider;
+        self.settings_error = None;
+        self.settings_message = None;
+        self.llm_testing = Some(provider);
+        self.llm_test_task = Some(self.spawn(async move {
+            let Some(key) = llm::keys::get_api_key(provider)? else {
+                return Err(career_ops_core::CoreError::from(
+                    llm::LlmError::MissingApiKey { provider },
+                ));
+            };
+            config.build_client(&key)?.verify().await?;
+            Ok(())
+        }));
+    }
+
+    fn poll_llm_tasks(&mut self, ctx: &egui::Context) {
+        let mut repaint = false;
+
+        if let Some(task) = self.llm_save_task.as_mut() {
+            match task.try_recv() {
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50))
+                }
+                TaskPoll::Ready(result) => {
+                    self.llm_save_task = None;
+                    match result {
+                        Ok((config, has_api_key)) => {
+                            self.settings.mark_llm_saved(config.clone());
+                            self.settings.set_api_key_present(has_api_key);
+                            self.adopt_llm_status(config, has_api_key);
+                            self.settings_message = Some("AI settings saved.".into());
+                            self.settings_error = None;
+                        }
+                        Err(error) => {
+                            self.settings_message = None;
+                            self.settings_error =
+                                Some(format!("Could not save the AI settings: {error}"));
+                        }
+                    }
+                    repaint = true;
+                }
+                TaskPoll::Cancelled => {
+                    self.llm_save_task = None;
+                    self.settings_error = Some("The save was interrupted.".into());
+                    repaint = true;
+                }
+            }
+        }
+
+        if let Some(task) = self.api_key_task.as_mut() {
+            match task.try_recv() {
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50))
+                }
+                TaskPoll::Ready(result) => {
+                    self.api_key_task = None;
+                    match result {
+                        Ok((config, has_api_key, message)) => {
+                            self.settings.mark_llm_saved(config.clone());
+                            self.settings.set_api_key_present(has_api_key);
+                            self.adopt_llm_status(config, has_api_key);
+                            self.settings_message = Some(message.into());
+                            self.settings_error = None;
+                        }
+                        Err(error) => {
+                            self.settings_message = None;
+                            self.settings_error =
+                                Some(format!("Could not update the API key: {error}"));
+                        }
+                    }
+                    repaint = true;
+                }
+                TaskPoll::Cancelled => {
+                    self.api_key_task = None;
+                    self.settings_error = Some("The key update was interrupted.".into());
+                    repaint = true;
+                }
+            }
+        }
+
+        if let Some(task) = self.llm_test_task.as_mut() {
+            match task.try_recv() {
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100))
+                }
+                TaskPoll::Ready(result) => {
+                    self.llm_test_task = None;
+                    let provider = self.llm_testing.take();
+                    match result {
+                        Ok(()) => {
+                            let name = provider.map(|p| p.label()).unwrap_or("the provider");
+                            self.settings_message =
+                                Some(format!("Connection to {name} succeeded."));
+                            self.settings_error = None;
+                        }
+                        Err(error) => {
+                            self.settings_message = None;
+                            self.settings_error =
+                                Some(format!("The connection test failed: {error}"));
+                        }
+                    }
+                    repaint = true;
+                }
+                TaskPoll::Cancelled => {
+                    self.llm_test_task = None;
+                    self.llm_testing = None;
+                    self.settings_error = Some("The connection test was interrupted.".into());
+                    repaint = true;
+                }
+            }
+        }
+
+        if repaint {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Adopt a configuration the user just saved and re-derive its capabilities.
+    fn adopt_llm_status(&mut self, config: LlmConfig, has_api_key: bool) {
+        self.llm_status = Some(LlmStatus {
+            capabilities: llm::capabilities(config.provider, &config.model),
+            config,
+            has_api_key,
+        });
     }
 
     fn start_entry_write(&mut self, write: EntryWrite) {
@@ -2446,6 +2677,14 @@ fn fetch_all_summary(report: &FetchAllPagesReport) -> String {
     }
 }
 
+/// One line for the Settings screen: ready, or the first thing to fix.
+fn llm_status_line(status: &LlmStatus) -> String {
+    match status.blocked_reason() {
+        None => format!("Ready to evaluate with {}.", status.config.model),
+        Some(reason) => reason,
+    }
+}
+
 /// The one-line result shown after a description batch.
 ///
 /// The batch is bounded, so "there is more" has to be sayable without making a
@@ -2601,6 +2840,7 @@ impl eframe::App for CareerOpsApp {
                 self.poll_cv_profile_entry(ui.ctx());
                 self.poll_settings_task(ui.ctx());
                 self.poll_preferences_save(ui.ctx());
+                self.poll_llm_tasks(ui.ctx());
                 self.drain_batch_progress();
 
                 // The buffer is where background tasks report; without a wake
@@ -2685,9 +2925,14 @@ impl eframe::App for CareerOpsApp {
                     deleting: self.cv_profile_deleting,
                 };
 
+                let llm_line = self.llm_status.as_ref().map(llm_status_line);
                 let settings_state = SettingsRenderState {
                     loading: self.settings_task.is_some(),
                     saving: self.settings_save_task.is_some(),
+                    ai_busy: self.llm_save_task.is_some()
+                        || self.api_key_task.is_some()
+                        || self.llm_test_task.is_some(),
+                    llm_status: llm_line.as_deref(),
                     error: self.settings_error.as_deref(),
                     message: self.settings_message.as_deref(),
                 };
@@ -3215,6 +3460,83 @@ mod tests {
         assert!(!app.settings.is_dirty());
     }
 
+    /// The AI section's round trip: store a model, store a key for it, reload
+    /// from storage and the keychain, then delete the key.
+    #[test]
+    fn llm_settings_and_the_api_key_round_trip_through_the_app() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+        // The mock keychain is process-global, so start from no key.
+        llm::keys::delete_api_key(LlmProvider::DeepSeek).expect("clean slate");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+
+        app.start_settings_load();
+        wait_until(&mut app, &ctx, |app| {
+            app.settings_task.is_none() && app.settings_loaded
+        });
+        assert_eq!(app.settings.llm.model, "deepseek-chat");
+        assert!(!app.settings.llm.has_api_key);
+
+        app.handle_settings_action(SettingsAction::SaveLlm(LlmConfig {
+            model: "deepseek-v4-pro".into(),
+            ..LlmConfig::default()
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.llm_save_task.is_none() && app.settings_message.is_some()
+        });
+
+        assert_eq!(app.settings.llm.model, "deepseek-v4-pro");
+        assert!(!app.settings.is_llm_dirty());
+        assert_eq!(
+            app.llm_status
+                .as_ref()
+                .map(|status| status.config.model.as_str()),
+            Some("deepseek-v4-pro")
+        );
+
+        app.handle_settings_action(SettingsAction::SaveApiKey {
+            key: "sk-test-deepseek".into(),
+            config: app.settings.llm_config(),
+        });
+        wait_until(&mut app, &ctx, |app| {
+            app.api_key_task.is_none() && app.settings_message.as_deref() == Some("API key saved.")
+        });
+
+        assert!(app.settings.llm.has_api_key);
+        assert!(
+            app.llm_status.as_ref().is_some_and(|status| status.ready()),
+            "a stored key and a chat model are ready"
+        );
+        assert!(llm::keys::has_api_key(LlmProvider::DeepSeek).expect("has"));
+
+        // Forget the form and load again: the values come from `settings` and
+        // the keychain, not from the view model.
+        app.settings = SettingsViewModel::default();
+        app.settings_loaded = false;
+        app.handle_settings_action(SettingsAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.settings_task.is_none() && app.settings_loaded
+        });
+
+        assert_eq!(app.settings.llm.model, "deepseek-v4-pro");
+        assert!(app.settings.llm.has_api_key);
+
+        app.handle_settings_action(SettingsAction::DeleteApiKey(LlmProvider::DeepSeek));
+        wait_until(&mut app, &ctx, |app| {
+            app.api_key_task.is_none()
+                && app.settings_message.as_deref() == Some("API key deleted.")
+        });
+
+        assert!(!app.settings.llm.has_api_key);
+        assert!(!llm::keys::has_api_key(LlmProvider::DeepSeek).expect("has"));
+        assert!(app
+            .llm_status
+            .as_ref()
+            .is_some_and(|status| !status.ready()));
+    }
+
     /// The Logs screen is one click from a fetch failure, and opening it must
     /// not leave the drawer that would duplicate it on top.
     #[test]
@@ -3512,6 +3834,7 @@ mod tests {
             app.poll_cv_profile_entry(ctx);
             app.poll_settings_task(ctx);
             app.poll_preferences_save(ctx);
+            app.poll_llm_tasks(ctx);
             app.drain_batch_progress();
             if condition(app) {
                 return;

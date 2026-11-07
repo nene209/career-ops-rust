@@ -10,6 +10,7 @@ pub mod backend;
 pub mod db;
 pub mod error;
 pub mod keystore;
+pub mod llm;
 pub mod logging;
 pub mod model;
 pub mod portals;

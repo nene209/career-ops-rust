@@ -1,33 +1,53 @@
 //! Settings screen.
 //!
-//! Phase 2.9 adds the acquisition preferences section; the rest of Settings
-//! (log level, backends, key rotation) arrives in Phase 5. The screen renders
-//! the form and returns a `SettingsAction`; the app owns the load and the save,
-//! the same split every other screen uses.
+//! Phase 2.9 adds the acquisition preferences section and Phase 3 adds the AI
+//! section beside it; the rest of Settings (log level, backends, key rotation)
+//! arrives in Phase 5. The screen renders the forms and returns a
+//! `SettingsAction`; the app owns the load, the save, and the keychain, the same
+//! split every other screen uses.
 //!
-//! The five fields are comma-separated lists rather than add/remove rows. This
-//! screen is visited rarely, so typing is cheaper than a widget per entry, and
-//! the parsing (`view_models::settings`) is forgiving about spacing, blanks, and
-//! duplicates.
+//! The five preference fields are comma-separated lists rather than add/remove
+//! rows. This screen is visited rarely, so typing is cheaper than a widget per
+//! entry, and the parsing (`view_models::settings`) is forgiving about spacing,
+//! blanks, and duplicates.
+//!
+//! The AI section has its own save. Preferences live in `profile`, the AI
+//! choice in `settings`, and the API key in the OS keychain; one button would
+//! have to say which of the three failed.
 
 use egui::{Button, Color32, RichText, Ui};
 
+use career_ops_core::llm::{LlmConfig, LlmProvider};
 use career_ops_core::preferences::Preferences;
 
 use crate::view_models::settings::SettingsViewModel;
 
 use super::components::{labelled_input, LoadingSpinner};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SettingsAction {
     Reload,
     Save(Preferences),
+    /// Provider and model. The key is saved separately.
+    SaveLlm(LlmConfig),
+    /// Store a key for the config's provider. The config travels with it so a
+    /// provider change and its first key are one action.
+    SaveApiKey {
+        key: String,
+        config: LlmConfig,
+    },
+    DeleteApiKey(LlmProvider),
+    TestConnection(LlmConfig),
 }
 
 #[derive(Default, Clone, Copy)]
 pub struct SettingsRenderState<'a> {
     pub loading: bool,
     pub saving: bool,
+    /// A keychain write, a key delete, or a connection test is in flight.
+    pub ai_busy: bool,
+    /// One line from `llm.status()`: ready, or the first thing to fix.
+    pub llm_status: Option<&'a str>,
     pub error: Option<&'a str>,
     pub message: Option<&'a str>,
 }
@@ -139,9 +159,128 @@ pub fn show(
             &mut view_model.form.seniority,
             "A hint for Phase 3.2's triage. No filter uses it yet.",
         );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        ai_section(ui, view_model, state, &mut action);
     });
 
     action
+}
+
+/// The provider, the model, and the API key.
+///
+/// Everything here has a separate save from the preferences: the two live in
+/// different places (`profile` and `settings`), and the key lives in the OS
+/// keychain, so a single button could not name what failed.
+fn ai_section(
+    ui: &mut Ui,
+    view_model: &mut SettingsViewModel,
+    state: SettingsRenderState<'_>,
+    action: &mut Option<SettingsAction>,
+) {
+    ui.label(RichText::new("AI evaluation").strong());
+    ui.label(
+        RichText::new(
+            "Evaluations send your CV summary and the selected job's description to the \
+             provider below. Nothing leaves this machine until you run one. DeepSeek is \
+             hosted in the PRC; the API key is stored in the OS keychain, never the database.",
+        )
+        .weak(),
+    );
+    if let Some(status) = state.llm_status {
+        ui.label(RichText::new(status).weak().small());
+    }
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Provider");
+        for provider in LlmProvider::ALL {
+            let selected = view_model.llm.provider == provider;
+            let response = ui
+                .add_enabled(
+                    provider.is_supported(),
+                    Button::selectable(selected, provider.label()),
+                )
+                .on_disabled_hover_text("Not supported by this build yet");
+            if response.clicked() && !selected {
+                view_model.llm.provider = provider;
+                // A model name belongs to one provider; keeping DeepSeek's
+                // when the provider changes would send a request that cannot
+                // work.
+                view_model.llm.model = provider.default_model().unwrap_or_default().to_string();
+            }
+        }
+    });
+
+    labelled_input(ui, "Model", &mut view_model.llm.model, false);
+    ui.label(
+        RichText::new("The model name the provider serves, for example deepseek-chat.")
+            .weak()
+            .small(),
+    );
+    ui.add_space(6.0);
+
+    labelled_input(ui, "API key", &mut view_model.llm.api_key, true);
+    ui.horizontal(|ui| {
+        let can_save = !view_model.llm.api_key.trim().is_empty() && !state.ai_busy;
+        if ui
+            .add_enabled(can_save, Button::new("Save key"))
+            .on_hover_text("Store the key in the OS keychain; it is never written to the database")
+            .clicked()
+        {
+            let key = view_model.take_api_key();
+            *action = Some(SettingsAction::SaveApiKey {
+                key,
+                config: view_model.llm_config(),
+            });
+        }
+
+        if view_model.llm.has_api_key {
+            ui.label(RichText::new("A key is stored.").weak());
+            if ui
+                .add_enabled(!state.ai_busy, Button::new("Delete key"))
+                .clicked()
+            {
+                *action = Some(SettingsAction::DeleteApiKey(view_model.llm.provider));
+            }
+        } else {
+            ui.label(RichText::new("No key stored.").weak());
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                view_model.is_llm_dirty() && !state.ai_busy,
+                Button::new("Save AI settings"),
+            )
+            .clicked()
+        {
+            *action = Some(SettingsAction::SaveLlm(view_model.llm_config()));
+        }
+
+        if ui
+            .add_enabled(
+                view_model.llm.has_api_key && !state.ai_busy,
+                Button::new("Test connection"),
+            )
+            .on_hover_text("Ask DeepSeek to confirm the key; no tokens are spent")
+            .clicked()
+        {
+            *action = Some(SettingsAction::TestConnection(view_model.llm_config()));
+        }
+
+        if state.ai_busy {
+            LoadingSpinner::show(ui);
+        }
+        if view_model.is_llm_dirty() && !state.ai_busy {
+            ui.label(RichText::new("· unsaved changes").weak());
+        }
+    });
 }
 
 fn field(ui: &mut Ui, label: &str, value: &mut String, help: &str) {
