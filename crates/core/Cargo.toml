@@ -7,23 +7,37 @@ license.workspace = true
 
 [features]
 default = []
-# keychain backend for production; mock for tests uses the "mock" feature
 keychain = ["dep:keyring"]
+chromium-fallback = []
 
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+sqlx.workspace = true
+# `io-util` is for reading the sidecar's stderr; `process` is used by the
+# Obscura backend (previously reached transitively, which `cargo` does not
+# promise).
+tokio = { workspace = true, features = ["io-util", "process"] }
 tracing.workspace = true
+# The logging module installs the subscriber (file + in-process buffer). This is
+# a workspace dependency already in `Cargo.lock` through the app, so it adds no
+# new package: only the dependency edge.
+tracing-subscriber.workspace = true
 zeroize.workspace = true
 
 async-trait = "0.1"
 base64 = "0.22"
+directories = "5"
+chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3.34"
 hex = "0.4"
+html-escape = "0.2"        # Greenhouse content unescaping
 rand = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+scraper = "0.22"           # HTML parsing
 sha2 = "0.10"
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -33,15 +47,6 @@ argon2 = "0.5"
 chacha20poly1305 = "0.10"
 
 # database
-sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio",
-    "sqlite",
-    "macros",
-    "migrate",
-    "chrono",
-    "uuid",
-    "json",
-] }
 # SQLCipher support is enabled by requesting the bundled-sqlcipher feature on
 # libsqlite3-sys. This is one of the P1-R1 friction points — see
 # IMPLEMENTATION_NOTES.md.
@@ -54,7 +59,14 @@ keyring = { version = "3", optional = true, features = [
     "linux-native",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
+
 [dev-dependencies]
-keyring = { version = "3", features = ["mock"] }
+career-ops-test-support = { workspace = true }
+keyring = "3"
+# Drives the `log` -> `tracing` bridge test: `try_init` installs it, and
+# without it `sqlx`'s `log` records would vanish.
+log = "0.4"
 tempfile = "3"
 tokio = { workspace = true, features = ["full"] }

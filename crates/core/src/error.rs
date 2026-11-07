@@ -42,6 +42,16 @@ pub enum CoreError {
 
     #[error("internal invariant violated: {0}")]
     Internal(&'static str),
+
+    /// A runtime failure with a dynamic, caller-supplied message.
+    ///
+    /// Distinct from `Internal`, which is for invariant violations
+    /// (bugs in the code) whose message is known at compile time.
+    /// `Message` is for failures that arise from user input, network
+    /// responses, or other runtime data and whose message is
+    /// constructed at the failure site.
+    #[error("{0}")]
+    Message(String),
 }
 
 impl From<argon2::password_hash::Error> for CoreError {

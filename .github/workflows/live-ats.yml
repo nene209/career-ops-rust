@@ -1,0 +1,23 @@
+name: live-ats
+
+on:
+  schedule:
+    # 03:17 UTC daily. Off the hour to avoid the top-of-hour runner surge.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  live-ats:
+    name: live ATS adapters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run live ATS tests
+        env:
+          RUN_LIVE_ATS_TESTS: "1"
+        run: cargo test -p career-ops-core --test ats_live -- --nocapture

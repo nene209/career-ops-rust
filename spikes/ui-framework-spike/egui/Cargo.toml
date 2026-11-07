@@ -1,0 +1,11 @@
+[package]
+name = "egui-unlock-spike"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+
+[dev-dependencies]
+egui_kittest = { version = "0.31", features = ["snapshot", "wgpu"] }

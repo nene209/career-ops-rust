@@ -6,7 +6,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Profile {
@@ -46,6 +45,9 @@ pub enum ApplicationStatus {
     Interviewing,
     Rejected,
     Offer,
+    /// The posting was reviewed and judged not worth pursuing. Reversible to
+    /// `discovered`; not reachable from a submitted or decided application.
+    NotAMatch,
 }
 
 impl ApplicationStatus {
@@ -58,6 +60,7 @@ impl ApplicationStatus {
             Self::Interviewing => "interviewing",
             Self::Rejected => "rejected",
             Self::Offer => "offer",
+            Self::NotAMatch => "not_a_match",
         }
     }
 
@@ -70,6 +73,7 @@ impl ApplicationStatus {
             "interviewing" => Self::Interviewing,
             "rejected" => Self::Rejected,
             "offer" => Self::Offer,
+            "not_a_match" => Self::NotAMatch,
             _ => return None,
         })
     }
@@ -108,6 +112,73 @@ pub struct JobDescription {
     pub fetch_tier: String,
     pub external_id: Option<String>,
     pub content_hash: Option<String>,
+    /// One of [`QueueState`]; `new` for a freshly fetched posting (migration
+    /// 0005's default).
+    pub queue_state: String,
+    /// A short note attached to the queue decision, for the user (and, later,
+    /// Phase 3.2's triage).
+    pub queue_reason: Option<String>,
+    pub queued_at: Option<DateTime<Utc>>,
+}
+
+/// The pre-evaluation queue state of a posting.
+///
+/// Deliberately separate from [`ApplicationStatus`]: a row can be `new` with no
+/// application, and only enters the application lifecycle once an evaluation or
+/// a submission happens. `evaluated` is written by Phase 3 when a report exists;
+/// the other four are the user's (and later the triage's) to set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueState {
+    /// Untouched.
+    #[default]
+    New,
+    /// Wants the full description before deciding.
+    DetailsNeeded,
+    /// Wants an evaluation.
+    Evaluate,
+    /// Decided against looking further.
+    Dismissed,
+    /// An evaluation report exists.
+    Evaluated,
+}
+
+impl QueueState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::DetailsNeeded => "details_needed",
+            Self::Evaluate => "evaluate",
+            Self::Dismissed => "dismissed",
+            Self::Evaluated => "evaluated",
+        }
+    }
+
+    /// `None` for a value this build does not know.
+    ///
+    /// The column is free text so a later phase can add a state without a
+    /// migration; a build that predates it must not guess.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "new" => Some(Self::New),
+            "details_needed" => Some(Self::DetailsNeeded),
+            "evaluate" => Some(Self::Evaluate),
+            "dismissed" => Some(Self::Dismissed),
+            "evaluated" => Some(Self::Evaluated),
+            _ => None,
+        }
+    }
+
+    /// The user-facing label, used by the badge and the detail actions.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::New => "New",
+            Self::DetailsNeeded => "Details needed",
+            Self::Evaluate => "Evaluate",
+            Self::Dismissed => "Dismissed",
+            Self::Evaluated => "Evaluated",
+        }
+    }
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -175,9 +246,14 @@ pub struct Portal {
     pub id: i64,
     pub company_name: String,
     pub url: String,
-    pub render_mode: String, // "static" | "browser"
+    pub render_mode: String,            // "static" | "browser"
     pub scraper_config: Option<String>, // JSON
     pub last_verified_at: Option<DateTime<Utc>>,
+    pub last_fetch_attempt_at: Option<DateTime<Utc>>,
+    pub last_failure_cause: Option<String>,
+    /// The last list page a fetch read. `0` means none yet. Only providers with
+    /// an explicit page (Eightfold, a selector URL template) advance it.
+    pub last_page_fetched: i64,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

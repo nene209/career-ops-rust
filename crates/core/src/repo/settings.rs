@@ -14,37 +14,25 @@ use sqlx::SqlitePool;
 use crate::error::Result;
 
 pub async fn get_raw(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
-    let value: Option<String> =
-        sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
-            .bind(key)
-            .fetch_optional(pool)
-            .await?;
+    let value: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await?;
     Ok(value)
 }
 
-pub async fn get_json<T: DeserializeOwned>(
-    pool: &SqlitePool,
-    key: &str,
-) -> Result<Option<T>> {
+pub async fn get_json<T: DeserializeOwned>(pool: &SqlitePool, key: &str) -> Result<Option<T>> {
     match get_raw(pool, key).await? {
         Some(raw) => Ok(Some(serde_json::from_str(&raw)?)),
         None => Ok(None),
     }
 }
 
-pub async fn get_or<T: DeserializeOwned>(
-    pool: &SqlitePool,
-    key: &str,
-    default: T,
-) -> Result<T> {
+pub async fn get_or<T: DeserializeOwned>(pool: &SqlitePool, key: &str, default: T) -> Result<T> {
     Ok(get_json::<T>(pool, key).await?.unwrap_or(default))
 }
 
-pub async fn set_json<T: Serialize>(
-    pool: &SqlitePool,
-    key: &str,
-    value: &T,
-) -> Result<()> {
+pub async fn set_json<T: Serialize>(pool: &SqlitePool, key: &str, value: &T) -> Result<()> {
     let raw = serde_json::to_string(value)?;
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES (?, ?)

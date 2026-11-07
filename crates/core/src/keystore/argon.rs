@@ -10,6 +10,7 @@ use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use chrono::Utc;
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 use super::wrap::{b64, unb64, KdfParams, KeyWrap, WrappedDek};
 use crate::error::{CoreError, Result};
@@ -46,12 +47,17 @@ pub fn derive_and_wrap(passphrase: &str, dek: &[u8; 32]) -> Result<KeyWrap> {
     })
 }
 
-pub fn unwrap(wrapped: &WrappedDek, passphrase: &str) -> Result<[u8; 32]> {
+pub fn unwrap(wrapped: &WrappedDek, passphrase: &str) -> Result<Zeroizing<[u8; 32]>> {
     let (kdf, nonce, ct) = wrapped
         .wraps
         .iter()
         .find_map(|w| match w {
-            KeyWrap::Passphrase { kdf, nonce, ciphertext, .. } => Some((kdf, nonce, ciphertext)),
+            KeyWrap::Passphrase {
+                kdf,
+                nonce,
+                ciphertext,
+                ..
+            } => Some((kdf, nonce, ciphertext)),
             _ => None,
         })
         .ok_or_else(|| CoreError::CorruptWrap("no passphrase wrap present".into()))?;
@@ -65,18 +71,23 @@ pub fn unwrap(wrapped: &WrappedDek, passphrase: &str) -> Result<[u8; 32]> {
     if nonce_bytes.len() != 24 {
         return Err(CoreError::CorruptWrap("nonce wrong length".into()));
     }
-    let nonce_arr: [u8; 24] = nonce_bytes.as_slice().try_into().unwrap();
+    let nonce_arr: [u8; 24] = nonce_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CoreError::CorruptWrap("nonce wrong length".into()))?;
 
     let pt = cipher
         .decrypt(&XNonce::from(nonce_arr), ct_bytes.as_slice())
         .map_err(|_| CoreError::WrongPassphrase)?;
 
     if pt.len() != 32 {
-        return Err(CoreError::CorruptWrap("unwrap produced wrong length".into()));
+        return Err(CoreError::CorruptWrap(
+            "unwrap produced wrong length".into(),
+        ));
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&pt);
-    Ok(out)
+    Ok(Zeroizing::new(out))
 }
 
 fn derive(passphrase: &str, kdf: &KdfParams) -> Result<[u8; 32]> {

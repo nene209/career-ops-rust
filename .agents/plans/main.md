@@ -1,9 +1,9 @@
 # Draft Execution Plan: Career-Ops Rust Desktop Application
 
-**Status:** Draft — v0.5
-**Last updated:** 2026-10-17
+**Status:** Draft — v0.24
+**Last updated:** 2026-11-06
 
-This document outlines the execution plan for porting the `career-ops` project from its current Node.js, file-based architecture to a Rust desktop application using GPUI, SQLite, and a primarily pure-Rust technology stack. The plan incorporates the stated technical decisions and evaluates the key architectural considerations.
+This document outlines the execution plan for porting the `career-ops` project from its current Node.js, file-based architecture to a Rust desktop application using egui, SQLite, and a primarily pure-Rust technology stack. The plan incorporates the stated technical decisions and evaluates the key architectural considerations.
 
 ### Change Log
 
@@ -14,6 +14,25 @@ This document outlines the execution plan for porting the `career-ops` project f
 | v0.3 | Made PDF generation backend-agnostic via a `PdfBackend` trait, mirroring `BrowserBackend`. Selected `rust-headless-chrome` as the initial Tier 2 and PDF backend. Demoted `printpdf` from default PDF path to a medium-term alternative backend. Restructured §6. Lowered R-1 severity; raised the profile of the slimming path. |
 | v0.4 | Encryption at rest is now mandatory with no unencrypted mode. Replaced direct keychain-stored DB key with envelope encryption (DEK wrapped by a keychain-stored KEK, plus a passphrase-derived recovery path). Added "never re-initialize on key loss" rule. Added `keyring` crate feature-flag hazard. Revised R-5; added R-10 and R-11. |
 | v0.5 | Phase 0 skipped; decisions made directly. Tier 1 confirmed insufficient for target portals: browser is **required**, not feature-gated. Obscura chosen as initial `BrowserBackend` (scraping only). Obscura cannot render PDFs — no layout/paint engine — so `rust-headless-chrome` is the initial `PdfBackend`. Two-browser architecture documented; single-browser alternative flagged as an open question. `printpdf` confirmed as post-v1 (Track A). Bundle size expectations revised to ~190–250 MB. |
+| v0.6 | UI framework changed from GPUI to **egui/eframe** after Phase 2.01. §3 rewritten against egui. §9 bundle table updated (egui ~5 MB base vs GPUI ~12 MB). §12 amended with Phase 2.01 and Phase 2.1. Decisions log records GPUI as evaluated and rejected, and egui as the chosen framework. Appendix B updated: Q-2 resolved, Q-7 added for the accessibility gap. Toolchain requirement lowered from 1.95.0 (GPUI's `cold_path`) to the workspace's actual MSRV. |
+| v0.7 | Phase 2.2 inserted between the UI shell and AI integration. The Phase 2.1 verification run against a real selector-configured careers page showed that fetched postings are not yet evaluable: Tier 1b stops at page one, stores the card teaser instead of the description, and the SmartRecruiters adapter stores neither a per-posting URL nor any text. Phase 2.2 is the smallest work that closes that gap before Phase 3 builds evaluations on top of it. Phase 2.1 marked complete. |
+| v0.8 | Phase 2.3 added after probing `https://jobs.nvidia.com/careers`, which is an Eightfold site: its postings come from `/api/pcsx/*` JSON endpoints, not from HTML. Neither extraction tier can fetch it, with or without a selector config. Phase 2.3 therefore introduces site providers (selectors, eightfold) and an embedded known-site registry that offers a config when the app knows the host, while keeping manual configuration as the escape hatch. |
+| v0.9 | Phase 2.4 added after Phase 2.3 closed. The registry and prefill work, but the only way to reach them is to type a URL the app already knows, so the embedded profiles are effectively hidden. Phase 2.4 adds a chooser at the start of the add flow, a "based on" attribution with a modified marker, and a visible restore action. It is UI over the existing constants: no storage, no migration, no new provider. |
+| v0.10 | Phase 2.5 added after the first real manual test session. Eight findings, but only some are what they first appeared: the duplicate NVIDIA rows are an identity/dedup bug (manual add bypasses the provider, and dedup skips its title/company fallback when an `external_id` exists), the empty and truncated descriptions are coverage and clobbering, and the HTML in the detail panel is a display bug, not a storage one. Phase 2.5 closes those before Phase 3 builds on the data. |
+| v0.11 | Phase 2.6 added after Phase 2.5 closed. The registry exposes only the two hand-curated sites while four ATS boards are verified by live tests and invisible in the UI. Phase 2.6 models an ATS board as a site whose engine is selected by URL (an `Engine` enum, not a new provider), adds Figma/Greenhouse, Spotify/Lever, Linear/Ashby, and Ubisoft/SmartRecruiters as known sites, and adds the chooser filter that Phase 2.4 deferred. No storage change, no migration, no new dependency. |
+| v0.12 | Phase 2.7 inserted between 2.6 and Phase 3 after the Phase 3 review found that the CV / Profile screen is still a placeholder. Phase 3's `{{cv_summary}}` needs identity, a summary, and CV entries; the repositories exist but there is no editor and no canonical summary renderer. Phase 2.7 adds both, with no schema change, so Phase 3 can stay AI-focused. Phase 3's plan moves to v0.5: DeepSeek is the first provider through its OpenAI-compatible API, the compact prompts are confirmed, report provenance is a migration, and auto `Not a match` uses the existing writer. |
+| v0.13 | Phase 2.7 complete: the CV / Profile screen replaces the placeholder, and `repo::profile::render_cv_summary` / `cv_summary` is the single candidate-summary renderer. Phase 3's `{{cv_summary}}` dependency is now a shipped function, not an assumption; its plan moves to v0.6 with the exact call, the `None` semantics, and the tests named. |
+| v0.14 | Phases 2.8, 2.9, and 3.2 added and the ordering made explicit: **2.8 → 2.9 → Phase 3 → 3.2**. Phase 3 and the queue phase had come to depend on each other (Phase 3's entry conditions assumed the queue existed; the queue plan listed Phase 3 as a dependency), and the queue plan's real inputs — `applications::ensure`, `Not a match`, the raw/plain toggle, `refresh_job` — are all Phase 2.5 deliverables. It therefore moves ahead of Phase 3 as **2.9**. Migrations renumber with it: 2.9 takes **0005**, Phase 3 takes **0006**, Phase 3.2 keeps **0007**. Phase 2.8 settles its naming (**Refresh** / **Continue** / **Fetch all pages**, with the header becoming **Reload list** / **Fetch all portals**), fixes Refresh rewinding the continuation cursor, and makes detail enrichment a per-portal opt-in. §3's screen table reflects the new Pipeline filters and Portals actions. |
+| v0.15 | Phase 2.8 complete. The fetch row is **Refresh** / **Continue** / **Fetch all pages** with a cumulative progress line and Stop, the header reads **Reload list** / **Fetch all portals**, the cursor is monotonic per run kind, and `detail.enabled` gates enrichment (legacy blocks and Eightfold keep their behavior). Manual testing found three problems, all fixed: a chunk that ended at a refused page was misreported as "no progress" (now `Stopped`, naming the page); a page that kept refusing left no way past it (the walk now records the pages it read, and the screen offers **Skip page N and continue**); and the page that started all of it was a parse bug — NVIDIA sends `postedTs: 0.0`, one `Option<i64>` field failed the whole page, and the parser now reads that field defensively and skips a posting it cannot read instead of the page. A failed single fetch also shows its classified reason in the header. §4.3e and §4.4a–c are verified by the owner; §4.4d is test-covered, and stays in the script for a genuine refusal. |
+| v0.16 | **Phase 2.8.1 (Logging and Diagnostics)** inserted between 2.8 and 2.9, so the order is **2.8 → 2.8.1 → 2.9 → Phase 3 → 3.2**. The phase adds nothing user-facing except the ability to see what happened: today `main.rs` logs to stderr with a level that only `RUST_LOG` sets, so a windowed build is silent, and the ~25 call sites are failure-only — which is why the Phase 2.8 stall took three round trips (F8, F9, F10) to diagnose. It installs one seam with two sinks (`<data_dir>/logs/`, rotated, plus a bounded in-process ring buffer), a **Logs** screen (chips, search, pause, copy, open folder, delete), an optional bottom drawer for watching a fetch live, per-page and per-chunk `info!` events, sidecar stderr capture, and a panic hook. Release logs at `info` with no environment variable; `RUST_LOG` still overrides. No migration, no new external crate, no change to fetch behavior. **Option C** (JSON logs, per-task spans, diagnostic bundle) is recorded as deferred in the phase plan. Phase 2.9's content is unchanged; only its ordering dependency on this phase is recorded. |
+| v0.17 | Phase 2.8.1 complete. `career_ops_core::logging` owns one `tracing` seam with two sinks: a rotated file under `<data_dir>/logs/` (5 MB × 5 archives, flushed per write) and a 2,000-line in-process ring, both structured, plus a panic hook that writes through its own handle. The app renders the ring in a **Logs** screen (level chips, search over message/target/fields, pause with a captured-line counter, follow, copy, open folder, two-step delete) and in a bottom drawer toggled from the sidebar or `Cmd/Ctrl+L`, which spans the window because it is shown before the shell panels. Fetches now log one line per page (`page`, `bytes`, `jobs`, `added`), one per fetch call (`tier`, `pages`, `stop`, `elapsed_ms`), and one per walk chunk (`first_page`, `pages`, `deepest`, `stop`); the Eightfold parser names the posting index and the page size it lost, and the Obscura sidecar's stderr reaches the log instead of `Stdio::null()`. **View logs** sits beside a Portals error and a stalled walk. `docs/logging.md` records the sinks, the level policy, and the never-log list. No migration; `Cargo.lock` gained two edges on `career-ops-core` and lost the app's `tracing-subscriber` edge; no fetch behavior changed. Plan: `.agents/plans/phase_2.8.1_logging_and_diagnostics.md`; retrospective: `.agents/plans/phase_2.8.1_retrospective.md`. |
+| v0.18 | Phase 2.8.1's manual pass (§9) found two bugs, both fixed. **Follow did not return to the tail:** `stick_to_bottom` only keeps a view that is already at the end, and the frame after the click still held the old offset, so the screen's own scroll check undid the click. The view now owes a per-mount jump, applied as a finite scroll offset (a first attempt with `f32::MAX` overflowed egui's scroll math into a NaN rect and panicked — the kittest suite caught it). **A failed fetch wrote nothing to the log:** every `?` in the router returns before its `fetch finished` line, so a configuration error the UI displayed had no record. `portals::service` now logs `fetch failed` with `portal`, `cause`, and `detail` for single fetches, batch entries, and walk chunks — the one place every path passes. Eleven of thirteen §9 steps pass; §9.4 and §9.10 are the two to re-run. |
+| v0.19 | Phase 2.8.1's manual gate is closed: §9.4 (Follow returning to the tail) and §9.10 (a failed fetch leaving a log line) were re-verified after v0.18's fixes, so all thirteen steps of manual script §9 pass. The final suite then found one latent defect in the buffer itself: sequence numbers were assigned outside the buffer lock, so concurrent writers could store a line behind a newer one — and because the UI refreshes on `latest_seq`, that line could be missed. The counter and the drop count moved inside the mutex, which makes sequence order and storage order identical. |
+| v0.20 | Phase 2.9 WS3 complete, so the queue exists end to end. Migration 0005 adds `queue_state` / `queue_reason` / `queued_at` to `job_descriptions` (default `new`, no backfill, indexed) and the Pipeline detail gains **Mark for details**, **Mark for evaluation**, and **Dismiss**, with a queue badge beside the status badge and a `Dismissed` filter — dismissing hides a row from every other view rather than deleting it. Unknown state values read as `new`, so a newer build's state cannot break an older one, and a queue write on a vanished row is an error the app answers with a reload. The migration test builds a real 0004 schema and applies 0005 by hand, because `create_and_migrate` can only produce the newest schema. WS4 (batch **Fetch descriptions**) and WS5 remain. |
+| v0.21 | Phase 2.9 WS4 complete. `manual::fetch_descriptions_batch` runs the per-job repair path over the flagged rows, bounded at **20 per click**, cancellable between postings, and advances each row that produced text from `details_needed` to `evaluate` in one transaction — a failure leaves the row in the queue. The Pipeline header offers **Fetch descriptions (N)** with a count from the whole page, shows `Descriptions: 4 of 12…` with a failure count and **Stop** while it runs, and puts the first cause in the error line when something fails. Each entry carries the stored text rather than a byte count so the detail view updates without a reload; `PipelineViewModel::set_description` is now the single derivation of plain text plus the markup flag, and the per-job **Refresh description** uses it too (it previously left the plain view stale). WS5 (manual script §6b, docs, retrospective) remains. |
+| v0.22 | **Phase 2.9 complete.** The last workstream wrote manual script **§6b** (preferences → badges → queue actions → batch → Stop → Dismiss → a failure) and extended §6.2/§6.3, recorded Phase 3.2's entry conditions, and closed the phase with `.agents/plans/phase_2.9_retrospective.md`. The retrospective's findings are the substance: a preference field with no column behind it (locations match the posting text, a badge so a false positive is cheap), two hiding decisions needing two escape hatches (a row both excluded and dismissed was invisible in `Dismissed`), a migration test that has to build the 0004 schema by hand, and a stale-plain-text bug the batch exposed in per-job **Refresh description** (both now go through `PipelineViewModel::set_description`). §6b is verified by the owner for steps 1–7; step 8 (a failure that keeps the row in the queue) stays in the script for a genuine refusal and is covered by the offline tests. Phase 3 is next and its entry conditions are met. |
+| v0.23 | **Phase 3 checked against the shipped 2.7–2.9 code; plan v0.8.** One real correctness fix: Phase 3's plan said the queue update happens "in the same transaction" as the report, but `job_descriptions::set_queue_states` opens and commits its own transaction, so WS3 must add a transaction-taking helper and write both inside one transaction. Four corrections: Settings is a real screen since 2.9, so WS1 extends it rather than replacing a placeholder; the Pipeline detail already carries Phase 2.9's queue row and the header its description batch, so WS6 composes with both and its thin-row path reuses `manual::refresh_job`; `core::text::plain_text` matches the documented signature exactly; and `docs/logging.md` already forbids logging prompts, so WS1 adds a count-and-outcome line, not a second logging story. New exit criterion 16 (the queue write) and **Q-43**, which needs a decision before WS6: does an evaluation move `applications.status` through `evaluating` → `ready`, or leave it alone? Also corrects Q-45's premise (Settings is no longer a placeholder). |
+| v0.24 | **Phase 3 is ready to start (plan v0.9).** Q-43 resolved by the owner: an evaluation moves `discovered`/`ready` → `evaluating` → `ready`, restores the previous status on failure or cancellation, leaves every other status alone, and sends a `NoMatch` report straight to `mark_not_a_match`; all three transitions already exist, so it is two calls in WS3 and no schema change. `rig` is pinned to **0.46.0** (checked 2026-11-06) instead of asking for a version at WS1. Exit criteria 16 (queue write) and 17 (application lifecycle) now pin both behaviors. |
 
 ---
 
@@ -33,7 +52,7 @@ The most significant architectural change is inverting the original "files are c
 | `cover_letters` | `output/cover_*.md` | `id`, `application_id`, `content` (markdown), `generated_at` | Stores generated cover letters. |
 | `templates` | (new) | `id`, `name`, `kind` (cv/cover_letter), `content` (HTML), `version`, `content_hash`, `is_system`, `supersedes_id`, `created_at`, `updated_at` | HTML templates for PDF rendering (see §6). |
 | `document_renders` | `output/*.pdf` | `id`, `application_id`, `kind` (cv/cover_letter), `backend_used`, `template_id`, `rendered_at` | Records which backend produced a given PDF. Useful for regression tracking across backend changes. |
-| `portals` | `portals.yml` | `id`, `company_name`, `url`, `render_mode`, `scraper_config` (JSON), `last_verified_at` | Configuration for job acquisition. `render_mode` is `static` or `browser` (see §4). |
+| `portals` | `portals.yml` | `id`, `company_name`, `url`, `render_mode`, `scraper_config` (JSON), `last_verified_at`, `last_fetch_attempt_at`, `last_failure_cause` | Configuration for job acquisition. `render_mode` is `static` or `browser` (see §4). |
 | `prompts` | `modes/*.md` | `id`, `name`, `category` (evaluate/cover/scan), `content`, `is_system`, `version`, `created_at`, `updated_at` | Replaces the Markdown prompt files (see §5). |
 | `settings` | N/A | `key`, `value` (JSON) | Application-wide settings. Holds backend *preferences* among other config. API keys live in the OS keychain, not here. |
 
@@ -45,6 +64,7 @@ The most significant architectural change is inverting the original "files are c
 - `portals.render_mode` is the routing key for §4. Per-portal acquisition strategy belongs in the database, not in code, so users can tune it without a rebuild.
 - `settings` holds backend *preferences*, not backend *availability*. Availability is a compile-time property (see §4 and §6).
 - **The wrapped DEK is not stored in this database.** Storing the key material that unlocks the database inside the database is a chicken-and-egg problem. It lives in a sibling file on disk. See §7.
+- `portals.last_fetch_attempt_at` and `portals.last_failure_cause` were added in migration `0002_portal_fetch_status.sql` during Phase 2. They are distinct from `last_verified_at` by design: `last_verified_at` records the last successful fetch, `last_fetch_attempt_at` records the last attempted fetch of either outcome, and `last_failure_cause` is NULL on success and a FailureCause::as_str() value on failure. The Portals UI health drill-down reads all three.
 
 **`fetch_tier` values (recorded per listing):**
 - `tier1a:greenhouse` / `tier1a:lever` / `tier1a:ashby` / `tier1a:smartrecruiters` — ATS JSON API
@@ -77,116 +97,30 @@ The original project has approximately **70 `.mjs` scripts** at the repository r
 
 ---
 
-## 3. GPUI UI Screens
+## 3. egui UI Screens
 
-The UI will be built with GPUI's hybrid immediate/retained mode architecture, using `Entity` for state management and `Render` traits for declarative views.
+The UI is built with **egui 0.37** on **eframe 0.37**, chosen after the Phase 2.01 evaluation (see `docs/ui-framework-spike.md`). egui is immediate-mode: the `CareerOpsApp::update` method runs on every frame and renders the current state. Async work is spawned on tokio and polled via `request_repaint_after` (see Phase 2.1's async bridge).
 
 | Screen | Primary Data Sources | Key Components |
 | :--- | :--- | :--- |
-| **Unlock** | `core::keystore` | Passphrase entry when keychain is unavailable or the user opts into passphrase unlock. First-run key generation wizard. Recovery flow. |
-| **Dashboard** | `applications`, `evaluation_reports` | Pipeline summary cards (counts by status), recent activity feed, match score distribution chart. |
-| **Job Pipeline** | `applications`, `job_descriptions` | Virtualized table with status filter tabs, sort modes, inline status changes, lazy-loaded previews. |
-| **Job Detail** | `applications`, `job_descriptions`, `evaluation_reports` | Full job posting text, evaluation report viewer, match score breakdown, action buttons (Evaluate, Generate Cover Letter, Mark as Applied). |
-| **CV / Profile Editor** | `profile`, `cv_entries` | Form-based editor for personal details, experience entries, education, skills. Live markdown preview. PDF preview pane driven by the active `PdfBackend`. |
-| **Portals Configuration** | `portals` | List of job boards with add/edit/delete. Per-portal `render_mode` selector and scraper configuration. Displays acquisition health and the tier that succeeded. |
-| **Prompt Manager** | `prompts` | Browse, edit, and version prompt templates. System prompts are read-only; user prompts are editable. |
-| **Settings** | `settings` | API key management (OS keychain), model provider selection, PDF template selection, key rotation, data export. |
+| **Unlock** | `core::keystore` via `AppState` | `labelled_input` for passphrase, two buttons, error area |
+| **First-launch wizard** | `AppState::complete_first_launch` | Three-step `egui::Window`: welcome, passphrase + acknowledgement, backup guidance |
+| **Recovery** | `AppState::current() == Recovery` | Full-screen flow with five option cards |
+| **Dashboard** | `applications`, `evaluation_reports` | Summary cards, activity feed, match-score histogram |
+| **Job Pipeline** | `applications`, `job_descriptions`, `profile.preferences` | `egui_extras::TableBuilder` with virtualized rows; status, queue, and preference filters (Phase 2.9); row selection opens detail; triage review (Phase 3.2) |
+| **Job Detail** | `applications`, `job_descriptions`, `evaluation_reports` | Raw description, evaluation viewer, disabled Phase 3 action buttons |
+| **CV / Profile Editor** | `profile`, `cv_entries` | Form-based editor; PDF preview pane arrives in Phase 4 |
+| **Portals Configuration** | `portals`, `portals::health`, `portals::service` | List with health badges; add/edit/delete modals; per-portal **Refresh** / **Continue** / **Fetch all pages** with progress and Stop (Phase 2.8); batch **Fetch all portals**; sidecar status |
+| **Prompt Manager** | `prompts` | Phase 3 |
+| **Settings** | `settings`, `profile.preferences` | Phase 2.9 adds the acquisition preferences section; the rest arrives in Phase 5 |
+| **Logs** | `core::logging` (ring buffer), the log file | Last in the sidebar after a separator: level chips, search, pause with a new-line count, copy, open folder, delete, dropped-line marker (Phase 2.8.1). The same rows also mount as a resizable bottom drawer, gated by a sidebar toggle and `Cmd/Ctrl+L`, so a fetch can be watched while it runs |
 
-**GPUI-Specific Considerations:**
-- Use `gpui-kit` (or the current equivalent) as the primary dependency for production-ready UI primitives.
-- The pipeline table requires virtualized rows for large application histories. Verify this capability early — it was a disqualifying gap for at least one comparable framework.
-- Prefer GPUI's built-in test support for view-level tests rather than driving the UI externally.
-- **Unlock must gate the app.** The database cannot be opened without a valid key (§7). The UI must handle "cannot unlock" as a first-class state with a recovery path, never as a crash.
-- **Backend selection UI reflects the two-backend architecture.** The `BrowserBackend` and `PdfBackend` are separate selections. The UI should explain what each does (scraping vs rendering) rather than presenting a single "browser backend" option.
+**egui-specific considerations:**
 
----
-
-## 4. Job Acquisition: Tiered Scraping Architecture
-
-The original project used Playwright for both job board scraping and HTML-to-PDF generation. This plan separates those two concerns entirely:
-
-- **Job acquisition** uses a tiered architecture where Tier 1 is an optimization and Tier 2 is **required**.
-- **PDF generation** uses a **different backend** from scraping (see §6).
-
-### Tier 1 — Optimization: `reqwest` + `scraper` / ATS JSON APIs
-
-Tier 1 remains valuable for speed and reliability where it works. It is **not** the primary path.
-
-| Crate | Role |
-| :--- | :--- |
-| `reqwest` | Async HTTP client. |
-| `scraper` | HTML parsing with CSS selectors. |
-
-**Handles:** Server-rendered job boards and ATS platforms that return complete HTML or JSON (Greenhouse, Lever, Ashby, SmartRecruiters, and similar).
-
-**Does not handle:** Client-side-rendered SPAs, or portals that block non-browser clients at the TLS/HTTP2 fingerprint level. **These are the target portals.** Direct investigation confirmed that Tier 1 is insufficient for the intended deployment.
-
-**Bundle impact:** ~3–5 MB (`reqwest` + TLS + `scraper`).
-
-### Tier 2 — Required: Headless Browser (Obscura)
-
-Compiled in by default. The browser backend is **not feature-gated** for the intended deployment.
-
-**Initial backend: Obscura.**
-
-Obscura is a headless browser engine written in Rust. It runs JavaScript via V8, exposes the Chrome DevTools Protocol, and is designed as a drop-in replacement for headless Chrome with Puppeteer and Playwright.
-
-**Reported characteristics** (to be verified before Phase 2 commitment):
-
-| Metric | Obscura (reported) | Headless Chrome (typical) |
-| :--- | :--- | :--- |
-| Memory per instance | ~30 MB | 200+ MB |
-| Binary size | ~70 MB | 300+ MB |
-| Page load | ~85 ms | ~500 ms |
-| CDP support | Yes | Yes |
-
-**Critical limitation: Obscura has no layout or paint engine.**
-
-Obscura parses HTML, builds a DOM, and runs JavaScript. It does not render pixels. Per current project documentation, `Page.printToPDF` and `Page.captureScreenshot` are intentionally unsupported, and `printToPDF` returns an explicit "not supported" error directing the caller to extract rendered HTML and render it elsewhere.
-
-This makes Obscura suitable for **scraping** — which needs JS execution and DOM access, not pixel rendering — and **not suitable for PDF generation**. See §6.
-
-> **⚠️ Verification required.** The claim that Obscura cannot render PDFs came from search results, not from direct source inspection. Confirm this against current Obscura documentation before Phase 2 commits. If Obscura has since gained a rendering engine, the §6 backend choice may be revisited. If the claim holds, the two-backend architecture in §6 is correct.
-
-**Fallback backend for scraping: `rust-headless-chrome`.**
-
-If Obscura proves unsuitable for scraping (compatibility, stealth, or coverage gaps), switch the `BrowserBackend` implementation to `rust-headless-chrome`. The trait makes this a contained change. Note that `rust-headless-chrome` is already required for PDF rendering (§6), so the fallback does not add a new binary.
-
-### Open Question: One Browser or Two?
-
-Since `rust-headless-chrome` (and its bundled Chrome binary) is required for PDF rendering regardless, there is a legitimate alternative: **use `rust-headless-chrome` for both scraping and rendering**, and drop Obscura entirely.
-
-| Approach | Pros | Cons |
-| :--- | :--- | :--- |
-| **Two binaries** (Obscura + Chrome) | Lighter runtime for scraping; faster page loads; smaller memory per scraping instance | Two browser binaries to package and maintain; ~190–250 MB total bundle |
-| **One binary** (Chrome only) | One browser binary; ~100–150 MB total bundle; simpler packaging and testing | Heavier runtime for scraping; slower per-instance; larger memory footprint per session |
-
-For a desktop application scraping 10–20 portals sequentially, the runtime advantage of Obscura may not justify the second binary. The argument for two binaries is stronger if scraping is heavily parallelized or runs frequently.
-
-**Recommendation:** Start with the two-binary architecture as planned, because the `BrowserBackend` trait makes the one-binary variant cheap to evaluate. Measure bundle size and scraping performance during Phase 2. If the two-binary setup proves unjustified, collapse to a single `rust-headless-chrome` backend and revisit §9.
-
-**Selection criteria for future backends, in priority order:**
-1. **JS execution fidelity** on real, modern SPAs.
-2. **Scraping coverage** against target portals.
-3. **Bundle size delta** over the current baseline.
-4. **Process model.** Sidecar process preferred over linked-in.
-5. **Maintenance trajectory.**
-
-### Escalation and Routing Logic
-
-Routing is driven by `portals.render_mode`, with a runtime fallback:
-
-1. Read `render_mode` from the `portals` row.
-2. If `static`, run Tier 1. On failure or `js_required` classification, escalate to Tier 2 (always available).
-3. If `browser`, go directly to Tier 2.
-4. Record the tier that actually succeeded in `job_descriptions.fetch_tier`, and update `portals.last_verified_at`.
-5. Optionally suggest a `render_mode` change when escalation consistently succeeds or consistently fails.
-
-Escalation is unconditional. There is no "Tier 2 not compiled in" case. Tier 1 is an optimization: when it works, it is faster and lighter; when it fails, the browser is the normal path, not a last resort.
-
-### Deferred: HTTP-Level Stealth Layer
-
-An intermediate tier using TLS/HTTP2 browser impersonation (e.g. `impit`, `crawlingo`, or equivalent) would handle portals that block plain `reqwest` but don't require JS execution. **Not in scope for v1.** Worth revisiting only if Tier 1 failures are dominated by fingerprint-based blocking rather than JS rendering. Adding a fourth path before measuring is premature complexity.
+- **Async work requires `request_repaint_after`.** egui's update loop sleeps when there is nothing to repaint. The async bridge schedules the next frame while a task is pending, so results are picked up promptly without a busy loop.
+- **`labelled_input` for every text input.** egui's `TextEdit` does not expose `hint_text` as an accessible label. The helper in `crates/app/src/screens/common.rs` is the single place this is handled.
+- **`egui_extras::TableBuilder`** is the right primitive for the Pipeline table. For Portals, a plain `ScrollArea` is sufficient at the expected portal count. `crates/app/docs/patterns.md` records the swap point.
+- **Unlock gates the app.** The `AppState` state machine is the source of truth. Screens render `AppState::current()`; they do not maintain navigation state of their own.
 
 ---
 
@@ -542,14 +476,14 @@ A **full suite of new tests** is required. No Node.js tests port over directly.
 
 | Component | Estimated Impact |
 | :--- | :--- |
-| GPUI application base | ~10–15 MB |
+| egui + eframe application base | ~5 MB (smallest of the four evaluated frameworks) |
 | SQLite + SQLCipher (linked) | ~2–3 MB |
 | `rig` + provider clients | ~2–5 MB |
 | `reqwest` + TLS + `scraper` (Tier 1) | ~3–5 MB |
 | Argon2 + crypto crates | ~1 MB |
 | **Obscura binary (scraping)** | **~70 MB** |
 | **Chrome binary (PDF rendering, via `rust-headless-chrome`)** | **~100–150 MB** |
-| **Total (default build)** | **~190–250 MB** |
+| **Total (default build)** | **~185–245 MB** |
 
 **The key property of this design:** the default and intended deployment includes **two browser-related binaries** — Obscura for scraping and Chrome for PDF rendering. This is larger than a single-browser approach, but it reflects genuine functional separation: Obscura is fast and light for JS execution; Chrome is complete for rendering.
 
@@ -604,15 +538,27 @@ This principle should be asserted in tests, not just documented — e.g. a test 
 
 | Phase | Scope | Duration (Estimate) |
 | :--- | :--- | :--- |
-| **Phase 1: Foundation** | Keystore subsystem (§7) first — envelope encryption, keychain integration, unlock and recovery flows. Then SQLite schema, `sqlx` integration, profile/CV CRUD, basic GPUI shell, `BrowserBackend` and `PdfBackend` trait definitions. | 4–5 weeks |
-| **Phase 2: Acquisition** | **Obscura integration first** (`BrowserBackend` implementation, sidecar lifecycle). Then Tier 1 (ATS JSON, HTML extraction), tier routing, `portals` config UI, acquisition tests with fixtures. Verify Obscura's PDF limitation against current docs in Week 1. | 3–4 weeks |
-| **Phase 3: AI Integration** | `rig` integration, prompt seeding and read-only system prompts, evaluation report generation with `prompt_version` provenance, streaming, injection defense. | 3–4 weeks |
+| **Phase 1: Foundation** | ✅ Complete — Keystore subsystem (§7) first — envelope encryption, keychain integration, unlock and recovery flows. Then SQLite schema, `sqlx` integration, profile/CV CRUD, basic GPUI shell, `BrowserBackend` and `PdfBackend` trait definitions. | 4–5 weeks |
+| **Phase 2: Acquisition** | ✅ Complete — **Obscura integration first** (`BrowserBackend` implementation, sidecar lifecycle). Then Tier 1 (ATS JSON, HTML extraction), tier routing, `portals` config UI, acquisition tests with fixtures. Verify Obscura's PDF limitation against current docs in Week 1. | 3–4 weeks |
+| **Phase 2.01: UI Framework Spike** | ✅ Complete — egui selected, GPUI evaluated and rejected | 1 week |
+| **Phase 2.1: UI Shell** | ✅ Complete — egui/eframe shell; unlock, first-launch, recovery; Portals and Pipeline screens against the Phase 2 service layer. Retrospective: `.agents/plans/phase_2.1_retrospective.md`. | 1.5–2 weeks |
+| **Phase 2.2: Acquisition Completeness** | ✅ Complete — selector pagination, per-host request pacing, detail-page enrichment, the SmartRecruiters job-URL/description fix, and the "Test config" preview are implemented and verified live. Criterion 8 is partially verified (Waymo's WAF challenged the detail route); caps confirmed, two findings recorded for follow-up. Plan: `.agents/plans/phase_2.2_acquisition_completeness.md`; retrospective: `.agents/plans/phase_2.2_retrospective.md`. | 4–6 days |
+| **Phase 2.3: Site Providers and Known Sites** | ✅ Complete — site providers (`selectors`, `eightfold`), the Eightfold engine, the typed known-site registry with form prefill, and the curation workflow are implemented. The first full registry run verified both entries live: Waymo 90 jobs / 3 pages / 2 of 2 descriptions, NVIDIA 50 jobs / 5 pages / 40 of 40 descriptions. Plan: `.agents/plans/phase_2.3_site_providers.md`; registry doc: `docs/known-sites.md`; retrospective: `.agents/plans/phase_2.3_retrospective.md`. | 4–6 days |
+| **Phase 2.4: Known-Site Catalog** | ✅ Complete — **Add portal** opens the embedded registry (sorted, with provider and verification date), choosing an entry runs the same prefill path as typing the URL, and the form names its source, marks a divergent config, and offers **Restore known config**. No storage change, no migration, no new provider. Plan: `.agents/plans/phase_2.4_known_site_catalog.md`; retrospective: `.agents/plans/phase_2.4_retrospective.md`. | 1–2 days |
+| **Phase 2.5: Manual-Testing Fixes** | ✅ Complete — WS1 (canonical identity, dedup, never-clobber, provider-aware manual add), WS2 (page cursor with **Fetch more**, per-job **Refresh description**, Waymo covering every fetched posting), WS3 (`Not a match` status with its first writer and filter), WS4 (delete with a typed gate for touched rows, Pipeline search with a result count), and WS5 (`core::text::plain_text` and the Pipeline's **Raw text** toggle) implemented; Enter unlocks from the password field and the list restores its scroll position. Manual script §6 verified 2026-11-05. Plan: `.agents/plans/phase_2.5_manual_testing_fixes.md`; retrospective: `.agents/plans/phase_2.5_retrospective.md`; live-test index: `docs/LIVE_TESTS.md`. | 4–6 days |
+| **Phase 2.6: Known ATS Boards and a Filtered Chooser** | ✅ Complete — `SiteEngine` distinguishes a config-selected provider from a URL-selected ATS adapter, and Figma/Greenhouse, Spotify/Lever, Linear/Ashby, and Ubisoft/SmartRecruiters are verified known sites (registry run 2026-11-05: Figma 143 jobs, Spotify 86, Linear 31, Ubisoft 207/25 enriched). The chooser filters by name, host, or engine, with Clear and a no-match state. Greenhouse's board-host migration is handled. Plan: `.agents/plans/phase_2.6_known_ats_sites.md`; retrospective: `.agents/plans/phase_2.6_retrospective.md`. | 1–1.5 days |
+| **Phase 2.7: CV / Profile Editor** | ✅ Complete — replaces the CV / Profile placeholder with an identity + summary editor and experience/education/skill entries, and adds one canonical `cv_summary` renderer in core (`repo::profile::render_cv_summary` / `cv_summary`) used by the screen's preview and by Phase 3. No migration, no new dependency. Plan: `.agents/plans/phase_2.7_cv_profile_editor.md`. Retrospective: `.agents/plans/phase_2.7_retrospective.md`. | 3–5 days |
+| **Phase 2.8: Portal Fetch Controls** | ✅ Complete — per-portal **Refresh** / **Continue** / **Fetch all pages** (bounded at 50 pages per click, cancellable, cumulative progress), header **Reload list** / **Fetch all portals**, a monotonic continuation cursor (Refresh raises it to the deepest page read and never lowers it; only Continue clears it at the end), and a per-portal **Fetch descriptions during fetch** toggle stored as `detail.enabled` — legacy `detail` blocks and Eightfold boards keep enriching, and the toggle defers to a hand-edited config. No migration, no new dependency. Plan: `.agents/plans/phase_2.8_portal_fetch_controls.md`. Retrospective: `.agents/plans/phase_2.8_retrospective.md`. | 2–3 days |
+| **Phase 2.8.1: Logging and Diagnostics** | ✅ Complete — one `tracing` seam with two structured sinks: a rotated log file under `<data_dir>/logs/` (5 MB × 5) and a bounded in-process ring, so the app's own history is readable in release with no environment variable. A **Logs** screen (level chips, search, pause, copy, open folder, delete) plus a bottom drawer (`Cmd/Ctrl+L`) that spans the window, per-page and per-chunk `info!` events, sidecar stderr capture, and a panic hook. Sequenced before 2.9 because the description batch and Phase 3's LLM calls are the next things that need it. No migration, no new external package, no change to fetch behavior; `docs/logging.md` records the policy and the never-log list. Manual script §9 is fully verified by the owner (thirteen of thirteen steps), after the two findings it produced (§9.4 Follow, §9.10 a failure missing from the log) were fixed. Option C (JSON logs, per-task spans, diagnostic bundle) is deferred in the plan. Plan: `.agents/plans/phase_2.8.1_logging_and_diagnostics.md`; retrospective: `.agents/plans/phase_2.8.1_retrospective.md`. | 2–3 days |
+| **Phase 2.9: Acquisition Preferences and Job Queue** | ✅ Complete — `core::preferences::Preferences` (preferred companies/locations/keywords, exclusions, seniority) in the existing `profile.preferences` column, a real **Settings** screen with the five list fields, a preference-aware Pipeline (`Preferred`/`Excluded` badges, `Preferred`/`Excluded` filters, `All` hiding exclusions, a header summary), the pre-evaluation queue (migration 0005; **Mark for details** / **Mark for evaluation** / **Dismiss** in the detail view, a queue badge, and a `Dismissed` filter that is the only view showing a dismissed row), and the bounded **Fetch descriptions (N)** batch (20 per click, cancellable, `details_needed` → `evaluate` on success, failures left in the queue). Location preferences match the posting text because no location column exists yet. Manual script §6b is verified by the owner except step 8 (a failing fetch), which is covered by the offline tests. Plan: `.agents/plans/phase_2.9_acquisition_preferences_and_job_queue.md`; retrospective: `.agents/plans/phase_2.9_retrospective.md`. | 3–4 days |
+| **Phase 3: AI Integration** | `rig` integration with **DeepSeek first** (OpenAI-compatible API), a dedicated keychain namespace for API keys, compact evaluation/cover-letter prompts derived from the original modes, evaluation report generation with full provenance (`prompt_version`, `prompt_hash`, `model_used`, `input_chars`, structured score/recommendation via migration 0006), streaming, cover letters, the Prompt Manager, injection defense, and cassette-backed `rig::evals` tests. Builds on Phase 2.7's `{{cv_summary}}` (`repo::profile::cv_summary`, `None` for an empty profile), Phase 2.8's fetch semantics, and Phase 2.9's queue. Plan v0.9: `.agents/plans/phase_3_ai_integration.md`. **Ready to start:** entry conditions are met, Q-43 is resolved (evaluation moves `discovered`/`ready` → `evaluating` → `ready`), and `rig` is pinned to `0.46.0`. | 3–4 weeks |
+| **Phase 3.2: Assisted Triage** | Planned — an advisory LLM triage batch over fresh postings: per-job `details_needed` / `evaluate` / `skip` with a recorded rationale, cost and time shown before and after, and suggest-and-approve portal additions. Decisions are never applied automatically; the user accepts or overrides them in the queue Phase 2.9 creates. Migration 0007. Plan: `.agents/plans/phase_3.2_assisted_triage.md`. | 5–7 days |
 | **Phase 4: Rendering** | `rust-headless-chrome`-based `PdfBackend`, template system, ATS-safe extraction verification, PDF preview, golden-file tests. | 3–4 weeks |
 | **Phase 5: Polish & Hardening** | Complete Settings, key rotation UI, backend selection, onboarding, error handling audit, panic audit, accessibility, platform testing, performance tuning, backup/export, documentation, visual polish. | 3–4 weeks |
 | **Phase 6: Migration & Release** | Migration tool, packaging, code signing, notarization, release candidate testing, auto-update check, release process, documentation finalization. | 2–4 weeks |
 | **Phase 7: Post-v1** | Ongoing maintenance and candidate tracks. `printpdf` manual-ops backend (Track A) is the primary post-v1 item. Single-browser collapse (see §4 Open Question) should be evaluated alongside it. | Open-ended |
 
-**Total Estimate:** 4–6 months for a functional MVP, assuming one experienced Rust developer. The keystore subsystem is sequenced first in Phase 1 because every other subsystem depends on it. Obscura integration is sequenced first in Phase 2 because the browser is the load-bearing acquisition dependency.
+**Total Estimate:** ~5–7 months for a functional MVP, assuming one experienced Rust developer. The keystore subsystem is sequenced first in Phase 1 because every other subsystem depends on it. Obscura integration is sequenced first in Phase 2 because the browser is the load-bearing acquisition dependency. Phases 2.8 and 2.9 add about a week; Phase 2.8.1 adds two to three days; Phase 3.2 adds another.
 
 ---
 
@@ -622,14 +568,14 @@ This principle should be asserted in tests, not just documented — e.g. a test 
 | :--- | :--- | :--- |
 | 1 | SQLite as primary state store (inverting the original file-canonical doctrine) | Confirmed |
 | 2 | Port ~70 Node.js scripts into `core::*` Rust modules | Confirmed |
-| 3 | GPUI as UI framework | Confirmed |
+| 3 | **egui/eframe** as UI framework (was GPUI) | **Superseded by Phase 2.01** — egui chosen after four-framework evaluation |
 | 4 | `rig` for LLM integration | Confirmed |
 | 5 | `sqlx` (async-first) for SQLite | Confirmed |
 | 6 | Backend-agnostic PDF generation via a `PdfBackend` trait | Confirmed (v0.3) |
 | 7 | `reqwest` for HTTP | Confirmed |
 | 8 | `reqwest` + `scraper` for Tier 1 acquisition | Confirmed — **as optimization, not default path** (v0.5) |
 | 9 | Headless browser is **required**, not feature-gated | Confirmed (v0.5) |
-| 10 | **Obscura as the initial `BrowserBackend`** (scraping) | Confirmed (v0.5) |
+| 10 | Browser backend: Obscura sidecar | Confirmed |
 | 11 | CDP-agnostic `BrowserBackend` trait | Confirmed |
 | 12 | **`rust-headless-chrome` as the initial `PdfBackend`** (rendering) | Confirmed (v0.5) |
 | 13 | Prompts seeded from embedded resources, stored in SQLite, user-editable | Confirmed; detail TBD |
@@ -646,6 +592,8 @@ This principle should be asserted in tests, not just documented — e.g. a test 
 | 24 | **Phase 0 skipped; decisions recorded directly** | Confirmed (v0.5) |
 | 25 | **Two-browser architecture (Obscura for scraping, Chrome for rendering)** | Confirmed (v0.5); single-browser collapse is an open question in §4 |
 | 26 | **`printpdf` deferred to post-v1 (Track A)** | Confirmed (v0.5) |
+| 27 | **GPUI evaluated and rejected** — pre-1.0, tightly coupled test harness, no semantic query in base crate, testing guide gaps | Confirmed (Phase 2.01) |
+| 28 | **egui's accessibility gap** — text inputs need `labelled_input` helper; `hint_text` is visual only | Confirmed (Phase 2.01) — Phase 5 audit item |
 
 ---
 
@@ -656,11 +604,13 @@ These are tracked here so they are not lost between phases.
 | # | Question | Phase to resolve |
 | :--- | :--- | :--- |
 | Q-1 | Can Obscura's PDF limitation be verified against current project documentation? | Phase 2, Week 1 |
-| Q-2 | Is the two-browser architecture justified, or would a single `rust-headless-chrome` backend be simpler? | Phase 2, after scraping performance is measured |
 | Q-3 | What is the target Argon2id work factor for representative hardware? | Phase 1 |
-| Q-4 | Do the existing HTML/CSS templates render acceptably through `rust-headless-chrome`? | Phase 4 |
+| Q-4 | Do the HTML/CSS templates render acceptably through `rust-headless-chrome`? | Phase 4 |
 | Q-5 | How should prompt edits interact with historical evaluation reports beyond storing `prompt_version`? | Phase 3 |
 | Q-6 | Should encryption be default-on with a passphrase, or should onboarding require it? (Currently: required.) | Phase 5 |
+| Q-7 | **Does egui's `TextEdit` support `labelled_by` at 0.37, or does the accessibility gap persist to Phase 5?** | Phase 2.1 — answer with `labelled_input` implementation; audit in Phase 5 if not resolvable |
+| Q-44 | **Should logs become structured JSON with per-task spans and a diagnostic-bundle export (Option C)?** | Phase 5 or Phase 3 — Phase 2.8.1 deliberately ships a transcript viewer instead; spans become worthwhile when Phase 3 needs per-call cost and latency records. The deferral and its triggers are recorded in `.agents/plans/phase_2.8.1_logging_and_diagnostics.md`. |
+| Q-45 | **Should the log level be settable from Settings instead of `RUST_LOG`?** | Phase 5 — Settings exists since Phase 2.9 but owns acquisition preferences only; the log level belongs with the operational settings that arrive in Phase 5. Until then the Logs screen states its capture level and points at `RUST_LOG`. |
 
 ---
 
