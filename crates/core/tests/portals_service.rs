@@ -575,3 +575,63 @@ async fn fetch_all_pages_reports_a_failed_chunk() {
 
     db.close().await;
 }
+
+/// A chunk that read pages but stopped at a page the site refused is not "no
+/// progress": it must report the page, keep what it stored, and record the
+/// pages that worked so the next attempt starts at the page that failed.
+#[tokio::test]
+async fn fetch_all_pages_reports_an_unreadable_page() {
+    let db = common::TestDb::new_raw().await;
+    let portal = portals::create(&db.pool, eightfold_portal("Acme", 4))
+        .await
+        .unwrap();
+    let source = Arc::new(MockFetchSource::sequence_eightfold([Ok(PageReport {
+        jobs: vec![sample_job("a")],
+        pages_fetched: 4,
+        stop: PaginationStop::FetchFailed,
+    })]));
+
+    let cancel = AtomicBool::new(false);
+    let report =
+        service::fetch_all_pages(&db.pool, portal.id, source.as_ref(), None, &cancel, |_| {})
+            .await
+            .expect("fetch_all_pages");
+
+    assert_eq!(
+        report.stopped_reason,
+        FetchAllStop::Stopped {
+            unread_page: Some(5)
+        },
+        "pages 1-4 were read, so page 5 is the one that failed"
+    );
+    assert_eq!(report.pages_fetched, 4);
+    assert_eq!(report.jobs_stored, 1);
+    assert!(!report.stopped_reason.is_failure());
+    assert_eq!(
+        cursor_of(&db.pool, portal.id).await,
+        4,
+        "the pages that worked are recorded, so a retry starts at the one that failed"
+    );
+    assert_eq!(
+        source.eightfold_calls().len(),
+        1,
+        "it must not retry a refused page in a loop"
+    );
+
+    // The next attempt asks for the failed page, not pages 1-4 again.
+    let retry = Arc::new(MockFetchSource::sequence_eightfold([Ok(PageReport {
+        jobs: vec![sample_job("b")],
+        pages_fetched: 1,
+        stop: PaginationStop::EndOfList,
+    })]));
+    service::fetch_all_pages(&db.pool, portal.id, retry.as_ref(), None, &cancel, |_| {})
+        .await
+        .expect("retry");
+    assert_eq!(
+        retry.eightfold_calls()[0].3,
+        5,
+        "it resumes at the failed page"
+    );
+
+    db.close().await;
+}

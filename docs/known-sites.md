@@ -27,7 +27,7 @@ does not know use the same form with no attribution.
 | Board | Name | Engine | Verified | Caps | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `https://careers.withwaymo.com/jobs/search` | Waymo | `selectors` | 2026-11-03 | `pagination.max_pages: 3`, `detail.max_jobs: 90` | Rails + Stimulus, server-rendered, no `JobPosting` JSON-LD. 30 cards per page, so 90 covers every posting on the three fetched pages. AWS WAF intermittently answers `202` with an empty body; a challenged detail keeps the card teaser. Detail pages do carry `JobPosting` JSON-LD. |
-| `https://jobs.nvidia.com/careers` | NVIDIA | `eightfold` | 2026-11-03 | `pagination.max_pages` default (5), `detail.max_jobs` default (40) | Client-rendered Eightfold shell; postings come from `/api/pcsx/*`. The board reports ~2,750 positions and returns 10 per request, so the page cap is what bounds a fetch. The `pcsx` endpoints are not a public contract. Descriptions are stored as HTML. |
+| `https://jobs.nvidia.com/careers` | NVIDIA | `eightfold` | 2026-11-03 | `pagination.max_pages` default (5), `detail.max_jobs` default (40) | Client-rendered Eightfold shell; postings come from `/api/pcsx/*`. The board reports ~2,750 positions and returns 10 per request, so the page cap is what bounds a fetch. The `pcsx` endpoints are not a public contract. Descriptions are stored as HTML. Some postings carry `postedTs: 0.0`; the parser accepts an integer, a float, or a numeric string, treats zero as no date, and skips a posting it still cannot read rather than failing the page. |
 | `https://job-boards.greenhouse.io/figma` | Figma | `greenhouse` (ATS) | 2026-11-05 | none | Greenhouse board; the list carries descriptions. The board page redirects to `figma.com/careers`; the adapter fetches the Greenhouse API. Other Greenhouse boards work through **Other site**. Greenhouse's old host (`boards.greenhouse.io`) redirects here and is still detected. |
 | `https://jobs.lever.co/spotify` | Spotify | `lever` (ATS) | 2026-11-05 | none | Lever board; the list carries descriptions. Other Lever boards work through **Other site**. |
 | `https://jobs.ashbyhq.com/linear` | Linear | `ashby` (ATS) | 2026-11-05 | none | Ashby board; the list carries descriptions. Other Ashby boards work through **Other site**. |
@@ -60,7 +60,11 @@ A fetch enriches descriptions only when the portal asks it to, through
 
 `pagination.max_pages` still bounds one **Refresh** or one **Continue**.
 **Fetch all pages** repeats Continue up to its own 50-page per-click budget, and
-stops early at the end of the list, at Stop, or when a board cannot continue.
+stops early at the end of the list, at Stop, at a page the site refused, or when
+a board cannot continue at all. A refused page records the pages that worked, so
+the next attempt starts at the page that failed; the Portals screen then offers
+**Skip page N and continue**, which moves the cursor onto N and resumes at N+1.
+Skipping is always the user's decision — the page's postings stay unread.
 
 ### Adapter entries
 

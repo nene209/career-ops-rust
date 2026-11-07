@@ -60,7 +60,7 @@ use crate::screens::lock::{LockAction, LockView, RESET_PHRASE};
 use crate::screens::pipeline::{PipelineAction, PipelineRenderState, PipelineView};
 use crate::screens::portals::{
     ConfigPreview, ManualSuccess, PortalForm, PortalFormData, PortalModal, PortalsAction,
-    PortalsRenderState, PortalsView, PreviewInputs, PreviewSample,
+    PortalsRenderState, PortalsView, PreviewInputs, PreviewSample, StalledWalk,
 };
 use crate::state::{AppState, Screen};
 use crate::view_models::cv_profile::{CvEntryDraft, CvProfileViewModel};
@@ -195,6 +195,9 @@ pub struct CareerOpsApp {
     fetch_all_portal: Option<i64>,
     fetch_all_progress: Arc<Mutex<Option<FetchAllProgress>>>,
     fetch_all_cancel: Arc<AtomicBool>,
+    /// A walk that stopped at a page it could not read, so the screen can offer
+    /// **Skip page N**.
+    fetch_all_stalled: Option<StalledWalk>,
 
     pipeline: PipelineViewModel,
     pipeline_view: PipelineView,
@@ -265,6 +268,7 @@ impl CareerOpsApp {
             fetch_all_portal: None,
             fetch_all_progress: Arc::new(Mutex::new(None)),
             fetch_all_cancel: Arc::new(AtomicBool::new(false)),
+            fetch_all_stalled: None,
             pipeline: PipelineViewModel::default(),
             pipeline_view: PipelineView::default(),
             pipeline_loaded: false,
@@ -399,7 +403,12 @@ impl CareerOpsApp {
             PortalsAction::DeletePortal(id) => self.start_portal_delete(id),
             PortalsAction::FetchOne(id) => self.start_portal_fetch(id, false),
             PortalsAction::FetchMore(id) => self.start_portal_fetch(id, true),
-            PortalsAction::FetchAllPages(id) => self.start_fetch_all_pages(id),
+            PortalsAction::FetchAllPages(id) => self.start_fetch_all_pages(id, None),
+            PortalsAction::SkipPage { portal_id, page } => {
+                // Skip means "read the next page": the cursor lands on the page
+                // that failed, so the resumed walk starts one page later.
+                self.start_fetch_all_pages(portal_id, Some(page as i64));
+            }
             PortalsAction::CancelFetchAllPages => {
                 // A walk finishes the chunk it is in; the flag is checked before
                 // the next one, so Stop means "within one chunk", not "now".
@@ -670,6 +679,7 @@ impl CareerOpsApp {
         self.fetch_all_portal = None;
         self.fetch_all_progress = Arc::new(Mutex::new(None));
         self.fetch_all_cancel = Arc::new(AtomicBool::new(false));
+        self.fetch_all_stalled = None;
 
         self.pipeline = PipelineViewModel::default();
         self.pipeline_view = PipelineView::default();
@@ -707,6 +717,8 @@ impl CareerOpsApp {
         self.portals_error = None;
         self.portals_message = None;
         self.fetching_portal = None;
+        // Any new fetch makes the previous stall stale.
+        self.fetch_all_stalled = None;
         true
     }
 
@@ -810,10 +822,15 @@ impl CareerOpsApp {
     /// Unlike `start_portal_fetch`, this is not a `PortalsTask`: it reports
     /// cumulative progress instead of a single outcome, so it keeps its own
     /// shared cell that the UI reads each frame.
-    fn start_fetch_all_pages(&mut self, portal_id: i64) {
+    ///
+    /// `from_cursor` moves the continuation cursor before the walk starts. It is
+    /// how **Skip page N** turns a page the site refuses into a decision: the
+    /// cursor lands on N, so the walk resumes at N+1.
+    fn start_fetch_all_pages(&mut self, portal_id: i64, from_cursor: Option<i64>) {
         if self.fetch_all_task.is_some() || !self.begin_portals_task() {
             return;
         }
+        self.fetch_all_stalled = None;
 
         let Some(pool) = self.pool() else {
             self.portals_error = Some("The database is not open.".into());
@@ -823,11 +840,20 @@ impl CareerOpsApp {
         let source = Arc::clone(&self.fetch_source);
         let browser = Arc::clone(&self.browser);
         let cancel = Arc::new(AtomicBool::new(false));
-        let progress = Arc::new(Mutex::new(None));
+        // Start at zero rather than `None` so the row shows the budget while the
+        // first chunk is in flight, instead of only "Starting...".
+        let progress = Arc::new(Mutex::new(Some(FetchAllProgress {
+            pages_fetched: 0,
+            jobs_stored: 0,
+            budget: service::FETCH_ALL_PAGE_BUDGET,
+        })));
 
         let task_cancel = Arc::clone(&cancel);
         let task_progress = Arc::clone(&progress);
         let task = self.spawn(async move {
+            if let Some(cursor) = from_cursor {
+                portal_repo::set_last_page_fetched(&pool, portal_id, cursor).await?;
+            }
             service::fetch_all_pages(
                 &pool,
                 portal_id,
@@ -869,6 +895,17 @@ impl CareerOpsApp {
                             FetchAllStop::Failed(error) => {
                                 Some(format!("The walk stopped: {}", error.detail))
                             }
+                            _ => None,
+                        };
+                        // A page the site refused turns into a decision the user
+                        // can act on (skip it) instead of a loop of failures.
+                        self.fetch_all_stalled = match report.stopped_reason {
+                            FetchAllStop::Stopped {
+                                unread_page: Some(page),
+                            } => Some(StalledWalk {
+                                portal_id: report.portal.id,
+                                page,
+                            }),
                             _ => None,
                         };
                     }
@@ -1143,8 +1180,19 @@ impl CareerOpsApp {
                     Ok(report) => {
                         let id = report.portal.id;
                         self.portals.apply_fetch_result(id, &report);
-                        if let Ok(outcome) = &report.outcome {
-                            self.portals_message = Some(fetch_summary(outcome));
+                        match &report.outcome {
+                            Ok(outcome) => {
+                                self.portals_message = Some(fetch_summary(outcome));
+                                self.portals_error = None;
+                            }
+                            // A failed fetch used to change only the health badge,
+                            // so the classified reason was invisible. The
+                            // suggested action is the same text the drill-down
+                            // shows, so the two never disagree.
+                            Err(error) => {
+                                self.portals_message = None;
+                                self.portals_error = Some(classified_error_message(error));
+                            }
                         }
                     }
                     Err(error) => {
@@ -1249,7 +1297,7 @@ impl CareerOpsApp {
                         }
                         Err(error) => {
                             form.preview.result = None;
-                            form.preview.error = Some(preview_error_message(&error));
+                            form.preview.error = Some(classified_error_message(&error));
                         }
                     }
                 }
@@ -1866,6 +1914,15 @@ fn fetch_all_summary(report: &FetchAllPagesReport) -> String {
         FetchAllStop::NoProgress => {
             format!("Fetched {jobs}; this board has no page to continue from.")
         }
+        FetchAllStop::Stopped {
+            unread_page: Some(page),
+        } => format!(
+            "Fetched {jobs} across {pages}; page {page} could not be read. Continue retries it."
+        ),
+        FetchAllStop::Stopped { unread_page: None } => format!(
+            "Fetched {jobs} across {pages}; the board stopped advancing. Continue retries the \
+             last range."
+        ),
         FetchAllStop::Failed(error) => {
             format!("Stopped after {jobs} across {pages}: {}", error.detail)
         }
@@ -1948,11 +2005,12 @@ fn config_preview(report: PreviewReport) -> ConfigPreview {
     }
 }
 
-/// The form's error line for a failed preview.
+/// A failed fetch as the user reads it.
 ///
-/// The detail says what broke; the suggested action is the same text the
-/// Portals list shows for a failed portal, so the two never disagree.
-fn preview_error_message(error: &FetchError) -> String {
+/// The detail says what went wrong, then the same suggested action the
+/// portal's health drill-down shows, so the two never disagree. Used by both
+/// the form's preview error line and the Portals header after a failed fetch.
+fn classified_error_message(error: &FetchError) -> String {
     format!("{} {}", error.detail, suggested_action(error.cause))
 }
 
@@ -2021,6 +2079,7 @@ impl eframe::App for CareerOpsApp {
                         .lock()
                         .ok()
                         .and_then(|progress| *progress),
+                    stalled: self.fetch_all_stalled,
                     error: self.portals_error.as_deref(),
                     message: self.portals_message.as_deref(),
                 };
@@ -2920,6 +2979,8 @@ mod tests {
         calls: std::sync::Mutex<Vec<String>>,
         page_calls: std::sync::Mutex<Vec<String>>,
         eightfold_calls: std::sync::Mutex<Vec<(String, String)>>,
+        /// The `start_page` of each Eightfold list request, in call order.
+        eightfold_starts: std::sync::Mutex<Vec<usize>>,
         eightfold_jobs: std::sync::Mutex<Vec<NormalizedJob>>,
     }
 
@@ -2943,6 +3004,10 @@ mod tests {
 
         fn eightfold_calls(&self) -> Vec<(String, String)> {
             self.eightfold_calls.lock().unwrap().clone()
+        }
+
+        fn eightfold_starts(&self) -> Vec<usize> {
+            self.eightfold_starts.lock().unwrap().clone()
         }
     }
 
@@ -2984,13 +3049,14 @@ mod tests {
             host: &str,
             domain: &str,
             _company_name: &str,
-            _start_page: usize,
+            start_page: usize,
             _max_pages: usize,
         ) -> AtsResult<PageReport> {
             self.eightfold_calls
                 .lock()
                 .unwrap()
                 .push((host.to_string(), domain.to_string()));
+            self.eightfold_starts.lock().unwrap().push(start_page);
             Ok(PageReport::single(
                 self.eightfold_jobs.lock().unwrap().clone(),
             ))
@@ -3072,6 +3138,83 @@ mod tests {
         );
         assert!(app.portals_error.is_none());
         assert_eq!(app.portals.rows[0].health, HealthBadge::Healthy);
+    }
+
+    /// **Skip page N** moves the cursor onto N and walks from N+1, which is the
+    /// only way past a page a site keeps refusing.
+    #[test]
+    fn skipping_a_page_resumes_the_walk_after_it() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.path().to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.path().to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let source = Arc::new(StubFetchSource::with_eightfold_jobs(vec![NormalizedJob {
+            external_id: "eightfold:nvidia.com:1".into(),
+            title: "Engineer".into(),
+            company: "NVIDIA".into(),
+            location: None,
+            department: None,
+            employment_type: None,
+            workplace_type: None,
+            source_url: url::Url::parse("https://jobs.nvidia.com/careers/job/1").expect("url"),
+            raw_text: String::new(),
+            posted_at: None,
+        }]));
+        let mut app = CareerOpsApp::with_fetch_source(state, runtime, {
+            let source: Arc<dyn FetchSource> = source.clone();
+            source
+        });
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        app.handle_portals_action(PortalsAction::CreatePortal(PortalFormData {
+            company_name: "NVIDIA".into(),
+            url: "https://jobs.nvidia.com/careers".into(),
+            render_mode: "static".into(),
+            scraper_config: Some(r#"{"provider":"eightfold","domain":"nvidia.com"}"#.into()),
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.portals.rows.len() == 1 && app.portals_task.is_none()
+        });
+
+        let id = app.portals.rows[0].id;
+        app.handle_portals_action(PortalsAction::SkipPage {
+            portal_id: id,
+            page: 30,
+        });
+        wait_until(&mut app, &ctx, |app| {
+            app.fetch_all_task.is_none() && app.portals_message.is_some()
+        });
+
+        assert_eq!(
+            source.eightfold_starts(),
+            vec![31],
+            "skipping page 30 resumes at page 31"
+        );
+        assert!(app.fetch_all_stalled.is_none());
     }
 
     /// Drives a portal fetch through the app with a scripted HTTP source, then
@@ -3393,6 +3536,52 @@ mod tests {
             .block_on(job_repo::get(&pool, stored.id))
             .expect("get")
             .is_none());
+    }
+
+    /// Every stop reason has to read differently, or a partial walk looks like a
+    /// completed one.
+    #[test]
+    fn fetch_all_summary_names_what_stopped_the_walk() {
+        let report = |stopped_reason| FetchAllPagesReport {
+            portal: career_ops_core::model::Portal {
+                id: 1,
+                company_name: "Acme".into(),
+                url: "https://example.com/jobs".into(),
+                render_mode: "static".into(),
+                scraper_config: None,
+                last_verified_at: None,
+                last_fetch_attempt_at: None,
+                last_failure_cause: None,
+                last_page_fetched: 0,
+            },
+            pages_fetched: 4,
+            jobs_stored: 40,
+            stopped_reason,
+        };
+
+        assert_eq!(
+            fetch_all_summary(&report(FetchAllStop::EndOfList)),
+            "Fetched 40 jobs across 4 pages; end of list."
+        );
+        assert_eq!(
+            fetch_all_summary(&report(FetchAllStop::BudgetExhausted)),
+            "Fetched 40 jobs across 4 pages. There is more; Continue or Fetch all pages again."
+        );
+        assert_eq!(
+            fetch_all_summary(&report(FetchAllStop::Stopped {
+                unread_page: Some(5)
+            })),
+            "Fetched 40 jobs across 4 pages; page 5 could not be read. Continue retries it."
+        );
+        assert_eq!(
+            fetch_all_summary(&report(FetchAllStop::Stopped { unread_page: None })),
+            "Fetched 40 jobs across 4 pages; the board stopped advancing. Continue retries the \
+             last range."
+        );
+        assert_eq!(
+            fetch_all_summary(&report(FetchAllStop::NoProgress)),
+            "Fetched 40 jobs; this board has no page to continue from."
+        );
     }
 
     #[test]

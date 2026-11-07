@@ -604,6 +604,11 @@ pub enum PortalsAction {
     FetchAllPages(i64),
     /// Ask the running **Fetch all pages** walk to stop between chunks.
     CancelFetchAllPages,
+    /// Continue a stalled walk from the page after one it could not read.
+    SkipPage {
+        portal_id: i64,
+        page: usize,
+    },
     /// Fetch every portal once, in sequence.
     FetchAll,
     CancelBatch,
@@ -619,6 +624,17 @@ pub enum PortalsAction {
     ShowInPipeline,
 }
 
+/// A **Fetch all pages** walk that stopped at a page the site refused.
+///
+/// The screen offers **Skip page N** for it, which is the only way past a page
+/// that keeps failing: the cursor is on the page before it, so a plain Continue
+/// would ask for the same page again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StalledWalk {
+    pub portal_id: i64,
+    pub page: usize,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PortalsRenderState<'a> {
     pub loading: bool,
@@ -630,6 +646,8 @@ pub struct PortalsRenderState<'a> {
     pub fetch_all_portal: Option<i64>,
     /// Cumulative progress for that walk; `None` until the first chunk lands.
     pub fetch_all_progress: Option<FetchAllProgress>,
+    /// A walk that stopped at a page it could not read.
+    pub stalled: Option<StalledWalk>,
     pub error: Option<&'a str>,
     pub message: Option<&'a str>,
 }
@@ -675,6 +693,30 @@ pub fn show(
     }
     if let Some(message) = state.message {
         ui.label(RichText::new(message).weak());
+    }
+    if let Some(stalled) = state.stalled {
+        // A page the site keeps refusing is the user's call: skipping it is the
+        // only way to walk on, and it is never done silently.
+        ui.horizontal(|ui| {
+            if ui
+                .button(format!("Skip page {} and continue", stalled.page))
+                .on_hover_text(
+                    "Read the pages after it. This page's postings stay unread, and the \
+                     cursor moves past it.",
+                )
+                .clicked()
+            {
+                action = Some(PortalsAction::SkipPage {
+                    portal_id: stalled.portal_id,
+                    page: stalled.page,
+                });
+            }
+            ui.label(
+                RichText::new("Fetch all pages stopped here because that page could not be read.")
+                    .weak()
+                    .small(),
+            );
+        });
     }
 
     ui.separator();

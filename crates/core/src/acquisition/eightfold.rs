@@ -48,7 +48,8 @@ pub struct Position {
     pub department: Option<String>,
     #[serde(default)]
     pub position_url: Option<String>,
-    #[serde(default)]
+    /// Unix seconds. Read defensively: see `deserialize_optional_timestamp`.
+    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
     pub posted_ts: Option<i64>,
 }
 
@@ -68,7 +69,21 @@ pub struct ListPage {
 struct ListEnvelope {
     #[serde(default)]
     status: Option<u16>,
-    data: ListPage,
+    data: RawListPage,
+}
+
+/// `data` with its postings left unparsed.
+///
+/// Positions are deserialized one by one in `parse_page` so a single malformed
+/// posting costs one posting, not the page. That matters: NVIDIA sends
+/// `postedTs: 0.0` on some postings, and a page-level parse failure used to stop
+/// a whole walk at that offset forever.
+#[derive(Debug, Default, Deserialize)]
+struct RawListPage {
+    #[serde(default)]
+    count: Option<usize>,
+    #[serde(default)]
+    positions: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +143,28 @@ where
     }
 }
 
+/// Accept `postedTs` as an integer, a float, or a numeric string.
+///
+/// Some NVIDIA postings carry `"postedTs": 0.0`, which a plain `Option<i64>`
+/// rejects — and because positions were parsed as one list, that single value
+/// failed the entire page and stalled every walk at that offset. A timestamp is
+/// optional metadata: zero and anything unreadable mean "no date" (epoch is not
+/// a posting date), never an error.
+fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let seconds = match value {
+        Some(serde_json::Value::Number(number)) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|float| float.trunc() as i64)),
+        Some(serde_json::Value::String(text)) => text.trim().parse::<i64>().ok(),
+        _ => None,
+    };
+    Ok(seconds.filter(|seconds| *seconds > 0))
+}
+
 /// Parse one list response.
 pub fn parse_page(body: &str) -> AtsResult<ListPage> {
     let envelope: ListEnvelope = serde_json::from_str(body)
@@ -141,7 +178,21 @@ pub fn parse_page(body: &str) -> AtsResult<ListPage> {
         }
     }
 
-    Ok(envelope.data)
+    let RawListPage { count, positions } = envelope.data;
+    let mut parsed = Vec::with_capacity(positions.len());
+    for (index, value) in positions.into_iter().enumerate() {
+        match serde_json::from_value::<Position>(value) {
+            Ok(position) => parsed.push(position),
+            Err(error) => {
+                tracing::warn!(index, %error, "eightfold position skipped: it did not parse")
+            }
+        }
+    }
+
+    Ok(ListPage {
+        count,
+        positions: parsed,
+    })
 }
 
 /// Normalize one position into the common shape.
@@ -643,6 +694,45 @@ mod tests {
         assert_eq!(page.positions.len(), 3);
         assert_eq!(page.positions[0].id, "893394864453");
         assert_eq!(page.positions[2].id, "893394864455");
+    }
+
+    /// NVIDIA sends `postedTs: 0.0` on some postings (page 30 of the board, for
+    /// example). A plain `Option<i64>` rejects that and used to fail the whole
+    /// page, which stalled every walk at that offset.
+    #[test]
+    fn a_float_timestamp_does_not_fail_the_page() {
+        let body = r#"{"status":200,"data":{"count":2,"positions":[
+            {"id":1,"name":"A","postedTs":0.0},
+            {"id":2,"name":"B","postedTs":1793577600}
+        ]}}"#;
+
+        let page = parse_page(body).expect("parse");
+
+        assert_eq!(page.positions.len(), 2);
+        assert_eq!(
+            page.positions[0].posted_ts, None,
+            "zero means no date, not 1970"
+        );
+        assert_eq!(page.positions[1].posted_ts, Some(1793577600));
+    }
+
+    /// One malformed posting costs one posting, not the page.
+    #[test]
+    fn a_position_that_cannot_be_parsed_is_skipped() {
+        let body = r#"{"status":200,"data":{"positions":[
+            {"id":1,"name":"A"},
+            {"id":2},
+            "not an object"
+        ]}}"#;
+
+        let page = parse_page(body).expect("the page still parses");
+
+        assert_eq!(
+            page.positions.len(),
+            1,
+            "only the complete posting survives"
+        );
+        assert_eq!(page.positions[0].id, "1");
     }
 
     #[test]

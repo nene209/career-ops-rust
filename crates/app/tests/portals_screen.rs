@@ -7,7 +7,7 @@
 use career_ops_app::screens::portals::{
     self, ConfigPreview, ManualEntryView, ManualTab, PortalForm, PortalFormData, PortalModal,
     PortalsAction, PortalsRenderState, PortalsView, PreviewInputs, PreviewSample, PreviewState,
-    RenderModeChoice, DETAIL_TOGGLE_LABEL,
+    RenderModeChoice, StalledWalk, DETAIL_TOGGLE_LABEL,
 };
 use career_ops_app::view_models::portals::{
     BatchProgress, HealthBadge, PortalRow, PortalsViewModel, SidecarStatus,
@@ -31,6 +31,7 @@ fn idle_state<'a>() -> PortalsRenderState<'a> {
         fetching_portal: None,
         fetch_all_portal: None,
         fetch_all_progress: None,
+        stalled: None,
         error: None,
         message: None,
     }
@@ -1111,6 +1112,49 @@ fn a_running_walk_shows_cumulative_progress_and_stop() {
         .state()
         .actions
         .contains(&PortalsAction::CancelFetchAllPages));
+}
+
+#[test]
+fn a_stalled_walk_offers_skip_for_the_unread_page() {
+    let view_model = PortalsViewModel {
+        rows: vec![eightfold_row(1)],
+        ..Default::default()
+    };
+    let state = PortalsRenderState {
+        stalled: Some(StalledWalk {
+            portal_id: 1,
+            page: 30,
+        }),
+        ..idle_state()
+    };
+
+    let mut harness = test_harness(&view_model, PortalsView::default(), state);
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Skip page 30 and continue")
+        .click();
+    harness.run();
+
+    assert!(harness.state().actions.contains(&PortalsAction::SkipPage {
+        portal_id: 1,
+        page: 30
+    }));
+}
+
+#[test]
+fn a_walk_without_a_stall_offers_no_skip() {
+    let view_model = PortalsViewModel {
+        rows: vec![eightfold_row(1)],
+        ..Default::default()
+    };
+
+    let mut harness = test_harness(&view_model, PortalsView::default(), idle_state());
+    harness.run();
+
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Skip page 30 and continue")
+        .is_none());
 }
 
 #[test]

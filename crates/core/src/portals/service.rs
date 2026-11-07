@@ -11,6 +11,7 @@ use url::Url;
 
 use super::health::PortalHealth;
 use crate::acquisition::error::FailureCause;
+use crate::acquisition::report::PaginationStop;
 use crate::acquisition::router::{self, FetchError, FetchOutcome, FetchSource};
 use crate::backend::BrowserBackend;
 use crate::error::{CoreError, Result};
@@ -99,9 +100,14 @@ pub enum FetchAllStop {
     /// The per-click page budget ran out; more pages remain.
     BudgetExhausted,
     /// The provider cannot continue from a cursor (an adapter that pages
-    /// internally, or a config with no `pagination.url_template`). Repeating
-    /// would re-read the same page.
+    /// internally): repeating would re-read the same page.
     NoProgress,
+    /// A chunk read pages but stopped before the end of the list without
+    /// leaving a cursor to continue from — usually a page the site refused.
+    /// `unread_page` names it when the report does. The pages that were read are
+    /// recorded in the cursor, so Continue retries only the unread page, and the
+    /// user can skip it through the Portals screen.
+    Stopped { unread_page: Option<usize> },
     /// A chunk failed. The pages already read are stored.
     Failed(FetchError),
 }
@@ -114,6 +120,7 @@ impl FetchAllStop {
             Self::Cancelled => "Stop",
             Self::BudgetExhausted => "the page budget",
             Self::NoProgress => "a board that cannot continue",
+            Self::Stopped { .. } => "a page that could not be read",
             Self::Failed(_) => "an error",
         }
     }
@@ -152,10 +159,11 @@ pub struct FetchAllPagesReport {
 /// and the storage. `cancel` is checked between chunks, so a Stop takes effect
 /// within one chunk rather than mid-request.
 ///
-/// The loop also stops when a chunk cannot advance — an ATS adapter pages
-/// internally and reports no cursor, and a selector config without a
-/// `url_template` has no page to jump to. Without that guard the same request
-/// would repeat until the budget.
+/// The loop also stops when a *provider* cannot advance — an ATS adapter pages
+/// internally and reports no page count, so repeating it would re-read the same
+/// board until the budget. A chunk that read pages but stopped early (a page the
+/// site refused) is a different case: the walk stops with `Stopped` and leaves
+/// the cursor alone, so Continue retries the range instead of skipping it.
 pub async fn fetch_all_pages<F>(
     pool: &SqlitePool,
     portal_id: i64,
@@ -211,8 +219,29 @@ where
         if cancel.load(Ordering::Relaxed) {
             break FetchAllStop::Cancelled;
         }
-        if chunk_pages == 0 || outcome.next_page.is_none() {
+        // No page accounting at all: an adapter that pages internally. There is
+        // nothing to continue from, and repeating would re-read the board.
+        if outcome.pages_fetched.is_none() {
             break FetchAllStop::NoProgress;
+        }
+        if outcome.next_page.is_none() {
+            // Pages were read, but the chunk ended without leaving a cursor.
+            // The usual cause is a page the site refused (`FetchFailed`) or a
+            // page that yielded nothing (`ExtractionFailed`). The router leaves
+            // the cursor alone so a retry re-reads the whole range; the walk
+            // records the pages that did work, so the retry starts at the page
+            // that failed instead of re-reading four good ones.
+            let last_read = outcome.first_page + chunk_pages - 1;
+            if chunk_pages > 0 {
+                portals::set_last_page_fetched_at_least(pool, portal_id, last_read as i64).await?;
+            }
+            let unread_page = match outcome.pagination_stopped {
+                Some(PaginationStop::FetchFailed | PaginationStop::ExtractionFailed) => {
+                    Some(last_read + 1)
+                }
+                _ => None,
+            };
+            break FetchAllStop::Stopped { unread_page };
         }
         // Checked between chunks, so a chunk that crosses the budget finishes:
         // the total can exceed the budget by at most `max_pages - 1`.
