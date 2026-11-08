@@ -16,9 +16,9 @@ use sqlx::SqlitePool;
 use crate::acquisition::manual;
 use crate::acquisition::router::FetchSource;
 use crate::error::{CoreError, Result};
-use crate::llm::{capabilities, CompletionBackend, DeltaSink, LlmConfig, LlmError};
+use crate::llm::{capabilities, CancelToken, CompletionBackend, DeltaSink, LlmConfig, LlmError};
 use crate::model::{ApplicationStatus, QueueState};
-use crate::prompt_render::{estimated_tokens, render, take_chars, Variables};
+use crate::prompt_render::{estimated_tokens, render, take_chars, untrusted_block, Variables};
 use crate::repo::evaluation_reports::{self, NewEvaluationReport};
 use crate::repo::{applications, job_descriptions, profile, prompts};
 use crate::text;
@@ -48,6 +48,9 @@ pub struct EvaluationRequest {
     pub stream: bool,
     /// Fetch the posting first when its stored text is only a card teaser.
     pub fetch_description_if_thin: bool,
+    /// Stop the call when the UI asks. The failure path restores the status
+    /// and stores nothing.
+    pub cancel: CancelToken,
 }
 
 impl EvaluationRequest {
@@ -58,6 +61,7 @@ impl EvaluationRequest {
             model_override: None,
             stream: false,
             fetch_description_if_thin: false,
+            cancel: CancelToken::default(),
         }
     }
 }
@@ -141,6 +145,8 @@ pub async fn run_evaluation(
     let normalized = text::plain_text(&job.raw_text, config.max_job_chars);
     let input_chars = normalized.text.chars().count();
     let source_chars = job.raw_text.chars().count();
+    // Fence the untrusted posting so the model can tell data from instructions.
+    let untrusted = untrusted_block(&normalized.text);
 
     let cv_summary = profile::cv_summary(pool).await?.ok_or_else(|| {
         CoreError::Message("Add your CV in CV / Profile before evaluating.".into())
@@ -160,7 +166,7 @@ pub async fn run_evaluation(
         &prompt.content,
         &Variables {
             cv_summary: &cv_summary,
-            job_description: &normalized.text,
+            job_description: &untrusted,
             company_name: &job.company,
             job_title: &job.title,
             tone: "",
@@ -324,8 +330,7 @@ async fn ask(
     let model = request.model_override.as_deref();
     let deltas = if request.stream { deltas } else { None };
 
-    let first = backend
-        .complete(prompt, model, true, deltas)
+    let first = complete_or_cancel(backend, prompt, model, true, deltas, request.cancel.clone())
         .await
         .map_err(CoreError::from)?;
 
@@ -337,10 +342,10 @@ async fn ask(
                 "{prompt}\n\nYour previous reply could not be used: {reason}. Reply with only the \
                  JSON object described above, with no prose and no code fences."
             );
-            let second = backend
-                .complete(&repair, model, true, None)
-                .await
-                .map_err(CoreError::from)?;
+            let second =
+                complete_or_cancel(backend, &repair, model, true, None, request.cancel.clone())
+                    .await
+                    .map_err(CoreError::from)?;
             parse_output(&second).map_err(|reason| {
                 CoreError::Message(format!("the model's reply was not usable: {reason}"))
             })
@@ -350,4 +355,24 @@ async fn ask(
 
 fn normalized_chars(raw: &str) -> usize {
     text::plain_text(raw, usize::MAX).text.chars().count()
+}
+
+/// One provider call, raced against the request's stop token.
+///
+/// `biased` matters: a token already set when the call starts must win without
+/// polling the provider, so a Stop pressed before the request leaves the app
+/// never sends it.
+async fn complete_or_cancel(
+    backend: &dyn CompletionBackend,
+    prompt: &str,
+    model: Option<&str>,
+    json_mode: bool,
+    deltas: Option<&DeltaSink>,
+    cancel: CancelToken,
+) -> std::result::Result<String, LlmError> {
+    tokio::select! {
+        biased;
+        _ = cancel.wait() => Err(LlmError::Cancelled),
+        result = backend.complete(prompt, model, json_mode, deltas) => result,
+    }
 }

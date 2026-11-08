@@ -4,9 +4,12 @@
 //! App-level tests cover the database load and the manual-entry round trip;
 //! these cover the controls, filters, search, delete gate, and action intents.
 
-use career_ops_app::screens::pipeline::{self, PipelineAction, PipelineRenderState, PipelineView};
+use career_ops_app::screens::pipeline::{
+    self, DetailTab, PipelineAction, PipelineRenderState, PipelineView,
+};
 use career_ops_app::view_models::pipeline::{
-    JobFilter, JobRow, PipelineViewModel, StatusLabel, TierLabel,
+    CoverLetterRow, EvaluationRow, JobFilter, JobRow, PipelineDetail, PipelineViewModel,
+    StatusLabel, TierLabel,
 };
 use career_ops_core::model::QueueState;
 use career_ops_core::preferences::Preferences;
@@ -20,16 +23,7 @@ struct TestState {
 }
 
 fn idle_state() -> PipelineRenderState<'static> {
-    PipelineRenderState {
-        loading: false,
-        error: None,
-        message: None,
-        refreshing: None,
-        marking: None,
-        queueing: None,
-        descriptions: None,
-        deleting: None,
-    }
+    PipelineRenderState::default()
 }
 
 fn test_harness<'a>(
@@ -68,6 +62,7 @@ fn row(id: i64, title: &str, status: Option<StatusLabel>, tier: TierLabel) -> Jo
         preferred: false,
         excluded: false,
         queue: QueueState::New,
+        match_score: None,
     }
 }
 
@@ -336,14 +331,12 @@ fn selecting_a_row_shows_the_detail_and_placeholder_buttons() {
     assert_eq!(harness.state().view.selected, Some(1));
     let _body = harness.get_by_label("We are hiring.");
 
-    // Phase 3 owns these; the shell reserves their place.
-    for label in ["Evaluate", "Generate cover letter"] {
-        let button = harness.get_by_role_and_label(Role::Button, label);
-        assert!(
-            button.accesskit_node().is_disabled(),
-            "{label} must stay disabled in Phase 2.1"
-        );
-    }
+    // The fixture has a short body; the detail's threshold decides whether the
+    // button offers a fetch first. With the default state (no detail yet) it
+    // does, which is the safe default.
+    let thin_label = harness.get_by_role_and_label(Role::Button, "Fetch description and evaluate");
+    assert!(!thin_label.accesskit_node().is_disabled());
+    assert!(harness.query_by_label("Evaluate").is_none());
 
     harness
         .get_by_role_and_label(Role::Button, "Back to list")
@@ -386,10 +379,7 @@ fn refreshing_disables_the_button_and_reports_the_result() {
         error: None,
         message: Some("Description refreshed: 2048 bytes."),
         refreshing: Some(1),
-        marking: None,
-        queueing: None,
-        descriptions: None,
-        deleting: None,
+        ..PipelineRenderState::default()
     };
     let mut harness = test_harness(&view_model, selected(1), render_state);
 
@@ -674,13 +664,7 @@ fn first_load_shows_a_spinner_instead_of_the_empty_state() {
     let view_model = PipelineViewModel::default();
     let render_state = PipelineRenderState {
         loading: true,
-        error: None,
-        message: None,
-        refreshing: None,
-        marking: None,
-        queueing: None,
-        descriptions: None,
-        deleting: None,
+        ..PipelineRenderState::default()
     };
 
     let mut harness = test_harness(&view_model, PipelineView::default(), render_state);
@@ -695,14 +679,8 @@ fn first_load_shows_a_spinner_instead_of_the_empty_state() {
 fn an_error_offers_a_retry() {
     let view_model = PipelineViewModel::default();
     let render_state = PipelineRenderState {
-        loading: false,
         error: Some("database is locked"),
-        message: None,
-        refreshing: None,
-        marking: None,
-        queueing: None,
-        descriptions: None,
-        deleting: None,
+        ..PipelineRenderState::default()
     };
 
     let mut harness = test_harness(&view_model, PipelineView::default(), render_state);
@@ -1071,4 +1049,217 @@ fn dismissed_rows_are_hidden_from_all_and_shown_under_the_dismissed_filter() {
         harness.query_by_label("Engineer — Acme").is_none(),
         "the Dismissed view shows only the dismissed rows"
     );
+}
+
+// ----------------------------------------------------------------------
+// WS6: evaluation and cover-letter UI
+// ----------------------------------------------------------------------
+
+fn evaluation(id: i64, score: f32, recommendation: &str, content: &str) -> EvaluationRow {
+    EvaluationRow {
+        id,
+        generated_at: format!("2026-01-0{id} 10:00"),
+        model_used: "deepseek-chat".into(),
+        prompt_version: Some(1),
+        match_score: Some(score),
+        recommendation: Some(recommendation.into()),
+        content: content.into(),
+    }
+}
+
+fn detail_with_thin(thin: usize) -> PipelineDetail {
+    PipelineDetail {
+        thin_description_chars: thin,
+        ..PipelineDetail::default()
+    }
+}
+
+#[test]
+fn a_thin_row_offers_the_fetch_first() {
+    let detail = detail_with_thin(10_000);
+    let state = PipelineRenderState {
+        detail: Some(&detail),
+        ..PipelineRenderState::default()
+    };
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, selected(1), state);
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Fetch description and evaluate")
+        .click();
+    harness.run();
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PipelineAction::Evaluate {
+            job_id: 1,
+            fetch_description_if_thin: true,
+            prompt_name: "evaluate".into(),
+            model_override: None,
+        })
+    );
+
+    // The link lives in the Evaluation tab, which is where the overrides are.
+    let mut view = selected(1);
+    view.tab = DetailTab::Evaluation;
+    let mut harness = test_harness(&view_model, view, state);
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Evaluate without description")
+        .click();
+    harness.run();
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PipelineAction::Evaluate {
+            job_id: 1,
+            fetch_description_if_thin: false,
+            prompt_name: "evaluate".into(),
+            model_override: None,
+        })
+    );
+}
+
+#[test]
+fn a_full_row_evaluates_without_fetching() {
+    let detail = detail_with_thin(0);
+    let state = PipelineRenderState {
+        detail: Some(&detail),
+        ..PipelineRenderState::default()
+    };
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, selected(1), state);
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Evaluate")
+        .click();
+    harness.run();
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PipelineAction::Evaluate {
+            job_id: 1,
+            fetch_description_if_thin: false,
+            prompt_name: "evaluate".into(),
+            model_override: None,
+        })
+    );
+}
+
+#[test]
+fn an_evaluation_streams_and_can_be_stopped() {
+    let detail = detail_with_thin(0);
+    let state = PipelineRenderState {
+        detail: Some(&detail),
+        evaluating: Some(1),
+        stream: "partial report text",
+        ..PipelineRenderState::default()
+    };
+    let mut view = selected(1);
+    view.tab = DetailTab::Evaluation;
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, view, state);
+    // A spinner keeps requesting repaints, so `run()` would never settle.
+    harness.run_steps(2);
+
+    let _ = harness.get_by_label("partial report text");
+    harness.get_by_role_and_label(Role::Button, "Stop").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PipelineAction::CancelEvaluation)
+    );
+}
+
+#[test]
+fn the_evaluation_tab_shows_the_report_and_history() {
+    let detail = PipelineDetail {
+        evaluations: vec![
+            evaluation(2, 0.9, "Strong match", "latest report"),
+            evaluation(1, 0.6, "Weak match", "older report"),
+        ],
+        thin_description_chars: 0,
+        ..PipelineDetail::default()
+    };
+    let state = PipelineRenderState {
+        detail: Some(&detail),
+        ..PipelineRenderState::default()
+    };
+    let mut view = selected(1);
+    view.tab = DetailTab::Evaluation;
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, view, state);
+    harness.run();
+
+    let _ = harness.get_by_label("0.90");
+    let _ = harness.get_by_label("latest report");
+    let _ = harness.get_by_label("2026-01-02 10:00 · 0.90 · Strong match");
+
+    harness
+        .get_by_label("2026-01-01 10:00 · 0.60 · Weak match")
+        .click();
+    harness.run();
+
+    assert_eq!(harness.state().view.selected_eval, Some(1));
+    let _ = harness.get_by_label("older report");
+    assert!(
+        harness.query_by_label("latest report").is_none(),
+        "the selected report replaces the latest"
+    );
+}
+
+#[test]
+fn the_cover_letter_tab_shows_the_latest_letter() {
+    let detail = PipelineDetail {
+        cover_letters: vec![CoverLetterRow {
+            id: 4,
+            generated_at: "2026-01-04 10:00".into(),
+            model_used: "deepseek-chat".into(),
+            prompt_version: Some(1),
+            content: "Dear Hiring Manager".into(),
+        }],
+        thin_description_chars: 0,
+        ..PipelineDetail::default()
+    };
+    let state = PipelineRenderState {
+        detail: Some(&detail),
+        ..PipelineRenderState::default()
+    };
+    let mut view = selected(1);
+    view.tab = DetailTab::CoverLetter;
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, view, state);
+    harness.run();
+
+    let _ = harness.get_by_label("Dear Hiring Manager");
+}
+
+#[test]
+fn the_row_shows_the_match_score() {
+    let mut scored = row(1, "Engineer", None, TierLabel::Ats);
+    scored.match_score = Some(0.82);
+    let view_model = view_model(vec![scored], JobFilter::All, "");
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("0.82");
 }

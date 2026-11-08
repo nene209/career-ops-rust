@@ -7,14 +7,16 @@
 mod common;
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use career_ops_core::cover_letter::{run_cover_letter, CoverLetterRequest};
-use career_ops_core::llm::{CompletionBackend, DeltaSink, LlmError};
+use career_ops_core::llm::{CancelToken, CompletionBackend, DeltaSink, LlmError};
 use career_ops_core::model::{
     Application, ApplicationStatus, FetchTier, JobDescription, QueueState,
 };
+use career_ops_core::prompt_render::UNTRUSTED_BEGIN;
 use career_ops_core::prompts_seed::seed_or_update_system_prompts;
 use career_ops_core::repo::applications;
 use career_ops_core::repo::cover_letters::{self, NewCoverLetter};
@@ -166,6 +168,10 @@ async fn the_job_description_is_normalized_before_the_prompt() {
         prompt.contains("Build the network stack."),
         "the text survives as prose"
     );
+    assert!(
+        prompt.contains(UNTRUSTED_BEGIN),
+        "the posting reaches the model as a fenced data block"
+    );
     assert!(!prompt.contains("<p>"), "no markup reaches the model");
     assert!(!prompt.contains("<strong>"));
 
@@ -307,6 +313,35 @@ async fn a_cover_letter_leaves_a_submitted_application_alone() {
         .expect("get")
         .expect("job");
     assert_eq!(job.queue_state, QueueState::New.as_str());
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_pre_set_cancel_never_calls_the_provider_and_stores_nothing() {
+    let db = common::TestDb::new_raw().await;
+    seed_profile_and_prompts(&db).await;
+    let job = store_job(&db, "Engineer", &job_text()).await;
+
+    let backend = FakeBackend::with_letter(LETTER);
+    let mut request = CoverLetterRequest::new(job.id);
+    request.cancel = CancelToken::new(Arc::new(AtomicBool::new(true)));
+
+    let error = run_cover_letter(&db.pool, &request, &backend)
+        .await
+        .expect_err("cancelled");
+    assert!(error.to_string().contains("cancelled"), "{error}");
+    assert!(backend.prompts().is_empty());
+
+    let application = applications::ensure(&db.pool, job.id)
+        .await
+        .expect("ensure");
+    assert!(
+        cover_letters::list_for_application(&db.pool, application.id)
+            .await
+            .expect("list")
+            .is_empty()
+    );
 
     db.close().await;
 }

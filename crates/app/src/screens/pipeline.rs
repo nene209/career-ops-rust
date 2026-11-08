@@ -6,9 +6,13 @@
 
 use egui::{Align2, Button, Color32, RichText, Ui, Window};
 
+use career_ops_core::evaluation::Recommendation;
+use career_ops_core::llm::config::DEFAULT_THIN_DESCRIPTION_CHARS;
 use career_ops_core::model::QueueState;
 
-use crate::view_models::pipeline::{JobFilter, JobRow, PipelineViewModel, StatusLabel, TierLabel};
+use crate::view_models::pipeline::{
+    EvaluationRow, JobFilter, JobRow, PipelineDetail, PipelineViewModel, StatusLabel, TierLabel,
+};
 
 use super::components::{labelled_input, EmptyState, LoadingSpinner, StatusBadge};
 
@@ -23,6 +27,46 @@ pub struct PipelineView {
     /// The list's vertical scroll offset, so returning from the detail view
     /// restores where the user was.
     pub list_scroll: f32,
+    /// Which detail tab is open.
+    pub tab: DetailTab,
+    /// The evaluation shown in the tab; `None` is the latest.
+    pub selected_eval: Option<i64>,
+    /// The cover letter shown in the tab; `None` is the latest.
+    pub selected_letter: Option<i64>,
+    /// Overrides for the next evaluation. Empty means the defaults.
+    pub eval_prompt: String,
+    pub eval_model: String,
+    /// Overrides for the next cover letter.
+    pub letter_prompt: String,
+    pub letter_model: String,
+    pub letter_tone: String,
+}
+
+/// The three parts of a job's detail view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailTab {
+    #[default]
+    Description,
+    Evaluation,
+    CoverLetter,
+}
+
+impl DetailTab {
+    pub fn all() -> &'static [DetailTab] {
+        &[
+            DetailTab::Description,
+            DetailTab::Evaluation,
+            DetailTab::CoverLetter,
+        ]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Description => "Description",
+            Self::Evaluation => "Evaluation",
+            Self::CoverLetter => "Cover letter",
+        }
+    }
 }
 
 /// The typed gate in front of a destructive delete.
@@ -57,17 +101,25 @@ pub enum PipelineAction {
     CancelDescriptions,
     /// Delete the job, confirmed.
     DeleteJob(i64),
-    /// Evaluate the job with the description storage already holds.
-    Evaluate(i64),
-    /// Fetch a full description first, then evaluate. WS6 emits this when the
-    /// selected row is under the thin-description threshold.
-    FetchDescriptionAndEvaluate(i64),
-    /// Write a cover letter for the job. `tone` is a soft register; `None`
-    /// leaves it to the prompt.
+    /// Evaluate the job with the options the detail pane carries.
+    Evaluate {
+        job_id: i64,
+        fetch_description_if_thin: bool,
+        prompt_name: String,
+        model_override: Option<String>,
+    },
+    /// Stop the running evaluation. The service restores the status.
+    CancelEvaluation,
+    /// Write a cover letter. `tone` is a soft register; empty leaves it to the
+    /// prompt.
     GenerateCoverLetter {
         job_id: i64,
         tone: Option<String>,
+        prompt_name: String,
+        model_override: Option<String>,
     },
+    /// Stop the running cover-letter call.
+    CancelCoverLetter,
 }
 
 /// How far a running description batch has got.
@@ -97,6 +149,16 @@ pub struct PipelineRenderState<'a> {
     pub descriptions: Option<DescriptionProgress>,
     /// The job being deleted.
     pub deleting: Option<i64>,
+    /// The selected job's evaluation and letter history.
+    pub detail: Option<&'a PipelineDetail>,
+    /// The history for the selection is still loading.
+    pub detail_loading: bool,
+    /// The job whose evaluation is running.
+    pub evaluating: Option<i64>,
+    /// The streamed reply so far, for the running evaluation.
+    pub stream: &'a str,
+    /// The job whose cover letter is being written.
+    pub writing_letter: Option<i64>,
 }
 
 pub fn show(
@@ -340,11 +402,21 @@ fn row_ui(ui: &mut Ui, row: &JobRow, view: &mut PipelineView) {
         let selected = view.selected == Some(row.id);
         let label = format!("{} — {}", row.title, row.company);
         if ui.selectable_label(selected, label.as_str()).clicked() {
+            if view.selected != Some(row.id) {
+                // A new job's history starts at its latest report.
+                view.selected_eval = None;
+                view.selected_letter = None;
+            }
             view.selected = Some(row.id);
             view.show_raw = false;
         }
 
         tier_label(ui, row.tier);
+        if let Some(score) = row.match_score {
+            let band = Recommendation::from_score(score as f32);
+            ui.label(RichText::new(format!("{score:.2}")).small().strong())
+                .on_hover_text(band.label());
+        }
         if row.preferred {
             ui.label(
                 RichText::new("Preferred")
@@ -382,17 +454,119 @@ fn detail(
         }
 
         ui.separator();
+        for tab in DetailTab::all() {
+            if ui.selectable_label(view.tab == *tab, tab.label()).clicked() {
+                view.tab = *tab;
+            }
+        }
+    });
 
-        ui.add_enabled(false, Button::new("Evaluate"))
-            .on_disabled_hover_text("Available in a later phase");
-        ui.add_enabled(false, Button::new("Generate cover letter"))
-            .on_disabled_hover_text("Available in a later phase");
+    ui.add_space(4.0);
+    ui.heading(&row.title);
+    ui.label(RichText::new(&row.company).strong());
+    ui.horizontal(|ui| {
+        tier_label(ui, row.tier);
+        if let Some(status) = row.status {
+            status_badge(ui, status);
+        }
+        queue_badge(ui, row.queue);
+        if let Some(score) = row.match_score {
+            let band = Recommendation::from_score(score as f32);
+            ui.label(RichText::new(format!("{score:.2}")).small().strong())
+                .on_hover_text(band.label());
+        }
+        ui.label(RichText::new(format!("Fetched {}", row.fetched_at)).weak());
+    });
 
-        let deleting = state.deleting == Some(row.id);
-        let busy = state.refreshing == Some(row.id)
-            || state.marking == Some(row.id)
-            || state.queueing == Some(row.id)
-            || deleting;
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Queue").weak());
+        let busy = state.queueing == Some(row.id) || state.marking == Some(row.id);
+        for (target, label, hover) in QUEUE_ACTIONS {
+            queue_action(ui, row, target, label, hover, busy, action);
+        }
+        if state.queueing == Some(row.id) {
+            LoadingSpinner::show(ui);
+        }
+    });
+
+    ui.add_space(4.0);
+    action_row(ui, row, view, state, action);
+
+    ui.add_space(4.0);
+    ui.label(RichText::new(&row.source_url).monospace().weak());
+    ui.separator();
+
+    egui::ScrollArea::vertical()
+        .id_salt("pipeline_detail")
+        .show(ui, |ui| match view.tab {
+            DetailTab::Description => description_tab(ui, row, view),
+            DetailTab::Evaluation => evaluation_tab(ui, row, view, state, action),
+            DetailTab::CoverLetter => cover_letter_tab(ui, row, view, state, action),
+        });
+}
+
+/// The primary actions, plus the per-row maintenance ones.
+fn action_row(
+    ui: &mut Ui,
+    row: &JobRow,
+    view: &mut PipelineView,
+    state: PipelineRenderState<'_>,
+    action: &mut Option<PipelineAction>,
+) {
+    let thin = state
+        .detail
+        .map(|detail| detail.is_thin(row.plain_text.chars().count()))
+        .unwrap_or_else(|| row.plain_text.chars().count() < DEFAULT_THIN_DESCRIPTION_CHARS);
+    let evaluating = state.evaluating.is_some();
+    let writing = state.writing_letter.is_some();
+    let deleting = state.deleting == Some(row.id);
+    let busy = state.refreshing == Some(row.id)
+        || state.marking == Some(row.id)
+        || state.queueing == Some(row.id)
+        || deleting;
+
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                !evaluating,
+                Button::new(if thin {
+                    "Fetch description and evaluate"
+                } else {
+                    "Evaluate"
+                }),
+            )
+            .on_hover_text("Send the posting and your CV to the configured model")
+            .clicked()
+        {
+            *action = Some(PipelineAction::Evaluate {
+                job_id: row.id,
+                fetch_description_if_thin: thin,
+                prompt_name: prompt_override(&view.eval_prompt, "evaluate"),
+                model_override: model_override(&view.eval_model),
+            });
+        }
+        if state.evaluating == Some(row.id) {
+            LoadingSpinner::show(ui);
+        }
+
+        if ui
+            .add_enabled(!writing, Button::new("Generate cover letter"))
+            .on_hover_text("Write a letter from the posting and your CV")
+            .clicked()
+        {
+            *action = Some(PipelineAction::GenerateCoverLetter {
+                job_id: row.id,
+                tone: non_empty(&view.letter_tone),
+                prompt_name: prompt_override(&view.letter_prompt, "cover_letter"),
+                model_override: model_override(&view.letter_model),
+            });
+        }
+        if state.writing_letter == Some(row.id) {
+            LoadingSpinner::show(ui);
+        }
+
+        ui.separator();
 
         if ui
             .add_enabled(
@@ -457,57 +631,302 @@ fn detail(
             LoadingSpinner::show(ui);
         }
     });
+}
 
-    ui.add_space(4.0);
-    ui.heading(&row.title);
-    ui.label(RichText::new(&row.company).strong());
-    ui.horizontal(|ui| {
-        tier_label(ui, row.tier);
-        if let Some(status) = row.status {
-            status_badge(ui, status);
-        }
-        queue_badge(ui, row.queue);
-        ui.label(RichText::new(format!("Fetched {}", row.fetched_at)).weak());
-    });
+fn description_tab(ui: &mut Ui, row: &JobRow, view: &mut PipelineView) {
+    if row.raw_text.trim().is_empty() {
+        ui.label(RichText::new("No description stored.").weak());
+        return;
+    }
 
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Queue").weak());
-        let busy = state.queueing == Some(row.id) || state.marking == Some(row.id);
-        for (target, label, hover) in QUEUE_ACTIONS {
-            queue_action(ui, row, target, label, hover, busy, action);
+    if row.stored_is_markup {
+        ui.checkbox(&mut view.show_raw, "Raw text");
+        if view.show_raw {
+            ui.label(
+                RichText::new("Stored as HTML from the source.")
+                    .weak()
+                    .small(),
+            );
         }
-        if state.queueing == Some(row.id) {
+    }
+
+    if view.show_raw {
+        ui.label(RichText::new(&row.raw_text).monospace());
+    } else {
+        ui.label(RichText::new(&row.plain_text));
+    }
+}
+
+fn evaluation_tab(
+    ui: &mut Ui,
+    row: &JobRow,
+    view: &mut PipelineView,
+    state: PipelineRenderState<'_>,
+    action: &mut Option<PipelineAction>,
+) {
+    if state.evaluating == Some(row.id) {
+        ui.horizontal(|ui| {
             LoadingSpinner::show(ui);
+            ui.label("Evaluating…");
+            if ui.button("Stop").clicked() {
+                *action = Some(PipelineAction::CancelEvaluation);
+            }
+        });
+        if !state.stream.is_empty() {
+            ui.add_space(4.0);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(state.stream).monospace().small())
+                        .wrap()
+                        .selectable(true),
+                );
+            });
         }
-    });
+        return;
+    }
 
-    ui.add_space(4.0);
-    ui.label(RichText::new(&row.source_url).monospace().weak());
-    ui.separator();
+    if state.evaluating.is_some() {
+        ui.label(RichText::new("Another evaluation is running; wait for it or stop it.").weak());
+    }
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        if row.raw_text.trim().is_empty() {
-            ui.label(RichText::new("No description stored.").weak());
+    // Re-evaluate options: blank means the configured defaults.
+    labelled_input(
+        ui,
+        "Prompt override (blank = evaluate)",
+        &mut view.eval_prompt,
+        false,
+    );
+    labelled_input(
+        ui,
+        "Model override (blank = configured)",
+        &mut view.eval_model,
+        false,
+    );
+
+    let thin = state
+        .detail
+        .map(|detail| detail.is_thin(row.plain_text.chars().count()))
+        .unwrap_or_else(|| row.plain_text.chars().count() < DEFAULT_THIN_DESCRIPTION_CHARS);
+    if thin && ui.button("Evaluate without description").clicked() {
+        *action = Some(PipelineAction::Evaluate {
+            job_id: row.id,
+            fetch_description_if_thin: false,
+            prompt_name: prompt_override(&view.eval_prompt, "evaluate"),
+            model_override: model_override(&view.eval_model),
+        });
+    }
+
+    let Some(detail) = state.detail else {
+        ui.add_space(8.0);
+        if state.detail_loading {
+            ui.horizontal(|ui| {
+                LoadingSpinner::show(ui);
+                ui.label("Loading evaluations…");
+            });
         } else {
-            if row.stored_is_markup {
-                ui.checkbox(&mut view.show_raw, "Raw text");
-                if view.show_raw {
-                    ui.label(
-                        RichText::new("Stored as HTML from the source.")
-                            .weak()
-                            .small(),
-                    );
-                }
-            }
+            ui.label(RichText::new("No evaluation yet.").weak());
+        }
+        return;
+    };
 
-            if view.show_raw {
-                ui.label(RichText::new(&row.raw_text).monospace());
-            } else {
-                ui.label(RichText::new(&row.plain_text));
+    let selected = view
+        .selected_eval
+        .and_then(|id| detail.evaluation(id))
+        .or_else(|| detail.latest_evaluation());
+
+    ui.add_space(8.0);
+    match selected {
+        None => {
+            ui.label(
+                RichText::new("No evaluation yet. Evaluate this posting to see the report here.")
+                    .weak(),
+            );
+        }
+        Some(report) => {
+            evaluation_summary(ui, report);
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical()
+                .id_salt("evaluation_report")
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(&report.content).monospace().small())
+                            .wrap()
+                            .selectable(true),
+                    );
+                });
+        }
+    }
+
+    if detail.evaluations.len() > 1 || view.selected_eval.is_some() {
+        ui.add_space(8.0);
+        ui.label(RichText::new("History").strong());
+        for report in &detail.evaluations {
+            let current = selected.is_some_and(|s| s.id == report.id);
+            let score = report
+                .match_score
+                .map(|score| format!("{score:.2}"))
+                .unwrap_or_else(|| "—".into());
+            let label = format!(
+                "{} · {score} · {}",
+                report.generated_at,
+                report.recommendation.as_deref().unwrap_or("—")
+            );
+            if ui.selectable_label(current, label).clicked() {
+                view.selected_eval = Some(report.id);
+            }
+            ui.label(
+                RichText::new(format!(
+                    "{} · prompt v{}",
+                    report.model_used,
+                    report.prompt_version.unwrap_or(0)
+                ))
+                .weak()
+                .small(),
+            );
+        }
+        if view.selected_eval.is_some() && ui.button("Show latest").clicked() {
+            view.selected_eval = None;
+        }
+    }
+}
+
+fn evaluation_summary(ui: &mut Ui, report: &EvaluationRow) {
+    ui.horizontal(|ui| {
+        if let Some(score) = report.match_score {
+            ui.label(RichText::new(format!("{score:.2}")).strong().size(20.0));
+        }
+        if let Some(recommendation) = &report.recommendation {
+            ui.label(RichText::new(recommendation).strong());
+        }
+        ui.label(
+            RichText::new(format!(
+                "{} · {} · prompt v{}",
+                report.model_used,
+                report.generated_at,
+                report.prompt_version.unwrap_or(0)
+            ))
+            .weak()
+            .small(),
+        );
+    });
+}
+
+fn cover_letter_tab(
+    ui: &mut Ui,
+    row: &JobRow,
+    view: &mut PipelineView,
+    state: PipelineRenderState<'_>,
+    action: &mut Option<PipelineAction>,
+) {
+    if state.writing_letter == Some(row.id) {
+        ui.horizontal(|ui| {
+            LoadingSpinner::show(ui);
+            ui.label("Writing the cover letter…");
+            if ui.button("Stop").clicked() {
+                *action = Some(PipelineAction::CancelCoverLetter);
+            }
+        });
+        return;
+    }
+
+    labelled_input(ui, "Tone (blank = direct)", &mut view.letter_tone, false);
+    labelled_input(
+        ui,
+        "Prompt override (blank = cover_letter)",
+        &mut view.letter_prompt,
+        false,
+    );
+    labelled_input(
+        ui,
+        "Model override (blank = configured)",
+        &mut view.letter_model,
+        false,
+    );
+    if state.writing_letter.is_some() {
+        ui.label(RichText::new("Another cover letter is being written.").weak());
+    }
+
+    let Some(detail) = state.detail else {
+        ui.add_space(8.0);
+        if state.detail_loading {
+            ui.horizontal(|ui| {
+                LoadingSpinner::show(ui);
+                ui.label("Loading cover letters…");
+            });
+        } else {
+            ui.label(RichText::new("No cover letter yet.").weak());
+        }
+        return;
+    };
+
+    let selected = view
+        .selected_letter
+        .and_then(|id| detail.letter(id))
+        .or_else(|| detail.latest_letter());
+
+    ui.add_space(8.0);
+    match selected {
+        None => {
+            ui.label(
+                RichText::new("No cover letter yet. Generate one from the action row above.")
+                    .weak(),
+            );
+        }
+        Some(letter) => {
+            ui.label(
+                RichText::new(format!(
+                    "{} · {} · prompt v{}",
+                    letter.model_used,
+                    letter.generated_at,
+                    letter.prompt_version.unwrap_or(0)
+                ))
+                .weak()
+                .small(),
+            );
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(&letter.content).monospace().small())
+                        .wrap()
+                        .selectable(true),
+                );
+            });
+        }
+    }
+
+    if detail.cover_letters.len() > 1 || view.selected_letter.is_some() {
+        ui.add_space(8.0);
+        ui.label(RichText::new("Earlier letters").strong());
+        for letter in &detail.cover_letters {
+            let current = selected.is_some_and(|s| s.id == letter.id);
+            let label = format!("{} · {}", letter.generated_at, letter.model_used);
+            if ui.selectable_label(current, label).clicked() {
+                view.selected_letter = Some(letter.id);
             }
         }
-    });
+        if view.selected_letter.is_some() && ui.button("Show latest").clicked() {
+            view.selected_letter = None;
+        }
+    }
+}
+
+/// A blank override means the pipeline default.
+fn prompt_override(value: &str, default: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        default.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn model_override(value: &str) -> Option<String> {
+    non_empty(value)
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// The typed gate in front of a destructive delete.

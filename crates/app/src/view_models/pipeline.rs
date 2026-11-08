@@ -6,7 +6,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use career_ops_core::model::{ApplicationStatus, JobDescription, QueueState};
+use career_ops_core::evaluation::Recommendation;
+use career_ops_core::model::{
+    ApplicationStatus, CoverLetter, EvaluationReport, JobDescription, QueueState,
+};
 use career_ops_core::preferences::{PreferenceFacts, Preferences};
 use career_ops_core::text;
 use chrono::Utc;
@@ -56,6 +59,9 @@ pub struct JobRow {
     /// The pre-evaluation queue state. `Dismissed` rows are hidden everywhere
     /// except the `Dismissed` filter.
     pub queue: QueueState,
+    /// The latest evaluation's match score, when one exists. `None` until the
+    /// row is evaluated.
+    pub match_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +353,21 @@ impl PipelineViewModel {
             None => false,
         }
     }
+
+    /// Apply a stored match score to a loaded row.
+    ///
+    /// Scores come from the application load, which is a second map rather than
+    /// a job column; the app applies them after `replace_jobs` so the two loads
+    /// stay independent.
+    pub fn set_match_score(&mut self, id: i64, score: f64) -> bool {
+        match self.rows.iter_mut().find(|row| row.id == id) {
+            Some(row) => {
+                row.match_score = Some(score);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 impl JobRow {
@@ -361,6 +382,111 @@ impl JobRow {
     /// location has to be found today: `job_descriptions` stores no location.
     fn preference_facts(&self) -> PreferenceFacts<'_> {
         PreferenceFacts::new(&self.company, None, &self.title).with_description(&self.plain_text)
+    }
+}
+
+/// One stored evaluation, shaped for the detail pane.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvaluationRow {
+    pub id: i64,
+    pub generated_at: String,
+    pub model_used: String,
+    pub prompt_version: Option<i64>,
+    pub match_score: Option<f32>,
+    /// The recommendation label. A pre-0006 report stored no enum, so the band
+    /// is derived from the score when one exists.
+    pub recommendation: Option<String>,
+    pub content: String,
+}
+
+/// One stored cover letter, shaped for the detail pane.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoverLetterRow {
+    pub id: i64,
+    pub generated_at: String,
+    pub model_used: String,
+    pub prompt_version: Option<i64>,
+    pub content: String,
+}
+
+/// The evaluation and letter history for one job, with the thin threshold the
+/// Evaluate button needs.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PipelineDetail {
+    /// Newest first.
+    pub evaluations: Vec<EvaluationRow>,
+    /// Newest first.
+    pub cover_letters: Vec<CoverLetterRow>,
+    /// Below this many normalized characters a row is a card teaser.
+    pub thin_description_chars: usize,
+}
+
+impl PipelineDetail {
+    pub fn from_parts(
+        evaluations: Vec<EvaluationReport>,
+        cover_letters: Vec<CoverLetter>,
+        thin_description_chars: usize,
+    ) -> Self {
+        Self {
+            evaluations: evaluations.into_iter().map(evaluation_row).collect(),
+            cover_letters: cover_letters.into_iter().map(letter_row).collect(),
+            thin_description_chars,
+        }
+    }
+
+    pub fn latest_evaluation(&self) -> Option<&EvaluationRow> {
+        self.evaluations.first()
+    }
+
+    pub fn evaluation(&self, id: i64) -> Option<&EvaluationRow> {
+        self.evaluations.iter().find(|row| row.id == id)
+    }
+
+    pub fn latest_letter(&self) -> Option<&CoverLetterRow> {
+        self.cover_letters.first()
+    }
+
+    pub fn letter(&self, id: i64) -> Option<&CoverLetterRow> {
+        self.cover_letters.iter().find(|row| row.id == id)
+    }
+
+    /// The posting text is a teaser, so the button should offer a fetch first.
+    pub fn is_thin(&self, normalized_chars: usize) -> bool {
+        normalized_chars < self.thin_description_chars
+    }
+}
+
+fn evaluation_row(report: EvaluationReport) -> EvaluationRow {
+    let recommendation = report
+        .recommendation
+        .as_deref()
+        .and_then(Recommendation::parse)
+        .or_else(|| {
+            report
+                .match_score
+                .map(|score| Recommendation::from_score(score as f32))
+        })
+        .map(Recommendation::label)
+        .map(str::to_string);
+
+    EvaluationRow {
+        id: report.id,
+        generated_at: report.generated_at.format("%Y-%m-%d %H:%M").to_string(),
+        model_used: report.model_used,
+        prompt_version: report.prompt_version,
+        match_score: report.match_score.map(|score| score as f32),
+        recommendation,
+        content: report.content,
+    }
+}
+
+fn letter_row(letter: CoverLetter) -> CoverLetterRow {
+    CoverLetterRow {
+        id: letter.id,
+        generated_at: letter.generated_at.format("%Y-%m-%d %H:%M").to_string(),
+        model_used: letter.model_used,
+        prompt_version: letter.prompt_version,
+        content: letter.content,
     }
 }
 
@@ -401,6 +527,8 @@ fn rows_from_jobs(
                 // A state written by a build that knows more than this one
                 // reads as `new`: the badge is a hint, not a contract.
                 queue: QueueState::parse(&job.queue_state).unwrap_or_default(),
+                // Filled from the application load, not the job row.
+                match_score: None,
             };
 
             let matched = preferences.matches(row.preference_facts());
@@ -449,6 +577,7 @@ mod tests {
             preferred: false,
             excluded: false,
             queue: QueueState::New,
+            match_score: None,
         }
     }
 

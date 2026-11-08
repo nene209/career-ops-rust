@@ -39,7 +39,7 @@ use career_ops_core::acquisition::router::{
 use career_ops_core::backend::{BrowserBackend, ObscuraBrowserBackend};
 use career_ops_core::cover_letter::{self, CoverLetterRequest, CoverLetterResult};
 use career_ops_core::evaluation::{self, EvaluationRequest, EvaluationResult, Recommendation};
-use career_ops_core::llm::{self, LlmConfig, LlmProvider, LlmStatus};
+use career_ops_core::llm::{self, CancelToken, LlmConfig, LlmProvider, LlmStatus};
 use career_ops_core::logging::{self, LogHandle, LogLine};
 use career_ops_core::model::{
     ApplicationStatus, CvEntry, FetchTier, JobDescription, Profile, QueueState,
@@ -52,7 +52,9 @@ use career_ops_core::portals::service::{
 use career_ops_core::preferences::Preferences;
 use career_ops_core::prompt_render;
 use career_ops_core::repo::applications as application_repo;
+use career_ops_core::repo::cover_letters as cover_letter_repo;
 use career_ops_core::repo::cv_entries as cv_entry_repo;
+use career_ops_core::repo::evaluation_reports as evaluation_repo;
 use career_ops_core::repo::job_descriptions as job_repo;
 use career_ops_core::repo::portals::{self as portal_repo, NewPortal, RenderMode};
 use career_ops_core::repo::profile::{self as profile_repo, ProfileDetails};
@@ -79,7 +81,7 @@ use crate::screens::settings::{SettingsAction, SettingsRenderState};
 use crate::state::{AppState, Screen};
 use crate::view_models::cv_profile::{CvEntryDraft, CvProfileViewModel};
 use crate::view_models::logs::LogsView;
-use crate::view_models::pipeline::{PipelineViewModel, StatusLabel};
+use crate::view_models::pipeline::{PipelineDetail, PipelineViewModel, StatusLabel};
 use crate::view_models::portals::{BatchProgress, PortalsViewModel};
 use crate::view_models::prompts::{PromptDetail, PromptSelection, PromptsView, PromptsViewModel};
 use crate::view_models::settings::SettingsViewModel;
@@ -91,13 +93,19 @@ type StateTask = AsyncTask<(AppState, CoreResult<()>)>;
 type KeyTask = AsyncTask<CoreResult<(LlmConfig, bool, &'static str)>>;
 
 /// A page of recent jobs, paired with the status of the application attached
-/// to each job id and the ids that carry user-authored state.
+/// to each job id, the ids that carry user-authored state, the latest match
+/// scores, and the preferences used to badge them.
 type PipelineLoad = CoreResult<(
     Vec<JobDescription>,
     HashMap<i64, ApplicationStatus>,
     HashSet<i64>,
+    HashMap<i64, f64>,
     Preferences,
 )>;
+
+/// The selected job's evaluation and letter history, tagged with the job it
+/// belongs to so a stale load cannot overwrite a newer selection.
+type PipelineDetailLoad = CoreResult<(i64, PipelineDetail)>;
 
 /// The profile singleton and its CV entries, loaded together so the editor can
 /// render both from one task.
@@ -267,6 +275,8 @@ pub struct CareerOpsApp {
     evaluation_fetched: bool,
     evaluation_deltas: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     evaluation_stream: String,
+    /// A fresh token per run; Stop sets it and the service restores the status.
+    evaluation_cancel: CancelToken,
     /// A test seam: when set, evaluations and cover letters use this backend
     /// instead of building a provider client from the keychain. Production
     /// leaves it `None`.
@@ -275,6 +285,13 @@ pub struct CareerOpsApp {
     /// The running cover-letter generation and its job.
     cover_letter_task: Option<AsyncTask<CoreResult<CoverLetterResult>>>,
     writing_cover_letter: Option<i64>,
+    cover_letter_cancel: CancelToken,
+
+    /// The selected Pipeline row's reports and letters, and the load that is
+    /// fetching them.
+    pipeline_detail: Option<PipelineDetail>,
+    pipeline_detail_for: Option<i64>,
+    pipeline_detail_task: Option<AsyncTask<PipelineDetailLoad>>,
 
     cv_profile: CvProfileViewModel,
     cv_profile_view: CvProfileView,
@@ -401,9 +418,14 @@ impl CareerOpsApp {
             evaluation_fetched: false,
             evaluation_deltas: None,
             evaluation_stream: String::new(),
+            evaluation_cancel: CancelToken::default(),
             completion_backend: None,
             cover_letter_task: None,
             writing_cover_letter: None,
+            cover_letter_cancel: CancelToken::default(),
+            pipeline_detail: None,
+            pipeline_detail_for: None,
+            pipeline_detail_task: None,
             cv_profile: CvProfileViewModel::default(),
             cv_profile_view: CvProfileView::default(),
             cv_profile_loaded: false,
@@ -631,13 +653,25 @@ impl CareerOpsApp {
             PipelineAction::FetchDescriptions => self.start_descriptions_batch(),
             PipelineAction::CancelDescriptions => self.cancel_descriptions_batch(),
             PipelineAction::DeleteJob(job_id) => self.start_job_delete(job_id),
-            PipelineAction::Evaluate(job_id) => self.start_evaluation(job_id, false),
-            PipelineAction::FetchDescriptionAndEvaluate(job_id) => {
-                self.start_evaluation(job_id, true)
-            }
-            PipelineAction::GenerateCoverLetter { job_id, tone } => {
-                self.start_cover_letter(job_id, tone)
-            }
+            PipelineAction::Evaluate {
+                job_id,
+                fetch_description_if_thin,
+                prompt_name,
+                model_override,
+            } => self.start_evaluation(
+                job_id,
+                fetch_description_if_thin,
+                prompt_name,
+                model_override,
+            ),
+            PipelineAction::CancelEvaluation => self.evaluation_cancel.cancel(),
+            PipelineAction::GenerateCoverLetter {
+                job_id,
+                tone,
+                prompt_name,
+                model_override,
+            } => self.start_cover_letter(job_id, tone, prompt_name, model_override),
+            PipelineAction::CancelCoverLetter => self.cover_letter_cancel.cancel(),
         }
     }
 
@@ -1004,8 +1038,13 @@ impl CareerOpsApp {
         self.evaluation_fetched = false;
         self.evaluation_deltas = None;
         self.evaluation_stream.clear();
+        self.evaluation_cancel = CancelToken::default();
         self.cover_letter_task = None;
         self.writing_cover_letter = None;
+        self.cover_letter_cancel = CancelToken::default();
+        self.pipeline_detail = None;
+        self.pipeline_detail_for = None;
+        self.pipeline_detail_task = None;
 
         self.cv_profile = CvProfileViewModel::default();
         self.cv_profile_view = CvProfileView::default();
@@ -1710,6 +1749,16 @@ impl CareerOpsApp {
             // because a job description has at most one application.
             let jobs = job_repo::list_recent(&pool, PIPELINE_LIMIT).await?;
             let applications = application_repo::list(&pool).await?;
+            // The score is an application column, not a job one: a second map
+            // keeps the two loads independent and the row construction unchanged.
+            let scores: HashMap<i64, f64> = applications
+                .iter()
+                .filter_map(|application| {
+                    application
+                        .match_score
+                        .map(|score| (application.job_description_id, score))
+                })
+                .collect();
             let statuses = applications
                 .into_iter()
                 .filter_map(|application| {
@@ -1721,7 +1770,7 @@ impl CareerOpsApp {
             // Loaded with the rows so the badges and the header summary agree:
             // a separate load could badge a page with the previous preferences.
             let preferences = profile_repo::preferences(&pool).await?;
-            Ok((jobs, statuses, touched, preferences))
+            Ok((jobs, statuses, touched, scores, preferences))
         });
 
         self.pipeline_task = Some(task);
@@ -1737,9 +1786,12 @@ impl CareerOpsApp {
             TaskPoll::Ready(result) => {
                 self.pipeline_task = None;
                 match result {
-                    Ok((jobs, statuses, touched, preferences)) => {
+                    Ok((jobs, statuses, touched, scores, preferences)) => {
                         self.pipeline
                             .replace_jobs(jobs, &statuses, &touched, preferences);
+                        for (id, score) in scores {
+                            self.pipeline.set_match_score(id, score);
+                        }
                         self.pipeline_loaded = true;
                         self.pipeline_error = None;
                     }
@@ -1753,6 +1805,71 @@ impl CareerOpsApp {
             TaskPoll::Cancelled => {
                 self.pipeline_task = None;
                 self.pipeline_error = Some("The operation was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Load the selected job's evaluations and cover letters.
+    ///
+    /// The detail is one task for both tables plus the thin threshold, so the
+    /// tab can say "fetch first" without a second Settings read.
+    fn start_pipeline_detail_load(&mut self) {
+        if self.pipeline_detail_task.is_some() {
+            return;
+        }
+        let Some(job_id) = self.pipeline_view.selected else {
+            return;
+        };
+        let Some(pool) = self.pool() else {
+            return;
+        };
+
+        self.pipeline_detail_task = Some(self.spawn(async move {
+            let evaluations = evaluation_repo::list_for_job(&pool, job_id).await?;
+            let letters = cover_letter_repo::list_for_job(&pool, job_id).await?;
+            let config = LlmConfig::load(&pool).await?;
+            Ok((
+                job_id,
+                PipelineDetail::from_parts(evaluations, letters, config.thin_description_chars),
+            ))
+        }));
+    }
+
+    fn poll_pipeline_detail(&mut self, ctx: &egui::Context) {
+        let poll = match self.pipeline_detail_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.pipeline_detail_task = None;
+                match result {
+                    Ok((job_id, detail)) => {
+                        if self.pipeline_view.selected == Some(job_id) {
+                            self.pipeline_detail = Some(detail);
+                            self.pipeline_detail_for = Some(job_id);
+                        } else if self.pipeline_view.selected.is_some() {
+                            // The selection changed while this load ran; the
+                            // result describes a row the user left.
+                            self.start_pipeline_detail_load();
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not load the job's reports");
+                        self.pipeline_error.get_or_insert_with(|| {
+                            format!("Could not load the job history: {error}")
+                        });
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.pipeline_detail_task = None;
                 ctx.request_repaint();
             }
         }
@@ -2168,7 +2285,13 @@ impl CareerOpsApp {
     /// The backend is built here rather than in the service so the key is read
     /// from the keychain on the calling thread's runtime and never reaches a
     /// database row. `fetch_description_if_thin` is the WS6 button decision.
-    fn start_evaluation(&mut self, job_id: i64, fetch_description_if_thin: bool) {
+    fn start_evaluation(
+        &mut self,
+        job_id: i64,
+        fetch_description_if_thin: bool,
+        prompt_name: String,
+        model_override: Option<String>,
+    ) {
         if self.evaluation_task.is_some() {
             return;
         }
@@ -2183,6 +2306,8 @@ impl CareerOpsApp {
         self.evaluation_stream.clear();
         self.evaluation_fetched = fetch_description_if_thin;
         self.evaluating_job = Some(job_id);
+        self.evaluation_cancel = CancelToken::new(Arc::new(AtomicBool::new(false)));
+        let cancel = self.evaluation_cancel.clone();
 
         let (deltas_tx, deltas_rx) = tokio::sync::mpsc::unbounded_channel();
         self.evaluation_deltas = Some(deltas_rx);
@@ -2191,8 +2316,11 @@ impl CareerOpsApp {
         let injected = self.completion_backend.clone();
         let task = self.spawn(async move {
             let request = EvaluationRequest {
+                prompt_name,
+                model_override,
                 fetch_description_if_thin,
                 stream: true,
+                cancel,
                 ..EvaluationRequest::new(job_id)
             };
             let fetch: &dyn FetchSource = fetch_source.as_ref();
@@ -2260,9 +2388,12 @@ impl CareerOpsApp {
                 match result {
                     Ok(report) => {
                         if let Some(id) = job_id {
-                            // The queue and the row flags follow the write; the
+                            // The queue, score, and row flags follow the write; the
                             // text does not need a reload unless a fetch ran.
                             self.pipeline.set_queue(id, QueueState::Evaluated);
+                            self.pipeline
+                                .set_match_score(id, f64::from(report.match_score));
+                            let selected = self.pipeline_view.selected == Some(id);
                             if let Some(row) =
                                 self.pipeline.rows.iter_mut().find(|row| row.id == id)
                             {
@@ -2279,6 +2410,10 @@ impl CareerOpsApp {
                                 {
                                     row.status = Some(StatusLabel::Ready);
                                 }
+                            }
+                            self.pipeline_detail_for = None;
+                            if selected {
+                                self.start_pipeline_detail_load();
                             }
                             if fetched {
                                 // The description was replaced during the run, so
@@ -2297,7 +2432,12 @@ impl CareerOpsApp {
                     }
                     Err(error) => {
                         self.pipeline_message = None;
-                        self.pipeline_error = Some(format!("Evaluation failed: {error}"));
+                        let text = error.to_string();
+                        if text.contains("cancelled") {
+                            self.pipeline_message = Some("Evaluation cancelled.".into());
+                        } else {
+                            self.pipeline_error = Some(format!("Evaluation failed: {error}"));
+                        }
                     }
                 }
                 ctx.request_repaint();
@@ -2329,7 +2469,13 @@ impl CareerOpsApp {
     ///
     /// The backend is built here for the same reason as an evaluation: the key
     /// is read from the keychain and never reaches a database row.
-    fn start_cover_letter(&mut self, job_id: i64, tone: Option<String>) {
+    fn start_cover_letter(
+        &mut self,
+        job_id: i64,
+        tone: Option<String>,
+        prompt_name: String,
+        model_override: Option<String>,
+    ) {
         if self.cover_letter_task.is_some() {
             return;
         }
@@ -2342,11 +2488,16 @@ impl CareerOpsApp {
         self.pipeline_error = None;
         self.pipeline_message = Some("Writing cover letter…".into());
         self.writing_cover_letter = Some(job_id);
+        self.cover_letter_cancel = CancelToken::new(Arc::new(AtomicBool::new(false)));
+        let cancel = self.cover_letter_cancel.clone();
 
         let injected = self.completion_backend.clone();
         let task = self.spawn(async move {
             let request = CoverLetterRequest {
                 tone,
+                prompt_name,
+                model_override,
+                cancel,
                 ..CoverLetterRequest::new(job_id)
             };
 
@@ -2390,6 +2541,10 @@ impl CareerOpsApp {
                                 // job must keep the typed gate.
                                 row.has_user_state = true;
                             }
+                            if self.pipeline_view.selected == Some(id) {
+                                self.pipeline_detail_for = None;
+                                self.start_pipeline_detail_load();
+                            }
                         }
                         self.pipeline_error = None;
                         self.pipeline_message = Some(format!(
@@ -2399,8 +2554,13 @@ impl CareerOpsApp {
                     }
                     Err(error) => {
                         self.pipeline_message = None;
-                        self.pipeline_error =
-                            Some(format!("Could not write the cover letter: {error}"));
+                        let text = error.to_string();
+                        if text.contains("cancelled") {
+                            self.pipeline_message = Some("Cover letter cancelled.".into());
+                        } else {
+                            self.pipeline_error =
+                                Some(format!("Could not write the cover letter: {error}"));
+                        }
                     }
                 }
                 ctx.request_repaint();
@@ -3544,6 +3704,7 @@ impl eframe::App for CareerOpsApp {
                 self.poll_portals_task(ui.ctx());
                 self.poll_fetch_all_pages(ui.ctx());
                 self.poll_pipeline_task(ui.ctx());
+                self.poll_pipeline_detail(ui.ctx());
                 self.poll_pipeline_refresh(ui.ctx());
                 self.poll_pipeline_status(ui.ctx());
                 self.poll_pipeline_queue(ui.ctx());
@@ -3588,6 +3749,23 @@ impl eframe::App for CareerOpsApp {
                     && self.pipeline_error.is_none()
                 {
                     self.start_pipeline_load();
+                }
+
+                // The detail follows the selection. A row click happens during
+                // the render below, so the load starts on the next frame; the
+                // tab shows a spinner until it lands.
+                if let Some(job_id) = self.pipeline_view.selected {
+                    if self.pipeline_detail_for != Some(job_id) {
+                        // Never show the previous row's reports while the new
+                        // history loads.
+                        self.pipeline_detail = None;
+                        if self.pipeline_detail_task.is_none() {
+                            self.start_pipeline_detail_load();
+                        }
+                    }
+                } else {
+                    self.pipeline_detail = None;
+                    self.pipeline_detail_for = None;
                 }
 
                 if self.navigation.current() == MainScreen::CvProfile
@@ -3642,6 +3820,13 @@ impl eframe::App for CareerOpsApp {
                         .ok()
                         .and_then(|progress| *progress),
                     deleting: self.deleting_job,
+                    detail: self.pipeline_detail.as_ref(),
+                    detail_loading: self.pipeline_detail_task.is_some()
+                        || (self.pipeline_view.selected.is_some()
+                            && self.pipeline_detail_for != self.pipeline_view.selected),
+                    evaluating: self.evaluating_job,
+                    stream: &self.evaluation_stream,
+                    writing_letter: self.writing_cover_letter,
                 };
                 let cv_profile_state = CvProfileRenderState {
                     loading: self.cv_profile_task.is_some(),
@@ -4378,6 +4563,43 @@ mod tests {
         (app, ctx)
     }
 
+    /// Like [`unlocked_app`], with a scripted model for the Phase 3 flows.
+    fn unlocked_app_with_backend(
+        dir: &Path,
+        backend: Arc<dyn evaluation::CompletionBackend>,
+    ) -> (CareerOpsApp, egui::Context) {
+        {
+            let setup_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("setup runtime");
+            let mut state = AppState::bootstrap(dir.to_path_buf()).expect("bootstrap");
+            setup_runtime
+                .block_on(state.complete_first_launch(TEST_PASSPHRASE))
+                .expect("first launch");
+        }
+
+        let state = AppState::bootstrap(dir.to_path_buf()).expect("second bootstrap");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut app =
+            CareerOpsApp::with_fetch_source(state, runtime, Arc::new(StubFetchSource::default()))
+                .with_completion_backend(backend);
+        let ctx = egui::Context::default();
+
+        app.handle_lock_action(LockAction::TryPassphrase(TEST_PASSPHRASE.to_string()));
+        wait_until(&mut app, &ctx, |app| {
+            app.state()
+                .is_some_and(|state| state.current() == &Screen::Ready)
+        });
+
+        (app, ctx)
+    }
+
     /// The titles in the Experience group, in display order.
     fn experience_titles(app: &CareerOpsApp) -> Vec<String> {
         app.cv_profile.groups()[0]
@@ -4566,6 +4788,7 @@ mod tests {
             app.poll_portals_task(ctx);
             app.poll_fetch_all_pages(ctx);
             app.poll_pipeline_task(ctx);
+            app.poll_pipeline_detail(ctx);
             app.poll_pipeline_refresh(ctx);
             app.poll_pipeline_status(ctx);
             app.poll_pipeline_queue(ctx);
@@ -5524,6 +5747,21 @@ mod tests {
     /// transaction, and the row updates are real; only the provider is scripted.
     struct FakeEvalBackend {
         reply: String,
+        /// The model override of each call, in order, for the re-evaluate test.
+        models: Mutex<Vec<Option<String>>>,
+    }
+
+    impl FakeEvalBackend {
+        fn new(reply: String) -> Self {
+            Self {
+                reply,
+                models: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn models(&self) -> Vec<Option<String>> {
+            self.models.lock().unwrap().clone()
+        }
     }
 
     #[async_trait::async_trait]
@@ -5531,14 +5769,46 @@ mod tests {
         async fn complete(
             &self,
             _prompt: &str,
-            _model: Option<&str>,
+            model: Option<&str>,
             _json_mode: bool,
             deltas: Option<&career_ops_core::llm::DeltaSink>,
         ) -> Result<String, llm::LlmError> {
+            self.models.lock().unwrap().push(model.map(str::to_string));
             if let Some(sink) = deltas {
                 let _ = sink.send("streaming fragment ".into());
             }
             Ok(self.reply.clone())
+        }
+    }
+
+    /// A provider that never answers, so Stop has something to interrupt.
+    struct HangingBackend {
+        started: Arc<AtomicBool>,
+    }
+
+    impl HangingBackend {
+        fn new() -> (Self, Arc<AtomicBool>) {
+            let started = Arc::new(AtomicBool::new(false));
+            (
+                Self {
+                    started: Arc::clone(&started),
+                },
+                started,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl evaluation::CompletionBackend for HangingBackend {
+        async fn complete(
+            &self,
+            _prompt: &str,
+            _model: Option<&str>,
+            _json_mode: bool,
+            _deltas: Option<&career_ops_core::llm::DeltaSink>,
+        ) -> Result<String, llm::LlmError> {
+            self.started.store(true, Ordering::Relaxed);
+            std::future::pending().await
         }
     }
 
@@ -5585,9 +5855,8 @@ mod tests {
             .build()
             .expect("runtime");
         let source = Arc::new(StubFetchSource::default());
-        let backend = Arc::new(FakeEvalBackend {
-            reply: eval_reply(),
-        });
+        let backend = Arc::new(FakeEvalBackend::new(eval_reply()));
+        let recorder = Arc::clone(&backend);
         let mut app = CareerOpsApp::with_fetch_source(state, runtime, source)
             .with_completion_backend(backend);
         let ctx = egui::Context::default();
@@ -5633,7 +5902,12 @@ mod tests {
         });
         app.pipeline_view.selected = Some(stored.id);
 
-        app.handle_pipeline_action(PipelineAction::Evaluate(stored.id));
+        app.handle_pipeline_action(PipelineAction::Evaluate {
+            job_id: stored.id,
+            fetch_description_if_thin: false,
+            prompt_name: "evaluate".into(),
+            model_override: None,
+        });
         wait_until(&mut app, &ctx, |app| app.evaluation_task.is_none());
 
         assert!(app.pipeline_error.is_none(), "{:?}", app.pipeline_error);
@@ -5657,8 +5931,56 @@ mod tests {
         assert_eq!(row.queue, QueueState::Evaluated);
         assert_eq!(row.status, Some(StatusLabel::Ready));
         assert!(
+            row.match_score
+                .is_some_and(|score| (score - 0.9).abs() < 1e-6),
+            "the row carries the score for its badge: {:?}",
+            row.match_score
+        );
+        assert!(
             row.has_user_state,
             "a stored report makes deleting the row a gated action"
+        );
+
+        // The detail follows the write without a reload of the whole list.
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_detail_task.is_none()
+                && app
+                    .pipeline_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.evaluations.len() == 1)
+        });
+        assert_eq!(
+            app.pipeline_detail
+                .as_ref()
+                .and_then(|detail| detail.latest_evaluation())
+                .map(|report| report.content.as_str()),
+            Some("A strong fit.")
+        );
+
+        // Re-evaluating with a model override adds a report and leaves the first.
+        app.handle_pipeline_action(PipelineAction::Evaluate {
+            job_id: stored.id,
+            fetch_description_if_thin: false,
+            prompt_name: "evaluate".into(),
+            model_override: Some("deepseek-chat-override".into()),
+        });
+        wait_until(&mut app, &ctx, |app| {
+            app.evaluation_task.is_none() && app.prompt_detail_task.is_none()
+        });
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_detail
+                .as_ref()
+                .is_some_and(|detail| detail.evaluations.len() == 2)
+        });
+        assert_eq!(
+            recorder.models(),
+            vec![None, Some("deepseek-chat-override".to_string())]
+        );
+        let detail = app.pipeline_detail.as_ref().expect("detail");
+        assert_eq!(detail.evaluations[0].model_used, "deepseek-chat-override");
+        assert_eq!(
+            detail.evaluations[1].content, "A strong fit.",
+            "the first report is still there"
         );
 
         let application = app
@@ -5674,6 +5996,83 @@ mod tests {
                 .expect("row")
                 .queue_state,
             "evaluated"
+        );
+    }
+
+    /// Stop interrupts a provider call in flight; the service restores the
+    /// status and stores nothing.
+    #[test]
+    fn stopping_an_evaluation_restores_the_status_and_stores_nothing() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (backend, started) = HangingBackend::new();
+        let (mut app, ctx) = unlocked_app_with_backend(dir.path(), Arc::new(backend));
+        let pool = app.pool().expect("pool");
+
+        app.runtime()
+            .block_on(profile_repo::update_details(
+                &pool,
+                &ProfileDetails {
+                    name: "Ada Lovelace".into(),
+                    email: "ada@example.com".into(),
+                    phone: None,
+                    location: None,
+                    summary: Some("Mathematician.".into()),
+                },
+            ))
+            .expect("profile");
+        let stored = app
+            .runtime()
+            .block_on(job_repo::upsert(
+                &pool,
+                job_repo::NewJobDescription {
+                    title: "Engineer".into(),
+                    company: "Acme".into(),
+                    source_url: "https://example.com/jobs/stop".into(),
+                    raw_text: eval_text(),
+                    fetch_tier: FetchTier::Tier1bHtml,
+                    external_id: None,
+                },
+            ))
+            .expect("store");
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+        app.pipeline_view.selected = Some(stored.id);
+
+        app.handle_pipeline_action(PipelineAction::Evaluate {
+            job_id: stored.id,
+            fetch_description_if_thin: false,
+            prompt_name: "evaluate".into(),
+            model_override: None,
+        });
+        wait_until(&mut app, &ctx, |_| started.load(Ordering::Relaxed));
+
+        app.handle_pipeline_action(PipelineAction::CancelEvaluation);
+        wait_until(&mut app, &ctx, |app| app.evaluation_task.is_none());
+
+        assert!(app.pipeline_error.is_none(), "{:?}", app.pipeline_error);
+        assert_eq!(
+            app.pipeline_message.as_deref(),
+            Some("Evaluation cancelled.")
+        );
+        assert!(app.evaluating_job().is_none());
+
+        let application = app
+            .runtime()
+            .block_on(application_repo::ensure(&pool, stored.id))
+            .expect("ensure");
+        assert_eq!(application.status, "discovered", "the status was restored");
+        assert!(
+            app.runtime()
+                .block_on(evaluation_repo::list_for_job(&pool, stored.id))
+                .expect("list")
+                .is_empty(),
+            "a cancelled call stores no report"
         );
     }
 
@@ -5705,9 +6104,9 @@ mod tests {
             .build()
             .expect("runtime");
         let source = Arc::new(StubFetchSource::default());
-        let backend = Arc::new(FakeEvalBackend {
-            reply: "Dear Hiring Manager,\n\nI build offline-first software.".into(),
-        });
+        let backend = Arc::new(FakeEvalBackend::new(
+            "Dear Hiring Manager,\n\nI build offline-first software.".into(),
+        ));
         let mut app = CareerOpsApp::with_fetch_source(state, runtime, source)
             .with_completion_backend(backend);
         let ctx = egui::Context::default();
@@ -5755,6 +6154,8 @@ mod tests {
         app.handle_pipeline_action(PipelineAction::GenerateCoverLetter {
             job_id: stored.id,
             tone: Some("warm".into()),
+            prompt_name: "cover_letter".into(),
+            model_override: None,
         });
         wait_until(&mut app, &ctx, |app| app.cover_letter_task.is_none());
 
@@ -5853,6 +6254,8 @@ mod tests {
         app.handle_pipeline_action(PipelineAction::GenerateCoverLetter {
             job_id: stored.id,
             tone: None,
+            prompt_name: "cover_letter".into(),
+            model_override: None,
         });
         wait_until(&mut app, &ctx, |app| app.cover_letter_task.is_none());
 

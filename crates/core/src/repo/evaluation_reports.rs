@@ -94,6 +94,27 @@ pub async fn list_for_application(
     Ok(rows)
 }
 
+/// Every report for a job, newest first.
+///
+/// The Pipeline detail knows a job id, not an application id, so the join does
+/// the resolution. A job has at most one application today; a future multi-CV
+/// row would simply add to this list.
+pub async fn list_for_job(
+    pool: &SqlitePool,
+    job_description_id: i64,
+) -> Result<Vec<EvaluationReport>> {
+    let rows = sqlx::query_as::<_, EvaluationReport>(
+        "SELECT e.* FROM evaluation_reports e
+         JOIN applications a ON a.id = e.application_id
+         WHERE a.job_description_id = ?
+         ORDER BY e.generated_at DESC, e.id DESC",
+    )
+    .bind(job_description_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// The newest report for an application.
 pub async fn latest_for_application(
     pool: &SqlitePool,

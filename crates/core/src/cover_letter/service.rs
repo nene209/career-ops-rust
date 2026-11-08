@@ -12,8 +12,10 @@
 use sqlx::SqlitePool;
 
 use crate::error::{CoreError, Result};
-use crate::llm::{capabilities, CompletionBackend, LlmConfig, LlmError};
-use crate::prompt_render::{estimated_tokens, render, take_chars, Variables, MAX_CV_CHARS};
+use crate::llm::{capabilities, CancelToken, CompletionBackend, LlmConfig, LlmError};
+use crate::prompt_render::{
+    estimated_tokens, render, take_chars, untrusted_block, Variables, MAX_CV_CHARS,
+};
 use crate::repo::cover_letters::{self, NewCoverLetter};
 use crate::repo::{applications, job_descriptions, profile, prompts};
 use crate::text;
@@ -32,6 +34,8 @@ pub struct CoverLetterRequest {
     pub model_override: Option<String>,
     /// A soft register for the letter; empty when the user did not choose one.
     pub tone: Option<String>,
+    /// Stop the call when the UI asks. Nothing is stored on cancellation.
+    pub cancel: CancelToken,
 }
 
 impl CoverLetterRequest {
@@ -41,6 +45,7 @@ impl CoverLetterRequest {
             prompt_name: DEFAULT_PROMPT.to_string(),
             model_override: None,
             tone: None,
+            cancel: CancelToken::default(),
         }
     }
 }
@@ -84,6 +89,7 @@ pub async fn run_cover_letter(
     // The same normalization the evaluation uses: a letter must not see tags,
     // and the posting is untrusted input either way.
     let normalized = text::plain_text(&job.raw_text, config.max_job_chars);
+    let untrusted = untrusted_block(&normalized.text);
 
     let cv_summary = profile::cv_summary(pool).await?.ok_or_else(|| {
         CoreError::Message("Add your CV in CV / Profile before writing a cover letter.".into())
@@ -105,7 +111,7 @@ pub async fn run_cover_letter(
         &prompt.content,
         &Variables {
             cv_summary: &cv_summary,
-            job_description: &normalized.text,
+            job_description: &untrusted,
             company_name: &job.company,
             job_title: &job.title,
             tone,
@@ -132,10 +138,17 @@ pub async fn run_cover_letter(
 
     let application = applications::ensure(pool, job.id).await?;
 
-    let reply = backend
-        .complete(&assembled, model_override, false, None)
-        .await
-        .map_err(CoreError::from)?;
+    let reply = {
+        // `biased` so a token already set when the call starts wins without
+        // polling the provider.
+        tokio::select! {
+            biased;
+            _ = request.cancel.wait() => return Err(CoreError::from(LlmError::Cancelled)),
+            result = backend.complete(&assembled, model_override, false, None) => {
+                result.map_err(CoreError::from)?
+            }
+        }
+    };
     let content = reply.trim();
     if content.is_empty() {
         return Err(CoreError::Message(

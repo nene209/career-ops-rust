@@ -69,6 +69,22 @@ pub async fn list_for_application(
     Ok(rows)
 }
 
+/// Every letter for a job, newest first.
+///
+/// The Pipeline detail has a job id; the join resolves its application.
+pub async fn list_for_job(pool: &SqlitePool, job_description_id: i64) -> Result<Vec<CoverLetter>> {
+    let rows = sqlx::query_as::<_, CoverLetter>(
+        "SELECT c.* FROM cover_letters c
+         JOIN applications a ON a.id = c.application_id
+         WHERE a.job_description_id = ?
+         ORDER BY c.generated_at DESC, c.id DESC",
+    )
+    .bind(job_description_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// The newest letter for an application.
 pub async fn latest_for_application(
     pool: &SqlitePool,
