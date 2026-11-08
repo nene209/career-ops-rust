@@ -3419,13 +3419,11 @@ impl CareerOpsApp {
             self.prompts_message = Some("No changes to save.".into());
             return;
         }
-        if let Err(error) = prompt_render::validate(&content) {
+        if let Err(error) = prompt_render::validate_for_category(&category, &content) {
             // Only the categories the app renders have a closed variable set;
             // the reference prompts may use their own placeholder syntax.
-            if prompt_render::variables_for_category(&category).is_some() {
-                self.prompts_error = Some(format!("This prompt cannot be saved: {error}"));
-                return;
-            }
+            self.prompts_error = Some(format!("This prompt cannot be saved: {error}"));
+            return;
         }
 
         self.start_prompt_write(name, category, content, PromptWriteKind::Saved);

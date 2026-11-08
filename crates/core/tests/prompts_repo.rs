@@ -58,12 +58,27 @@ async fn seeding_creates_the_compact_prompts_and_is_idempotent() {
     assert!(letter.content.contains("{{job_title}}"));
     assert!(letter.content.contains("{{tone}}"));
 
+    let triage = prompts::active_system(&db.pool, "triage")
+        .await
+        .expect("query")
+        .expect("triage is seeded");
+    assert!(triage.is_system);
+    assert_eq!(triage.category, "triage");
+    for variable in ["{{cv_summary}}", "{{preferences}}", "{{jobs}}"] {
+        assert!(
+            triage.content.contains(variable),
+            "triage.md must use {variable}"
+        );
+    }
+    assert!(triage.content.contains("\"decisions\""));
+    assert!(triage.content.contains("worth_details"));
+
     // A second run must not create versions: the release content is identical.
     let outcomes = prompts_seed::seed_or_update_system_prompts(&db.pool)
         .await
         .expect("re-seed");
     for (name, outcome) in &outcomes {
-        if *name == "evaluate" || *name == "cover_letter" {
+        if *name == "evaluate" || *name == "cover_letter" || *name == "triage" {
             assert!(
                 matches!(outcome, SeedOutcome::Unchanged { version: 1 }),
                 "{name}: {outcome:?}"

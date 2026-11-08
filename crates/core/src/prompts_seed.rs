@@ -111,6 +111,14 @@ pub const SYSTEM_PROMPTS: &[SeedPrompt] = &[
         category: "cover_letter",
         content: include_str!("../prompts/cover_letter.md"),
     },
+    // Phase 3.2's triage prompt. It sorts a batch of fetched postings into the
+    // four decisions and states the batch rules; it never writes an application
+    // or evaluates a posting in depth.
+    SeedPrompt {
+        name: "triage",
+        category: "triage",
+        content: include_str!("../prompts/triage_batch.md"),
+    },
     // ------------------------------------------------------------------
     // Optional — present in the original repo, useful in later phases.
     // Comment out any row whose file you did not copy.
@@ -326,6 +334,7 @@ mod tests {
             "scan",
             "render",
             "cover_letter",
+            "triage",
             "utility",
         ];
         for seed in SYSTEM_PROMPTS {
@@ -336,6 +345,18 @@ mod tests {
                 seed.category
             );
         }
+    }
+
+    #[test]
+    fn the_triage_prompt_is_seeded() {
+        let seed = SYSTEM_PROMPTS
+            .iter()
+            .find(|seed| seed.name == "triage")
+            .expect("the triage prompt is seeded");
+
+        assert_eq!(seed.category, "triage");
+        assert!(seed.content.contains("{{jobs}}"));
+        assert!(seed.content.contains("{{preferences}}"));
     }
 
     #[test]

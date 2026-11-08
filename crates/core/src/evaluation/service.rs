@@ -175,6 +175,7 @@ pub async fn run_evaluation(
             company_name: &job.company,
             job_title: &job.title,
             tone: "",
+            ..Variables::default()
         },
     )
     .map_err(|error| {

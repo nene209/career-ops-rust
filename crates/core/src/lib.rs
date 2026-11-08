@@ -21,6 +21,7 @@ pub mod prompt_render;
 pub mod prompts_seed;
 pub mod repo;
 pub mod text;
+pub mod triage;
 
 pub use error::{CoreError, Result};
 

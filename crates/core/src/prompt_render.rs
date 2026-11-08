@@ -1,10 +1,12 @@
 //! Strict, flat variable substitution for prompt templates.
 //!
-//! A template is text with `{{name}}` placeholders. Five names exist, the set is
-//! closed, and an unknown one is an error rather than an empty string: a prompt
-//! that silently loses its job description produces a confident evaluation of
-//! nothing, which is worse than a failed render. The same rule catches a typo
-//! after a field is renamed.
+//! A template is text with `{{name}}` placeholders. The names a pipeline can
+//! fill are a closed set, and an unknown one is an error rather than an empty
+//! string: a prompt that silently loses its job description produces a
+//! confident evaluation of nothing, which is worse than a failed render. The
+//! same rule catches a typo after a field is renamed. Each rendered category
+//! sees only the variables its pipeline fills (see
+//! [`variables_for_category`]).
 //!
 //! There is deliberately no logic: no conditionals, loops, filters, or partials.
 //! Phase 3 sends one instruction and one set of values (Q-24).
@@ -36,7 +38,7 @@ pub fn take_chars(text: &str, max: usize) -> String {
     cut
 }
 
-/// A variable a Phase 3 prompt may use.
+/// A variable a prompt may use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Variable {
     /// The rendered `cv_summary` from `repo::profile`.
@@ -47,16 +49,35 @@ pub enum Variable {
     JobTitle,
     /// The letter's tone; empty when the user did not choose one.
     Tone,
+    /// The saved acquisition preferences, rendered as a short block.
+    Preferences,
+    /// The batch's postings, one `id | title | company | brief` line each.
+    Jobs,
 }
 
 impl Variable {
-    pub const ALL: [Variable; 5] = [
+    /// Every name a prompt template may contain.
+    pub const ALL: [Variable; 7] = [
+        Variable::CvSummary,
+        Variable::JobDescription,
+        Variable::CompanyName,
+        Variable::JobTitle,
+        Variable::Tone,
+        Variable::Preferences,
+        Variable::Jobs,
+    ];
+
+    /// What the evaluation and cover-letter pipelines fill.
+    pub const EVALUATION: [Variable; 5] = [
         Variable::CvSummary,
         Variable::JobDescription,
         Variable::CompanyName,
         Variable::JobTitle,
         Variable::Tone,
     ];
+
+    /// What the triage pipeline fills.
+    pub const TRIAGE: [Variable; 3] = [Variable::Preferences, Variable::CvSummary, Variable::Jobs];
 
     /// The name inside the braces. Part of the template contract.
     pub fn name(self) -> &'static str {
@@ -66,6 +87,8 @@ impl Variable {
             Self::CompanyName => "company_name",
             Self::JobTitle => "job_title",
             Self::Tone => "tone",
+            Self::Preferences => "preferences",
+            Self::Jobs => "jobs",
         }
     }
 
@@ -76,6 +99,8 @@ impl Variable {
             "company_name" => Some(Self::CompanyName),
             "job_title" => Some(Self::JobTitle),
             "tone" => Some(Self::Tone),
+            "preferences" => Some(Self::Preferences),
+            "jobs" => Some(Self::Jobs),
             _ => None,
         }
     }
@@ -88,11 +113,14 @@ impl Variable {
             Self::CompanyName => "The company on the posting.",
             Self::JobTitle => "The posting's title.",
             Self::Tone => "An optional register for a cover letter; empty when unset.",
+            Self::Preferences => "The acquisition preferences, as a short advice block.",
+            Self::Jobs => "The batch's postings, one id | title | company | brief line each.",
         }
     }
 }
 
-/// The values a render substitutes. `tone` is `""` when unset.
+/// The values a render substitutes. A variable the category does not use is an
+/// empty string, never a missing field.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Variables<'a> {
     pub cv_summary: &'a str,
@@ -100,6 +128,8 @@ pub struct Variables<'a> {
     pub company_name: &'a str,
     pub job_title: &'a str,
     pub tone: &'a str,
+    pub preferences: &'a str,
+    pub jobs: &'a str,
 }
 
 impl Variables<'_> {
@@ -110,6 +140,8 @@ impl Variables<'_> {
             Variable::CompanyName => self.company_name,
             Variable::JobTitle => self.job_title,
             Variable::Tone => self.tone,
+            Variable::Preferences => self.preferences,
+            Variable::Jobs => self.jobs,
         }
     }
 }
@@ -155,7 +187,8 @@ impl std::error::Error for RenderError {}
 /// legitimate content.
 pub fn variables_for_category(category: &str) -> Option<&'static [Variable]> {
     match category {
-        "evaluate" | "cover_letter" => Some(&Variable::ALL),
+        "evaluate" | "cover_letter" => Some(&Variable::EVALUATION),
+        "triage" => Some(&Variable::TRIAGE),
         _ => None,
     }
 }
@@ -165,6 +198,23 @@ pub fn variables_for_category(category: &str) -> Option<&'static [Variable]> {
 /// The Prompt Manager runs this on save, so an unknown variable is an error
 /// while the user is editing rather than when an evaluation is attempted.
 pub fn validate(template: &str) -> Result<(), RenderError> {
+    scan(template, &Variable::ALL)
+}
+
+/// Check a template against the variables its category actually fills.
+///
+/// A variable another category uses is unknown here: an `evaluate` prompt with
+/// `{{jobs}}` would render an empty string and silently lose its input, so it
+/// is refused at save time. A category the app does not render has no set and
+/// is not checked.
+pub fn validate_for_category(category: &str, template: &str) -> Result<(), RenderError> {
+    match variables_for_category(category) {
+        Some(allowed) => scan(template, allowed),
+        None => Ok(()),
+    }
+}
+
+fn scan(template: &str, allowed: &[Variable]) -> Result<(), RenderError> {
     let mut rest = template;
     let mut offset = 0usize;
 
@@ -176,10 +226,10 @@ pub fn validate(template: &str) -> Result<(), RenderError> {
             });
         };
 
-        let name = &after[..end];
-        if Variable::parse(name).is_none() {
+        let name = after[..end].trim();
+        if !allowed.iter().any(|variable| variable.name() == name) {
             return Err(RenderError::Unknown {
-                name: name.trim().to_string(),
+                name: name.to_string(),
             });
         }
 
@@ -262,18 +312,19 @@ mod tests {
             company_name: "Acme",
             job_title: "Compiler Engineer",
             tone: "",
+            preferences: "Keywords: rust",
+            jobs: "1 | Compiler Engineer | Acme | Build compilers.",
         }
     }
 
     #[test]
     fn every_variable_is_substituted() {
-        let template =
-            "{{company_name}} / {{job_title}}\n{{job_description}}\n{{cv_summary}}\n[{{tone}}]";
+        let template = "{{company_name}} / {{job_title}}\n{{job_description}}\n{{cv_summary}}\n[{{tone}}]\n{{preferences}}\n{{jobs}}";
         let rendered = render(template, &variables()).expect("render");
 
         assert_eq!(
             rendered,
-            "Acme / Compiler Engineer\nBuild compilers.\nAda Lovelace\nExperience:\n- Analytical engine\n[]"
+            "Acme / Compiler Engineer\nBuild compilers.\nAda Lovelace\nExperience:\n- Analytical engine\n[]\nKeywords: rust\n1 | Compiler Engineer | Acme | Build compilers."
         );
     }
 
@@ -332,11 +383,49 @@ mod tests {
     fn only_the_rendered_categories_have_a_variable_set() {
         assert!(variables_for_category("evaluate").is_some());
         assert!(variables_for_category("cover_letter").is_some());
+        assert!(variables_for_category("triage").is_some());
         assert!(
             variables_for_category("render").is_none(),
             "reference prompts may use their own placeholders"
         );
         assert!(variables_for_category("utility").is_none());
+    }
+
+    #[test]
+    fn each_category_sees_only_the_variables_it_fills() {
+        let evaluation = variables_for_category("evaluate").expect("evaluate");
+        assert!(evaluation.contains(&Variable::JobDescription));
+        assert!(!evaluation.contains(&Variable::Jobs));
+
+        let triage = variables_for_category("triage").expect("triage");
+        assert!(triage.contains(&Variable::Preferences));
+        assert!(triage.contains(&Variable::Jobs));
+        assert!(!triage.contains(&Variable::JobDescription));
+    }
+
+    #[test]
+    fn save_validation_is_scoped_to_the_category() {
+        assert!(validate_for_category("triage", "{{jobs}} {{preferences}}").is_ok());
+        assert_eq!(
+            validate_for_category("triage", "{{job_description}}")
+                .expect_err("evaluation-only variable"),
+            RenderError::Unknown {
+                name: "job_description".into()
+            }
+        );
+
+        assert!(validate_for_category("evaluate", "{{job_description}}").is_ok());
+        assert_eq!(
+            validate_for_category("evaluate", "{{jobs}}").expect_err("triage-only variable"),
+            RenderError::Unknown {
+                name: "jobs".into()
+            }
+        );
+
+        assert!(
+            validate_for_category("render", "{{PHOTO}}").is_ok(),
+            "a reference category is not checked"
+        );
     }
 
     #[test]
