@@ -10,6 +10,8 @@ use std::collections::HashSet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::model::QueueState;
+
 /// What the user should do with a posting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -58,6 +60,18 @@ impl TriageChoice {
             Self::Evaluate => "Evaluate",
             Self::Skip => "Skip",
             Self::Unsure => "Unsure",
+        }
+    }
+
+    /// What the decision means for the queue.
+    ///
+    /// `Unsure` deliberately lands on `evaluate`: a thin brief is not a reason
+    /// to hide a posting, so the default is to see it.
+    pub fn queue_state(self) -> QueueState {
+        match self {
+            Self::WorthDetails => QueueState::DetailsNeeded,
+            Self::Evaluate | Self::Unsure => QueueState::Evaluate,
+            Self::Skip => QueueState::Dismissed,
         }
     }
 }
@@ -182,6 +196,21 @@ mod tests {
             let output = parse(&reply, &[1]).expect("parse");
             assert_eq!(output.decisions[0].decision, choice);
         }
+    }
+
+    #[test]
+    fn each_choice_maps_to_its_queue_state() {
+        assert_eq!(
+            TriageChoice::WorthDetails.queue_state(),
+            QueueState::DetailsNeeded
+        );
+        assert_eq!(TriageChoice::Evaluate.queue_state(), QueueState::Evaluate);
+        assert_eq!(
+            TriageChoice::Unsure.queue_state(),
+            QueueState::Evaluate,
+            "unsure defaults toward seeing the posting"
+        );
+        assert_eq!(TriageChoice::Skip.queue_state(), QueueState::Dismissed);
     }
 
     #[test]

@@ -279,6 +279,24 @@ pub fn elapsed_ms(started: std::time::Instant) -> i64 {
     i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
+/// Price `input_tokens` and `output_tokens` at the model's catalog rate.
+///
+/// For a pre-call estimate: the counters are our own estimate, not a provider
+/// report. `None` when the catalog does not list the model. This is a list
+/// price, so it is labelled as an estimate wherever it is shown.
+pub fn catalog_cost(
+    provider: LlmProvider,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Option<f64> {
+    let usage = rig::completion::Usage::new()
+        .input_tokens(input_tokens)
+        .output_tokens(output_tokens)
+        .total_tokens(input_tokens.saturating_add(output_tokens));
+    price(provider, model, &usage).map(|cost| cost.total)
+}
+
 /// What `usage` costs at the model's catalog price, in USD.
 ///
 /// The catalog is `rig`'s, not a table of ours: it ships with the pinned

@@ -119,6 +119,13 @@ pub struct JobDescription {
     /// Phase 3.2's triage).
     pub queue_reason: Option<String>,
     pub queued_at: Option<DateTime<Utc>>,
+    /// What the triage batch said (Phase 3.2), with the model and prompt that
+    /// produced it. `None` until a triage run covers the row.
+    pub triage_decision: Option<String>,
+    pub triage_reason: Option<String>,
+    pub triage_model: Option<String>,
+    pub triage_prompt_hash: Option<String>,
+    pub triaged_at: Option<DateTime<Utc>>,
 }
 
 /// The pre-evaluation queue state of a posting.

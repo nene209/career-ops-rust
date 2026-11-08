@@ -558,6 +558,11 @@ mod tests {
             queue_state: "new".into(),
             queue_reason: None,
             queued_at: None,
+            triage_decision: None,
+            triage_reason: None,
+            triage_model: None,
+            triage_prompt_hash: None,
+            triaged_at: None,
         }
     }
 

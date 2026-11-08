@@ -328,6 +328,66 @@ pub async fn set_queue_state_tx(
     Ok(())
 }
 
+/// A triage decision to write, with the provenance that produced it.
+#[derive(Debug, Clone, Copy)]
+pub struct TriageWrite<'a> {
+    pub job_id: i64,
+    pub queue_state: QueueState,
+    /// `TriageChoice::as_str`.
+    pub decision: &'a str,
+    pub reason: &'a str,
+    pub model: &'a str,
+    pub prompt_hash: &'a str,
+}
+
+/// Apply a batch of triage decisions in one transaction.
+///
+/// `queue_state` and `queue_reason` are the operational fields the Pipeline
+/// reads; the `triage_*` columns keep the agent's own decision and reason. A
+/// missing row aborts the transaction: a batch built from a stale list must not
+/// apply half of itself. Returns how many rows changed.
+pub async fn apply_triage_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    writes: &[TriageWrite<'_>],
+) -> Result<usize> {
+    if writes.is_empty() {
+        return Ok(0);
+    }
+
+    let now = Utc::now();
+    let mut updated = 0usize;
+    for write in writes {
+        let result = sqlx::query(
+            "UPDATE job_descriptions
+             SET queue_state = ?, queue_reason = ?, queued_at = ?,
+                 triage_decision = ?, triage_reason = ?, triage_model = ?,
+                 triage_prompt_hash = ?, triaged_at = ?
+             WHERE id = ?",
+        )
+        .bind(write.queue_state.as_str())
+        .bind(write.reason)
+        .bind(now)
+        .bind(write.decision)
+        .bind(write.reason)
+        .bind(write.model)
+        .bind(write.prompt_hash)
+        .bind(now)
+        .bind(write.job_id)
+        .execute(&mut **tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(CoreError::Message(format!(
+                "job_descriptions::apply_triage_tx: job {} was not found",
+                write.job_id
+            )));
+        }
+        updated += 1;
+    }
+
+    Ok(updated)
+}
+
 /// Delete a job description. Its application, evaluations, and cover letters
 /// cascade (`foreign_keys = ON`).
 pub async fn delete(pool: &SqlitePool, id: i64) -> Result<()> {
