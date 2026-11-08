@@ -9,6 +9,7 @@ use egui::{Align2, Button, Color32, RichText, Ui, Window};
 use career_ops_core::evaluation::Recommendation;
 use career_ops_core::llm::config::DEFAULT_THIN_DESCRIPTION_CHARS;
 use career_ops_core::model::QueueState;
+use career_ops_core::triage::{TriageChoice, TriageEstimate};
 
 use crate::view_models::pipeline::{
     EvaluationRow, JobFilter, JobRow, PipelineDetail, PipelineViewModel, StatusLabel, TierLabel,
@@ -22,6 +23,11 @@ pub struct PipelineView {
     /// Open only for a job the user has touched; a fetched-only row deletes
     /// without a dialog.
     pub delete: Option<DeleteJobModal>,
+    /// The confirmation in front of a triage batch. The ids are captured when
+    /// the modal opens so the estimate and the run cover the same set.
+    pub triage: Option<TriageModal>,
+    /// The user has read the override hint, so it does not return this session.
+    pub triage_banner_dismissed: bool,
     /// Show the stored markup rather than the formatted text.
     pub show_raw: bool,
     /// The list's vertical scroll offset, so returning from the detail view
@@ -81,6 +87,13 @@ pub struct DeleteJobModal {
 /// The phrase the user types to confirm deleting a touched job.
 pub const DELETE_PHRASE: &str = "delete me";
 
+/// The confirmation in front of a triage batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriageModal {
+    /// The rows the batch will cover, fixed when the modal opened.
+    pub job_ids: Vec<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineAction {
     AddJob,
@@ -99,6 +112,16 @@ pub enum PipelineAction {
     FetchDescriptions,
     /// Stop a running description batch between jobs.
     CancelDescriptions,
+    /// Open the triage confirmation and estimate the batch for it.
+    RequestTriage {
+        job_ids: Vec<i64>,
+    },
+    /// Run the batch the confirmation showed.
+    RunTriage {
+        job_ids: Vec<i64>,
+    },
+    /// Stop a running triage batch. Nothing partial is applied.
+    CancelTriage,
     /// Delete the job, confirmed.
     DeleteJob(i64),
     /// Evaluate the job with the options the detail pane carries.
@@ -147,6 +170,11 @@ pub struct PipelineRenderState<'a> {
     pub queueing: Option<i64>,
     /// A description batch in flight.
     pub descriptions: Option<DescriptionProgress>,
+    /// A triage batch in flight, and how many postings it covers.
+    pub triaging: bool,
+    pub triaging_count: usize,
+    /// The estimate shown in the triage confirmation.
+    pub triage_estimate: Option<&'a TriageEstimate>,
     /// The job being deleted.
     pub deleting: Option<i64>,
     /// The selected job's evaluation and letter history.
@@ -178,7 +206,24 @@ pub fn show(
         view.delete = None;
     }
 
-    header(ui, view_model, state, &mut action);
+    header(ui, view_model, view, state, &mut action);
+
+    // The override hint appears once the batch has touched something. It is a
+    // hint, not a gate, and the user can put it away for the session.
+    if !view.triage_banner_dismissed && view_model.rows.iter().any(|row| row.triage.is_some()) {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(
+                    "You can override any triage decision. Skipped jobs stay visible under the Dismissed filter.",
+                )
+                .weak()
+                .small(),
+            );
+            if ui.button("Got it").clicked() {
+                view.triage_banner_dismissed = true;
+            }
+        });
+    }
 
     // A filter or a query applies to the list. Return to it so the change is
     // visible instead of leaving the detail panel on screen.
@@ -223,6 +268,9 @@ pub fn show(
     if let Some(gate_action) = delete_gate(ui, view, state) {
         action = Some(gate_action);
     }
+    if let Some(triage_action) = triage_modal(ui, view, state) {
+        action = Some(triage_action);
+    }
 
     action
 }
@@ -230,6 +278,7 @@ pub fn show(
 fn header(
     ui: &mut Ui,
     view_model: &PipelineViewModel,
+    view: &mut PipelineView,
     state: PipelineRenderState<'_>,
     action: &mut Option<PipelineAction>,
 ) {
@@ -252,7 +301,7 @@ fn header(
         let flagged = view_model.details_needed();
         if ui
             .add_enabled(
-                !state.loading && state.descriptions.is_none() && flagged > 0,
+                !state.loading && state.descriptions.is_none() && !state.triaging && flagged > 0,
                 Button::new(format!("Fetch descriptions ({flagged})")),
             )
             .on_hover_text(
@@ -261,7 +310,7 @@ fn header(
             .on_disabled_hover_text(if flagged == 0 {
                 "No jobs are marked for details"
             } else {
-                "A description batch is already running"
+                "A description batch or triage is already running"
             })
             .clicked()
         {
@@ -284,6 +333,44 @@ fn header(
             }
             if ui.button("Stop").clicked() {
                 *action = Some(PipelineAction::CancelDescriptions);
+            }
+            LoadingSpinner::show(ui);
+        }
+
+        // One call, so the count is the batch's size and a model call or a
+        // description batch in flight is enough to wait.
+        let candidate_count = view_model.triage_candidate_count();
+        let llm_busy =
+            state.triaging || state.evaluating.is_some() || state.writing_letter.is_some();
+        if ui
+            .add_enabled(
+                !state.loading && !llm_busy && state.descriptions.is_none() && candidate_count > 0,
+                Button::new(format!("Triage ({candidate_count})")),
+            )
+            .on_hover_text(
+                "Sort new postings into worth details, evaluate, skip, or unsure, in one call",
+            )
+            .on_disabled_hover_text(if candidate_count == 0 {
+                "No new jobs to triage"
+            } else if state.triaging {
+                "A triage batch is already running"
+            } else {
+                "Wait for the running model call or description batch"
+            })
+            .clicked()
+        {
+            // The ids are captured here so the estimate and the run cover the
+            // same rows even if the list reloads while the modal is open.
+            let job_ids = view_model.triage_candidates();
+            view.triage = Some(TriageModal {
+                job_ids: job_ids.clone(),
+            });
+            *action = Some(PipelineAction::RequestTriage { job_ids });
+        }
+        if state.triaging {
+            ui.label(RichText::new(format!("Triaging {} jobs…", state.triaging_count)).weak());
+            if ui.button("Stop").clicked() {
+                *action = Some(PipelineAction::CancelTriage);
             }
             LoadingSpinner::show(ui);
         }
@@ -477,6 +564,19 @@ fn detail(
         }
         ui.label(RichText::new(format!("Fetched {}", row.fetched_at)).weak());
     });
+
+    // The decision and its reason: the queue badge says what the row became,
+    // and this says why. `Unsure` shares `Evaluate`'s queue state, so the
+    // choice itself has to be shown to tell them apart.
+    if let Some(choice) = row.triage {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Triage").weak().small());
+            triage_badge(ui, choice);
+        });
+    }
+    if let Some(reason) = row.queue_reason.as_deref().filter(|r| !r.trim().is_empty()) {
+        ui.label(RichText::new(reason).italics().small().weak());
+    }
 
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -988,6 +1088,79 @@ fn delete_gate(
     }
 }
 
+/// The confirmation in front of a triage batch.
+///
+/// The estimate is computed from the batch the modal captured, so the number
+/// the user agrees to is the number the run sends. `Run triage` stays disabled
+/// until the estimate lands.
+fn triage_modal(
+    ui: &mut Ui,
+    view: &mut PipelineView,
+    state: PipelineRenderState<'_>,
+) -> Option<PipelineAction> {
+    let job_ids = view.triage.as_ref()?.job_ids.clone();
+    let mut decision = None;
+
+    Window::new("Triage new jobs?")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(460.0)
+        .show(ui.ctx(), |ui| {
+            match state.triage_estimate {
+                Some(estimate) => {
+                    ui.label(format!(
+                        "Triage {} jobs with {}.",
+                        estimate.jobs, estimate.model
+                    ));
+                    ui.label(format!(
+                        "About {} input tokens and {} output tokens; one call, a few seconds.",
+                        estimate.input_tokens, estimate.estimated_output_tokens
+                    ));
+                    let cost = estimate
+                        .estimated_cost_usd
+                        .map(|cost| format!("Estimated cost: ~${cost:.4}."))
+                        .unwrap_or_else(|| {
+                            "Cost unknown: the catalog does not price this model.".into()
+                        });
+                    ui.label(cost);
+                }
+                None => {
+                    ui.horizontal(|ui| {
+                        LoadingSpinner::show(ui);
+                        ui.label("Estimating the batch…");
+                    });
+                }
+            }
+            ui.add_space(4.0);
+            ui.label(
+                "Each decision moves a row in your queue. You can override any of them \
+                 afterwards, and a skipped job stays visible under the Dismissed filter.",
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(state.triage_estimate.is_some(), Button::new("Run triage"))
+                    .clicked()
+                {
+                    decision = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    decision = Some(false);
+                }
+            });
+        });
+
+    match decision {
+        Some(true) => Some(PipelineAction::RunTriage { job_ids }),
+        Some(false) => {
+            view.triage = None;
+            None
+        }
+        None => None,
+    }
+}
+
 fn tier_label(ui: &mut Ui, tier: TierLabel) {
     ui.label(RichText::new(tier.label()).monospace().small().weak());
 }
@@ -1064,6 +1237,17 @@ fn queue_badge(ui: &mut Ui, queue: QueueState) {
         QueueState::Evaluated => Color32::from_rgb(0x2e, 0xa0, 0x43),
     };
     ui.label(RichText::new(queue.label()).small().color(color));
+}
+
+/// The triage decision beside the queue badge.
+fn triage_badge(ui: &mut Ui, choice: TriageChoice) {
+    let color = match choice {
+        TriageChoice::WorthDetails => Color32::from_rgb(0x1f, 0x6f, 0xeb),
+        TriageChoice::Evaluate => Color32::from_rgb(0x7c, 0x3a, 0xed),
+        TriageChoice::Skip => Color32::from_rgb(0x6b, 0x72, 0x80),
+        TriageChoice::Unsure => Color32::from_rgb(0xc9, 0x8a, 0x00),
+    };
+    ui.label(RichText::new(choice.label()).small().color(color));
 }
 
 fn status_badge(ui: &mut Ui, status: StatusLabel) {

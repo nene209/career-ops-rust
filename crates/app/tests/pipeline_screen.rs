@@ -13,6 +13,7 @@ use career_ops_app::view_models::pipeline::{
 };
 use career_ops_core::model::QueueState;
 use career_ops_core::preferences::Preferences;
+use career_ops_core::triage::{TriageChoice, TriageEstimate};
 use egui::accesskit::Role;
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
@@ -62,6 +63,8 @@ fn row(id: i64, title: &str, status: Option<StatusLabel>, tier: TierLabel) -> Jo
         preferred: false,
         excluded: false,
         queue: QueueState::New,
+        queue_reason: None,
+        triage: None,
         match_score: None,
     }
 }
@@ -1262,4 +1265,378 @@ fn the_row_shows_the_match_score() {
     harness.run();
 
     let _ = harness.get_by_label("0.82");
+}
+
+// ----------------------------------------------------------------------
+// WS3: triage review UI
+// ----------------------------------------------------------------------
+
+fn estimate() -> TriageEstimate {
+    TriageEstimate {
+        jobs: 2,
+        model: "deepseek-flash".into(),
+        input_chars: 8_000,
+        input_tokens: 2_000,
+        estimated_output_tokens: 120,
+        estimated_cost_usd: Some(0.003),
+    }
+}
+
+fn triaged_row(id: i64, choice: TriageChoice, queue: QueueState, reason: &str) -> JobRow {
+    let mut row = with_queue(row(id, &format!("Job {id}"), None, TierLabel::Ats), queue);
+    row.triage = Some(choice);
+    row.queue_reason = Some(reason.into());
+    row
+}
+
+/// New rows are the batch; a row already sorted or dismissed is not.
+#[test]
+fn the_triage_button_counts_only_new_rows() {
+    let view_model = view_model(
+        vec![
+            row(1, "Engineer", None, TierLabel::Ats),
+            with_queue(
+                row(2, "Designer", None, TierLabel::Ats),
+                QueueState::DetailsNeeded,
+            ),
+            with_queue(
+                row(3, "Manager", None, TierLabel::Ats),
+                QueueState::Dismissed,
+            ),
+        ],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let button = harness.get_by_role_and_label(Role::Button, "Triage (1)");
+    assert!(!button.accesskit_node().is_disabled());
+}
+
+#[test]
+fn the_triage_button_is_disabled_with_no_new_rows() {
+    let view_model = view_model(
+        vec![with_queue(
+            row(1, "Engineer", None, TierLabel::Ats),
+            QueueState::Evaluate,
+        )],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let button = harness.get_by_role_and_label(Role::Button, "Triage (0)");
+    assert!(button.accesskit_node().is_disabled());
+}
+
+#[test]
+fn the_triage_button_opens_the_confirmation_and_requests_the_estimate() {
+    let view_model = view_model(
+        vec![
+            row(1, "Engineer", None, TierLabel::Ats),
+            row(2, "Designer", None, TierLabel::Ats),
+        ],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Triage (2)")
+        .click();
+    // The estimate is pending, so the modal's spinner keeps repainting.
+    harness.run_steps(2);
+
+    assert_eq!(
+        harness.state().view.triage,
+        Some(pipeline::TriageModal {
+            job_ids: vec![1, 2]
+        })
+    );
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PipelineAction::RequestTriage {
+            job_ids: vec![1, 2]
+        })
+    );
+}
+
+#[test]
+fn the_confirmation_shows_the_estimate_and_cancel_emits_nothing() {
+    let view_model = view_model(
+        vec![
+            row(1, "Engineer", None, TierLabel::Ats),
+            row(2, "Designer", None, TierLabel::Ats),
+        ],
+        JobFilter::All,
+        "",
+    );
+    let estimate = estimate();
+    let state = PipelineRenderState {
+        triage_estimate: Some(&estimate),
+        ..idle_state()
+    };
+    let view = PipelineView {
+        triage: Some(pipeline::TriageModal {
+            job_ids: vec![1, 2],
+        }),
+        ..PipelineView::default()
+    };
+    let mut harness = test_harness(&view_model, view, state);
+    harness.run();
+
+    let _ = harness.get_by_label("Triage 2 jobs with deepseek-flash.");
+    let _ = harness
+        .get_by_label("About 2000 input tokens and 120 output tokens; one call, a few seconds.");
+    let _ = harness.get_by_label("Estimated cost: ~$0.0030.");
+
+    harness
+        .get_by_role_and_label(Role::Button, "Cancel")
+        .click();
+    harness.run();
+
+    assert!(harness.state().view.triage.is_none());
+    assert!(
+        !harness
+            .state()
+            .actions
+            .iter()
+            .any(|action| matches!(action, PipelineAction::RunTriage { .. })),
+        "Cancel must not spend tokens"
+    );
+}
+
+#[test]
+fn run_triage_emits_the_batch_the_confirmation_showed() {
+    let view_model = view_model(
+        vec![
+            row(1, "Engineer", None, TierLabel::Ats),
+            row(2, "Designer", None, TierLabel::Ats),
+        ],
+        JobFilter::All,
+        "",
+    );
+    let estimate = estimate();
+    let state = PipelineRenderState {
+        triage_estimate: Some(&estimate),
+        ..idle_state()
+    };
+    let view = PipelineView {
+        triage: Some(pipeline::TriageModal {
+            job_ids: vec![1, 2],
+        }),
+        ..PipelineView::default()
+    };
+    let mut harness = test_harness(&view_model, view, state);
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Run triage")
+        .click();
+    harness.run();
+
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PipelineAction::RunTriage {
+            job_ids: vec![1, 2]
+        })
+    );
+}
+
+#[test]
+fn run_triage_waits_for_the_estimate() {
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let view = PipelineView {
+        triage: Some(pipeline::TriageModal { job_ids: vec![1] }),
+        ..PipelineView::default()
+    };
+    let mut harness = test_harness(&view_model, view, idle_state());
+    // The estimating spinner keeps repainting.
+    harness.run_steps(2);
+
+    let button = harness.get_by_role_and_label(Role::Button, "Run triage");
+    assert!(button.accesskit_node().is_disabled());
+    let _ = harness.get_by_label("Estimating the batch…");
+}
+
+#[test]
+fn a_running_triage_reports_progress_and_offers_stop() {
+    let view_model = view_model(
+        vec![row(1, "Engineer", None, TierLabel::Ats)],
+        JobFilter::All,
+        "",
+    );
+    let state = PipelineRenderState {
+        triaging: true,
+        triaging_count: 47,
+        ..idle_state()
+    };
+    let mut harness = test_harness(&view_model, PipelineView::default(), state);
+    // The spinner keeps requesting repaints; `run()` would never settle.
+    harness.run_steps(2);
+
+    let _ = harness.get_by_label("Triaging 47 jobs…");
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Button, "Triage (1)")
+            .accesskit_node()
+            .is_disabled(),
+        "a second batch must not start while one runs"
+    );
+
+    harness.get_by_role_and_label(Role::Button, "Stop").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PipelineAction::CancelTriage)
+    );
+}
+
+#[test]
+fn the_triaged_filter_shows_the_triaged_rows() {
+    let view_model = view_model(
+        vec![
+            triaged_row(
+                1,
+                TriageChoice::Evaluate,
+                QueueState::Evaluate,
+                "Strong title.",
+            ),
+            row(2, "Designer", None, TierLabel::Ats),
+        ],
+        JobFilter::Triaged,
+        "",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("Job 1 — Acme");
+    assert!(
+        harness.query_by_label("Designer — Acme").is_none(),
+        "an untriaged row is not in the Triaged view"
+    );
+}
+
+#[test]
+fn the_detail_shows_the_decision_and_its_reason() {
+    let view_model = view_model(
+        vec![triaged_row(
+            1,
+            TriageChoice::WorthDetails,
+            QueueState::DetailsNeeded,
+            "The brief suggests a closer look.",
+        )],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("The brief suggests a closer look.");
+    let _ = harness.get_by_role_and_label(Role::Label, "Worth details");
+}
+
+#[test]
+fn unsure_is_distinguishable_from_evaluate_on_the_detail() {
+    let view_model = view_model(
+        vec![
+            triaged_row(
+                1,
+                TriageChoice::Unsure,
+                QueueState::Evaluate,
+                "Brief is thin.",
+            ),
+            triaged_row(
+                2,
+                TriageChoice::Evaluate,
+                QueueState::Evaluate,
+                "Strong fit.",
+            ),
+        ],
+        JobFilter::All,
+        "",
+    );
+    // Each row is viewed alone, because both map to the same queue badge.
+    for (id, reason, badge, evaluate_labels) in [
+        (1, "Brief is thin.", Some("Unsure"), 1),
+        (2, "Strong fit.", None, 2),
+    ] {
+        let mut harness = test_harness(&view_model, selected(id), idle_state());
+        harness.run();
+        let _ = harness.get_by_label(reason);
+        if let Some(badge) = badge {
+            let _ = harness.get_by_label(badge);
+        }
+        // "Evaluate" appears once as the queue badge; the second occurrence is
+        // the triage badge that says the decision was not `Unsure`.
+        assert_eq!(
+            harness
+                .get_all_by_role_and_label(Role::Label, "Evaluate")
+                .count(),
+            evaluate_labels,
+            "job {id} must carry {evaluate_labels} Evaluate labels"
+        );
+    }
+}
+
+/// A skip is a dismissal, so overriding it is the same action a manual
+/// dismissal gets: the row moves to `evaluate`.
+#[test]
+fn overriding_a_skip_row_marks_it_for_evaluation() {
+    let view_model = view_model(
+        vec![triaged_row(
+            1,
+            TriageChoice::Skip,
+            QueueState::Dismissed,
+            "Marketing, not engineering.",
+        )],
+        JobFilter::Dismissed,
+        "",
+    );
+    let mut harness = test_harness(&view_model, selected(1), idle_state());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Mark for evaluation")
+        .click();
+    harness.run();
+
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PipelineAction::MarkForEvaluation(1))
+    );
+}
+
+#[test]
+fn the_override_hint_is_dismissible() {
+    let view_model = view_model(
+        vec![triaged_row(
+            1,
+            TriageChoice::Evaluate,
+            QueueState::Evaluate,
+            "Fits.",
+        )],
+        JobFilter::All,
+        "",
+    );
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let hint = "You can override any triage decision. Skipped jobs stay visible under the Dismissed filter.";
+    let _ = harness.get_by_label(hint);
+
+    harness
+        .get_by_role_and_label(Role::Button, "Got it")
+        .click();
+    harness.run();
+
+    assert!(harness.state().view.triage_banner_dismissed);
+    assert!(harness.query_by_label(hint).is_none());
 }

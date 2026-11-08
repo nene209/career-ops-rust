@@ -60,6 +60,9 @@ use career_ops_core::repo::llm_usage as usage_repo;
 use career_ops_core::repo::portals::{self as portal_repo, NewPortal, RenderMode};
 use career_ops_core::repo::profile::{self as profile_repo, ProfileDetails};
 use career_ops_core::repo::prompts::{self as prompt_repo, PromptThread};
+use career_ops_core::triage::{
+    self, TriageChoice, TriageError, TriageEstimate, TriageReport, TriageRequest,
+};
 use career_ops_core::{CoreError, Result as CoreResult};
 use tokio::runtime::Runtime;
 
@@ -291,6 +294,14 @@ pub struct CareerOpsApp {
     writing_cover_letter: Option<i64>,
     cover_letter_cancel: CancelToken,
 
+    /// The triage batch: the estimate that fills the confirmation modal, the
+    /// run itself, and the one-frame completion line.
+    triage_estimate_task: Option<AsyncTask<Result<TriageEstimate, TriageError>>>,
+    triage_estimate: Option<TriageEstimate>,
+    triage_task: Option<AsyncTask<Result<TriageReport, TriageError>>>,
+    triaging_jobs: usize,
+    triage_cancel: CancelToken,
+
     /// The selected Pipeline row's reports and letters, and the load that is
     /// fetching them.
     pipeline_detail: Option<PipelineDetail>,
@@ -436,6 +447,11 @@ impl CareerOpsApp {
             cover_letter_task: None,
             writing_cover_letter: None,
             cover_letter_cancel: CancelToken::default(),
+            triage_estimate_task: None,
+            triage_estimate: None,
+            triage_task: None,
+            triaging_jobs: 0,
+            triage_cancel: CancelToken::default(),
             pipeline_detail: None,
             pipeline_detail_for: None,
             pipeline_detail_task: None,
@@ -669,6 +685,9 @@ impl CareerOpsApp {
             }
             PipelineAction::FetchDescriptions => self.start_descriptions_batch(),
             PipelineAction::CancelDescriptions => self.cancel_descriptions_batch(),
+            PipelineAction::RequestTriage { job_ids } => self.start_triage_estimate(job_ids),
+            PipelineAction::RunTriage { job_ids } => self.start_triage(job_ids),
+            PipelineAction::CancelTriage => self.triage_cancel.cancel(),
             PipelineAction::DeleteJob(job_id) => self.start_job_delete(job_id),
             PipelineAction::Evaluate {
                 job_id,
@@ -1076,6 +1095,11 @@ impl CareerOpsApp {
         self.cover_letter_task = None;
         self.writing_cover_letter = None;
         self.cover_letter_cancel = CancelToken::default();
+        self.triage_estimate_task = None;
+        self.triage_estimate = None;
+        self.triage_task = None;
+        self.triaging_jobs = 0;
+        self.triage_cancel = CancelToken::default();
         self.pipeline_detail = None;
         self.pipeline_detail_for = None;
         self.pipeline_detail_task = None;
@@ -2144,7 +2168,7 @@ impl CareerOpsApp {
     /// shape as the portal walk: a click is a decision, not a crawl. The rows
     /// are taken from the loaded page in the order the list shows them.
     fn start_descriptions_batch(&mut self) {
-        if self.descriptions_task.is_some() {
+        if self.descriptions_task.is_some() || self.triage_task.is_some() {
             return;
         }
 
@@ -2617,6 +2641,179 @@ impl CareerOpsApp {
     /// The job whose cover letter is being written, if any.
     pub fn writing_cover_letter(&self) -> Option<i64> {
         self.writing_cover_letter
+    }
+
+    /// Estimate a triage batch for the confirmation modal.
+    ///
+    /// The estimate is a local read plus a token count; it makes no provider
+    /// call. The run is separate so the user sees what they are approving
+    /// before any tokens are spent.
+    fn start_triage_estimate(&mut self, job_ids: Vec<i64>) {
+        let Some(pool) = self.pool() else {
+            self.pipeline_error = Some("The database is not open.".into());
+            return;
+        };
+        if job_ids.is_empty() {
+            self.pipeline_view.triage = None;
+            return;
+        }
+
+        self.pipeline_error = None;
+        self.triage_estimate = None;
+
+        let task =
+            self.spawn(async move { triage::estimate(&pool, &TriageRequest::new(job_ids)).await });
+        self.triage_estimate_task = Some(task);
+    }
+
+    fn poll_triage_estimate(&mut self, ctx: &egui::Context) {
+        let poll = match self.triage_estimate_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.triage_estimate_task = None;
+                match result {
+                    Ok(estimate) => self.triage_estimate = Some(estimate),
+                    Err(error) => {
+                        // Without an estimate there is nothing to approve.
+                        self.pipeline_view.triage = None;
+                        self.pipeline_error =
+                            Some(format!("Could not estimate the triage batch: {error}"));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.triage_estimate_task = None;
+                self.triage_estimate = None;
+                self.pipeline_view.triage = None;
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Run one triage batch.
+    ///
+    /// The backend is built here for the same reason as an evaluation: the key
+    /// is read from the keychain on this thread's runtime and never reaches a
+    /// database row.
+    fn start_triage(&mut self, job_ids: Vec<i64>) {
+        if self.triage_task.is_some()
+            || self.evaluation_task.is_some()
+            || self.cover_letter_task.is_some()
+            || self.descriptions_task.is_some()
+        {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.pipeline_error = Some("The database is not open.".into());
+            return;
+        };
+        if job_ids.is_empty() {
+            self.pipeline_view.triage = None;
+            return;
+        }
+
+        self.pipeline_view.triage = None;
+        self.triage_estimate = None;
+        self.pipeline_error = None;
+        self.pipeline_message = None;
+        self.triaging_jobs = job_ids.len();
+        self.triage_cancel = CancelToken::new(Arc::new(AtomicBool::new(false)));
+        let cancel = self.triage_cancel.clone();
+
+        let injected = self.completion_backend.clone();
+        let task = self.spawn(async move {
+            let request = TriageRequest {
+                job_ids,
+                limit: triage::DEFAULT_BATCH_LIMIT,
+                cancel,
+            };
+
+            if let Some(backend) = injected {
+                return triage::run_triage(&pool, &request, backend.as_ref()).await;
+            }
+
+            let config = LlmConfig::load(&pool).await.map_err(TriageError::from)?;
+            let Some(key) = llm::keys::get_api_key(config.provider).map_err(TriageError::from)?
+            else {
+                return Err(TriageError::from(llm::LlmError::MissingApiKey {
+                    provider: config.provider,
+                }));
+            };
+            let client = config.build_client(&key).map_err(TriageError::from)?;
+            triage::run_triage(&pool, &request, &client).await
+        });
+
+        self.triage_task = Some(task);
+    }
+
+    fn poll_triage(&mut self, ctx: &egui::Context) {
+        let poll = match self.triage_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.triage_task = None;
+                self.triaging_jobs = 0;
+                match result {
+                    Ok(report) => {
+                        // The rows may have fallen off the loaded page while the
+                        // call ran; a miss means the list is stale.
+                        let mut stale = false;
+                        for decision in &report.decisions {
+                            if !self.pipeline.set_triage(
+                                decision.job_id,
+                                decision.decision,
+                                &decision.reason,
+                            ) {
+                                stale = true;
+                            }
+                        }
+                        if stale {
+                            self.start_pipeline_load();
+                        }
+                        let summary = triage_summary_line(&report);
+                        self.pipeline_error = None;
+                        self.pipeline_message = Some(summary);
+                    }
+                    Err(error) => {
+                        self.pipeline_message = None;
+                        let text = error.to_string();
+                        if text.contains("cancelled") {
+                            self.pipeline_message = Some("Triage cancelled.".into());
+                        } else {
+                            self.pipeline_error = Some(format!("Triage failed: {error}"));
+                        }
+                    }
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.triage_task = None;
+                self.triaging_jobs = 0;
+                self.pipeline_message = None;
+                self.pipeline_error = Some("The triage batch was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// The triage batch in flight, if any.
+    pub fn triage_in_flight(&self) -> bool {
+        self.triage_task.is_some()
     }
 
     // ------------------------------------------------------------------
@@ -3657,6 +3854,37 @@ fn llm_status_line(status: &LlmStatus) -> String {
     }
 }
 
+/// The completion line for a triage batch.
+///
+/// It counts each decision by name because the four choices are the whole
+/// answer; the cost is the provider's figure when the ledger has one and the
+/// catalog estimate otherwise.
+fn triage_summary_line(report: &TriageReport) -> String {
+    let mut worth_details = 0;
+    let mut evaluate = 0;
+    let mut skipped = 0;
+    let mut unsure = 0;
+    for decision in &report.decisions {
+        match decision.decision {
+            TriageChoice::WorthDetails => worth_details += 1,
+            TriageChoice::Evaluate => evaluate += 1,
+            TriageChoice::Skip => skipped += 1,
+            TriageChoice::Unsure => unsure += 1,
+        }
+    }
+
+    let mut line = format!(
+        "Triaged {} jobs: {worth_details} worth details, {evaluate} to evaluate, \
+         {skipped} skipped, {unsure} unsure",
+        report.decisions.len()
+    );
+    if let Some(cost) = report.actual_cost_usd.or(report.estimated_cost_usd) {
+        line.push_str(&format!(" · ${cost:.4}"));
+    }
+    line.push_str(&format!(" · {:.1}s", report.elapsed.as_secs_f64()));
+    line
+}
+
 /// The one-line result shown after a description batch.
 ///
 /// The batch is bounded, so "there is more" has to be sayable without making a
@@ -3810,6 +4038,8 @@ impl eframe::App for CareerOpsApp {
                 self.poll_pipeline_delete(ui.ctx());
                 self.poll_evaluation(ui.ctx());
                 self.poll_cover_letter(ui.ctx());
+                self.poll_triage_estimate(ui.ctx());
+                self.poll_triage(ui.ctx());
                 self.poll_cv_profile_task(ui.ctx());
                 self.poll_cv_profile_save(ui.ctx());
                 self.poll_cv_profile_entry(ui.ctx());
@@ -3926,6 +4156,9 @@ impl eframe::App for CareerOpsApp {
                         .lock()
                         .ok()
                         .and_then(|progress| *progress),
+                    triaging: self.triage_task.is_some(),
+                    triaging_count: self.triaging_jobs,
+                    triage_estimate: self.triage_estimate.as_ref(),
                     deleting: self.deleting_job,
                     detail: self.pipeline_detail.as_ref(),
                     detail_loading: self.pipeline_detail_task.is_some()
@@ -4965,6 +5198,8 @@ mod tests {
             app.poll_pipeline_delete(ctx);
             app.poll_evaluation(ctx);
             app.poll_cover_letter(ctx);
+            app.poll_triage_estimate(ctx);
+            app.poll_triage(ctx);
             app.poll_cv_profile_task(ctx);
             app.poll_cv_profile_save(ctx);
             app.poll_cv_profile_entry(ctx);
@@ -5991,6 +6226,38 @@ mod tests {
             .to_string()
     }
 
+    /// A scripted triage reply whose ids are only known after the rows exist.
+    struct FakeTriageBackend {
+        reply: Mutex<String>,
+    }
+
+    impl FakeTriageBackend {
+        fn new() -> Self {
+            Self {
+                reply: Mutex::new(String::new()),
+            }
+        }
+
+        fn set_reply(&self, reply: String) {
+            *self.reply.lock().unwrap() = reply;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl evaluation::CompletionBackend for FakeTriageBackend {
+        async fn complete(
+            &self,
+            _prompt: &str,
+            _model: Option<&str>,
+            _json_mode: bool,
+            _deltas: Option<&career_ops_core::llm::DeltaSink>,
+        ) -> Result<career_ops_core::llm::Completion, llm::LlmError> {
+            Ok(career_ops_core::llm::Completion::text_only(
+                self.reply.lock().unwrap().clone(),
+            ))
+        }
+    }
+
     fn eval_text() -> String {
         let mut text = String::from("We are hiring a Rust engineer. ");
         while text.chars().count() < 600 {
@@ -6246,6 +6513,142 @@ mod tests {
                 .is_empty(),
             "a cancelled call stores no report"
         );
+    }
+
+    /// The triage batch through the app: the estimate fills the modal, the run
+    /// writes the queue and the provenance, and the completion line names the
+    /// decisions.
+    #[test]
+    fn triaging_a_batch_updates_the_queue_and_reports_the_summary() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = Arc::new(FakeTriageBackend::new());
+        let injected: Arc<dyn evaluation::CompletionBackend> = backend.clone();
+        let (mut app, ctx) = unlocked_app_with_backend(dir.path(), injected);
+
+        let pool = app.pool().expect("pool");
+        app.runtime()
+            .block_on(profile_repo::update_details(
+                &pool,
+                &ProfileDetails {
+                    name: "Ada Lovelace".into(),
+                    email: "ada@example.com".into(),
+                    phone: None,
+                    location: Some("London".into()),
+                    summary: Some("Mathematician.".into()),
+                },
+            ))
+            .expect("profile");
+
+        let first = app
+            .runtime()
+            .block_on(job_repo::upsert(
+                &pool,
+                job_repo::NewJobDescription {
+                    title: "Rust engineer".into(),
+                    company: "Acme".into(),
+                    source_url: "https://example.com/jobs/triage-1".into(),
+                    raw_text: "Build offline-first desktop software with Rust and SQLite.".into(),
+                    fetch_tier: FetchTier::Tier1bHtml,
+                    external_id: None,
+                },
+            ))
+            .expect("store");
+        let second = app
+            .runtime()
+            .block_on(job_repo::upsert(
+                &pool,
+                job_repo::NewJobDescription {
+                    title: "Marketing manager".into(),
+                    company: "AdCo".into(),
+                    source_url: "https://example.com/jobs/triage-2".into(),
+                    raw_text: "Own the campaign calendar.".into(),
+                    fetch_tier: FetchTier::Tier1bHtml,
+                    external_id: None,
+                },
+            ))
+            .expect("store");
+
+        let ids = vec![first.id, second.id];
+        backend.set_reply(format!(
+            r#"{{"decisions":[
+                {{"job_id":{},"decision":"evaluate","reason":"Rust matches the CV."}},
+                {{"job_id":{},"decision":"skip","reason":"Marketing, not engineering."}}
+            ]}}"#,
+            first.id, second.id
+        ));
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+
+        app.handle_pipeline_action(PipelineAction::RequestTriage {
+            job_ids: ids.clone(),
+        });
+        wait_until(&mut app, &ctx, |app| {
+            app.triage_estimate_task.is_none() && app.triage_estimate.is_some()
+        });
+        let estimate = app.triage_estimate.as_ref().expect("estimate");
+        assert_eq!(estimate.jobs, 2);
+        assert_eq!(estimate.model, "deepseek-flash");
+
+        app.handle_pipeline_action(PipelineAction::RunTriage {
+            job_ids: ids.clone(),
+        });
+        wait_until(&mut app, &ctx, |app| app.triage_task.is_none());
+
+        assert!(app.pipeline_error.is_none(), "{:?}", app.pipeline_error);
+        assert!(!app.triage_in_flight());
+        assert!(app.triage_estimate.is_none(), "the estimate is spent");
+
+        let summary = app.pipeline_message.as_deref().expect("summary");
+        assert!(summary.contains("Triaged 2 jobs"), "{summary}");
+        assert!(summary.contains("1 to evaluate"), "{summary}");
+        assert!(summary.contains("1 skipped"), "{summary}");
+
+        let rust_row = app
+            .pipeline
+            .rows
+            .iter()
+            .find(|row| row.id == first.id)
+            .expect("first row");
+        assert_eq!(rust_row.queue, QueueState::Evaluate);
+        assert_eq!(rust_row.triage, Some(TriageChoice::Evaluate));
+        assert_eq!(
+            rust_row.queue_reason.as_deref(),
+            Some("Rust matches the CV.")
+        );
+
+        let marketing_row = app
+            .pipeline
+            .rows
+            .iter()
+            .find(|row| row.id == second.id)
+            .expect("second row");
+        assert_eq!(marketing_row.queue, QueueState::Dismissed);
+        assert_eq!(
+            marketing_row.queue_reason.as_deref(),
+            Some("Marketing, not engineering.")
+        );
+
+        // The provenance columns are on disk, not only in the view model.
+        let stored = app
+            .runtime()
+            .block_on(job_repo::get(&pool, first.id))
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.queue_state, "evaluate");
+        assert_eq!(stored.triage_decision.as_deref(), Some("evaluate"));
+        assert_eq!(
+            stored.triage_reason.as_deref(),
+            Some("Rust matches the CV.")
+        );
+        assert_eq!(stored.triage_model.as_deref(), Some("deepseek-flash"));
+        assert!(stored.triage_prompt_hash.is_some());
+        assert!(stored.triaged_at.is_some());
     }
 
     /// A generated letter is stored, the row's delete gate follows, and the

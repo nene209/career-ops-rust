@@ -12,6 +12,7 @@ use career_ops_core::model::{
 };
 use career_ops_core::preferences::{PreferenceFacts, Preferences};
 use career_ops_core::text;
+use career_ops_core::triage::{TriageChoice, DEFAULT_BATCH_LIMIT};
 use chrono::Utc;
 
 use super::portals::relative_time;
@@ -59,6 +60,12 @@ pub struct JobRow {
     /// The pre-evaluation queue state. `Dismissed` rows are hidden everywhere
     /// except the `Dismissed` filter.
     pub queue: QueueState,
+    /// The reason recorded with the queue state. Triage writes the model's
+    /// sentence here; a manual queue action leaves it empty.
+    pub queue_reason: Option<String>,
+    /// What the triage batch said, when it has covered this row. Separate from
+    /// `queue` because `Unsure` and `Evaluate` share a queue state.
+    pub triage: Option<TriageChoice>,
     /// The latest evaluation's match score, when one exists. `None` until the
     /// row is evaluated.
     pub match_score: Option<f64>,
@@ -162,6 +169,9 @@ pub enum JobFilter {
     NotAMatch,
     /// The only view in which a dismissed row is visible.
     Dismissed,
+    /// Rows the triage batch has sorted. A skipped row is `Dismissed`, so it is
+    /// visible under that filter, not here.
+    Triaged,
 }
 
 impl JobFilter {
@@ -169,6 +179,7 @@ impl JobFilter {
         &[
             JobFilter::All,
             JobFilter::Preferred,
+            JobFilter::Triaged,
             JobFilter::Excluded,
             JobFilter::NotApplied,
             JobFilter::Applied,
@@ -182,6 +193,7 @@ impl JobFilter {
         match self {
             Self::All => "All",
             Self::Preferred => "Preferred",
+            Self::Triaged => "Triaged",
             Self::Excluded => "Excluded",
             Self::NotApplied => "Not applied",
             Self::Applied => "Applied",
@@ -201,6 +213,7 @@ impl JobFilter {
             _ if row.excluded || row.queue == QueueState::Dismissed => false,
             Self::All => true,
             Self::Preferred => row.preferred,
+            Self::Triaged => row.triage.is_some(),
             Self::NotApplied => match row.status {
                 None => true,
                 Some(status) => {
@@ -352,6 +365,42 @@ impl PipelineViewModel {
             }
             None => false,
         }
+    }
+
+    /// Replace a row's queue state and its triage decision after a batch.
+    ///
+    /// The queue state is what the filters and the badge read; the choice is
+    /// kept beside it because `Unsure` and `Evaluate` share a state. Returns
+    /// `false` when the row is no longer in the page.
+    pub fn set_triage(&mut self, id: i64, choice: TriageChoice, reason: &str) -> bool {
+        let Some(row) = self.rows.iter_mut().find(|row| row.id == id) else {
+            return false;
+        };
+
+        row.queue = choice.queue_state();
+        row.triage = Some(choice);
+        row.queue_reason = Some(reason.trim().to_string());
+        true
+    }
+
+    /// Postings a triage run may cover: new rows that the exclusion list does
+    /// not already hide, in list order, up to one batch.
+    pub fn triage_candidates(&self) -> Vec<i64> {
+        self.rows
+            .iter()
+            .filter(|row| row.queue == QueueState::New && !row.excluded)
+            .take(DEFAULT_BATCH_LIMIT)
+            .map(|row| row.id)
+            .collect()
+    }
+
+    /// Every new, non-excluded row, so the header can say how many there are
+    /// even when one run covers only the first batch.
+    pub fn triage_candidate_count(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| row.queue == QueueState::New && !row.excluded)
+            .count()
     }
 
     /// Apply a stored match score to a loaded row.
@@ -527,6 +576,8 @@ fn rows_from_jobs(
                 // A state written by a build that knows more than this one
                 // reads as `new`: the badge is a hint, not a contract.
                 queue: QueueState::parse(&job.queue_state).unwrap_or_default(),
+                queue_reason: job.queue_reason,
+                triage: job.triage_decision.as_deref().and_then(TriageChoice::parse),
                 // Filled from the application load, not the job row.
                 match_score: None,
             };
@@ -582,6 +633,8 @@ mod tests {
             preferred: false,
             excluded: false,
             queue: QueueState::New,
+            queue_reason: None,
+            triage: None,
             match_score: None,
         }
     }
@@ -1109,5 +1162,124 @@ mod tests {
         assert_eq!(view_model.row(1).unwrap().queue, QueueState::DetailsNeeded);
 
         assert!(!view_model.set_queue(99, QueueState::Evaluate));
+    }
+
+    #[test]
+    fn set_triage_writes_the_queue_the_choice_and_the_reason() {
+        let mut view_model = PipelineViewModel {
+            rows: vec![row(1, None)],
+            ..Default::default()
+        };
+
+        assert!(view_model.set_triage(
+            1,
+            TriageChoice::WorthDetails,
+            "  The brief suggests a closer look.  "
+        ));
+
+        let updated = view_model.row(1).unwrap();
+        assert_eq!(updated.queue, QueueState::DetailsNeeded);
+        assert_eq!(updated.triage, Some(TriageChoice::WorthDetails));
+        assert_eq!(
+            updated.queue_reason.as_deref(),
+            Some("The brief suggests a closer look."),
+            "the reason is trimmed but otherwise kept verbatim"
+        );
+
+        assert!(!view_model.set_triage(99, TriageChoice::Skip, "gone"));
+    }
+
+    #[test]
+    fn unsure_and_evaluate_stay_distinguishable_after_a_triage() {
+        let mut view_model = PipelineViewModel {
+            rows: vec![row(1, None), row(2, None)],
+            ..Default::default()
+        };
+        view_model.set_triage(1, TriageChoice::Evaluate, "Strong title.");
+        view_model.set_triage(2, TriageChoice::Unsure, "The brief is thin.");
+
+        assert_eq!(view_model.row(1).unwrap().queue, QueueState::Evaluate);
+        assert_eq!(view_model.row(2).unwrap().queue, QueueState::Evaluate);
+        assert_eq!(
+            view_model.row(1).unwrap().triage,
+            Some(TriageChoice::Evaluate)
+        );
+        assert_eq!(
+            view_model.row(2).unwrap().triage,
+            Some(TriageChoice::Unsure)
+        );
+    }
+
+    #[test]
+    fn the_triaged_filter_shows_triaged_rows_only() {
+        let mut triaged = row(1, None);
+        triaged.triage = Some(TriageChoice::Evaluate);
+        triaged.queue = QueueState::Evaluate;
+        let untriaged = row(2, None);
+
+        let view_model = PipelineViewModel {
+            rows: vec![triaged, untriaged],
+            ..Default::default()
+        };
+
+        assert_eq!(visible(&view_model, JobFilter::Triaged), vec![1]);
+    }
+
+    #[test]
+    fn a_skipped_row_is_reachable_under_dismissed_not_triaged() {
+        let mut skipped = row(1, None);
+        skipped.triage = Some(TriageChoice::Skip);
+        skipped.queue = QueueState::Dismissed;
+
+        let view_model = PipelineViewModel {
+            rows: vec![skipped],
+            ..Default::default()
+        };
+
+        assert!(
+            visible(&view_model, JobFilter::Triaged).is_empty(),
+            "a skip is a dismissal; the Dismissed filter is where it is found"
+        );
+        assert_eq!(visible(&view_model, JobFilter::Dismissed), vec![1]);
+    }
+
+    #[test]
+    fn triage_candidates_are_new_and_not_excluded() {
+        let mut excluded = row(1, None);
+        excluded.excluded = true;
+        let mut queued = row(2, None);
+        queued.queue = QueueState::DetailsNeeded;
+        let mut dismissed = row(3, None);
+        dismissed.queue = QueueState::Dismissed;
+
+        let view_model = PipelineViewModel {
+            rows: vec![excluded, queued, dismissed, row(4, None), row(5, None)],
+            ..Default::default()
+        };
+
+        assert_eq!(view_model.triage_candidates(), vec![4, 5]);
+        assert_eq!(view_model.triage_candidate_count(), 2);
+    }
+
+    #[test]
+    fn triage_candidates_stop_at_one_batch() {
+        let rows: Vec<JobRow> = (0..DEFAULT_BATCH_LIMIT as i64 + 7)
+            .map(|id| row(id, None))
+            .collect();
+        let view_model = PipelineViewModel {
+            rows,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            view_model.triage_candidates().len(),
+            DEFAULT_BATCH_LIMIT,
+            "one run covers one batch"
+        );
+        assert_eq!(
+            view_model.triage_candidate_count(),
+            DEFAULT_BATCH_LIMIT + 7,
+            "the header still says how many there are"
+        );
     }
 }
