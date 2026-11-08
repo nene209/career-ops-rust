@@ -26,8 +26,10 @@ pub enum Task {
     /// The second, non-streamed call after an unusable evaluation reply.
     EvaluationRepair,
     CoverLetter,
-    /// Reserved for Phase 3.2; nothing writes it yet.
+    /// One advisory batch over freshly fetched postings (Phase 3.2).
     Triage,
+    /// One advisory call proposing job boards (Phase 3.2).
+    SuggestPortals,
     /// A task a newer build recorded. Kept as text rather than dropped.
     Other(String),
 }
@@ -41,6 +43,7 @@ impl Task {
             Self::EvaluationRepair => "evaluation_repair",
             Self::CoverLetter => "cover_letter",
             Self::Triage => "triage",
+            Self::SuggestPortals => "suggest_portals",
             Self::Other(raw) => raw,
         }
     }
@@ -53,6 +56,7 @@ impl Task {
             "evaluation_repair" => Self::EvaluationRepair,
             "cover_letter" => Self::CoverLetter,
             "triage" => Self::Triage,
+            "suggest_portals" => Self::SuggestPortals,
             other => Self::Other(other.to_string()),
         }
     }
@@ -402,6 +406,7 @@ mod tests {
             Task::EvaluationRepair,
             Task::CoverLetter,
             Task::Triage,
+            Task::SuggestPortals,
         ] {
             assert_eq!(Task::parse(task.as_str()), task);
         }

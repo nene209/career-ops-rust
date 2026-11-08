@@ -18,6 +18,7 @@ use url::Url;
 use career_ops_core::acquisition::config::{Provider, ScraperConfig};
 use career_ops_core::acquisition::known_sites::{self, KnownSite};
 use career_ops_core::portals::service::FetchAllProgress;
+use career_ops_core::suggest::PortalSuggestion;
 
 use crate::view_models::portals::{
     BatchProgress, HealthBadge, PortalRow, PortalsViewModel, SidecarStatus,
@@ -126,6 +127,20 @@ pub enum PortalModal {
         name: String,
     },
     Manual(ManualEntryView),
+    /// Proposals from one suggestion call. Approving or skipping a row edits
+    /// this list; the modal closes only when the user says so.
+    Suggestion(SuggestionView),
+}
+
+/// The reviewable result of one suggestion call.
+#[derive(Debug, Clone, Default)]
+pub struct SuggestionView {
+    pub rows: Vec<PortalSuggestion>,
+    pub model: String,
+    pub cost_usd: Option<f64>,
+    pub elapsed_secs: f64,
+    /// Fetch each approved board once, right after it is added.
+    pub fetch_after: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -624,6 +639,17 @@ pub enum PortalsAction {
     ShowInPipeline,
     /// Open the Logs screen: the detail behind an error line.
     ShowLogs,
+    /// Ask the configured model for boards the user could add.
+    SuggestPortals,
+    /// Stop the suggestion call. Nothing is added either way.
+    CancelSuggestions,
+    /// Add the proposal the user approved. `fetch_after` fetches it once.
+    ApproveSuggestion {
+        company: String,
+        url: String,
+        scraper_config: Option<String>,
+        fetch_after: bool,
+    },
 }
 
 /// A **Fetch all pages** walk that stopped at a page the site refused.
@@ -650,6 +676,8 @@ pub struct PortalsRenderState<'a> {
     pub fetch_all_progress: Option<FetchAllProgress>,
     /// A walk that stopped at a page it could not read.
     pub stalled: Option<StalledWalk>,
+    /// A suggestion call is in flight.
+    pub suggesting: bool,
     pub error: Option<&'a str>,
     pub message: Option<&'a str>,
 }
@@ -779,6 +807,18 @@ fn header(
             *action = Some(PortalsAction::FetchAll);
         }
         if ui
+            .add_enabled(
+                !state.busy && !state.suggesting,
+                Button::new("Suggest portals"),
+            )
+            .on_hover_text(
+                "Ask the configured model for companies whose job boards this app can fetch",
+            )
+            .clicked()
+        {
+            *action = Some(PortalsAction::SuggestPortals);
+        }
+        if ui
             .add_enabled(!state.busy, Button::new("Reload list"))
             .on_hover_text("Read the portal list and health from the database")
             .clicked()
@@ -790,6 +830,12 @@ fn header(
         ui.label("Sidecar:");
         sidecar_badge(view_model.sidecar).show(ui);
 
+        if state.suggesting {
+            ui.label(RichText::new("Suggesting portals…").weak());
+            if ui.button("Stop").clicked() {
+                *action = Some(PortalsAction::CancelSuggestions);
+            }
+        }
         if state.loading {
             LoadingSpinner::show(ui);
         }
@@ -1012,6 +1058,7 @@ fn modals(
     // The chooser returns a decision instead of mutating `view.modal` inside the
     // match, which would be a second mutable borrow of the same field.
     let mut site_choice = None;
+    let mut close_modal = false;
 
     match &mut view.modal {
         None => {}
@@ -1032,6 +1079,9 @@ fn modals(
         Some(PortalModal::Manual(manual)) => {
             manual_modal(ui, manual, state, action);
         }
+        Some(PortalModal::Suggestion(suggestions)) => {
+            close_modal = suggestion_modal(ui, suggestions, state, action);
+        }
     }
 
     match site_choice {
@@ -1039,6 +1089,10 @@ fn modals(
         Some(SiteChoice::Blank) => view.open_blank_add(),
         Some(SiteChoice::Cancel) => view.modal = None,
         None => {}
+    }
+
+    if close_modal {
+        view.modal = None;
     }
 }
 
@@ -1537,6 +1591,128 @@ fn manual_modal(
                 }
             });
         });
+}
+
+/// The review modal for one suggestion call.
+///
+/// Returns `true` when the window should close. Approve emits the add action;
+/// the row stays until the app reports success, so a failed create leaves the
+/// proposal on screen. Skip is view-local: nothing was added, so there is
+/// nothing to undo.
+fn suggestion_modal(
+    ui: &mut Ui,
+    suggestions: &mut SuggestionView,
+    state: ModalState,
+    action: &mut Option<PortalsAction>,
+) -> bool {
+    let mut close = false;
+    let mut approve: Option<(String, String, Option<String>)> = None;
+    let mut skip: Option<usize> = None;
+
+    Window::new("Portal suggestions")
+        .collapsible(false)
+        .resizable(true)
+        .default_width(600.0)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ui.ctx(), |ui| {
+            let cost = suggestions
+                .cost_usd
+                .map(|cost| format!("${cost:.4}"))
+                .unwrap_or_else(|| "cost unknown".into());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} proposals", suggestions.rows.len())).strong());
+                ui.label(
+                    RichText::new(format!(
+                        "· {} · {cost} · {:.1}s",
+                        suggestions.model, suggestions.elapsed_secs
+                    ))
+                    .weak(),
+                );
+                if state.busy {
+                    LoadingSpinner::show(ui);
+                }
+            });
+            ui.label(
+                RichText::new(
+                    "Each row is a proposal. Nothing is added to your portals until you approve it.",
+                )
+                .weak()
+                .small(),
+            );
+            ui.add_space(4.0);
+            ui.checkbox(&mut suggestions.fetch_after, "Fetch after adding");
+            ui.separator();
+
+            if suggestions.rows.is_empty() {
+                ui.label(
+                    RichText::new("All suggestions handled. Close this window when you are done.")
+                        .weak(),
+                );
+            } else {
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        for (index, suggestion) in suggestions.rows.iter().enumerate() {
+                            ui.label(RichText::new(&suggestion.company).strong());
+                            let mut facts = suggestion.engine_label.clone();
+                            if let Some(roles) = suggestion.open_roles {
+                                facts.push_str(&format!(" · {roles} open roles"));
+                            }
+                            facts.push_str(&format!(" · {}", suggestion.host));
+                            ui.label(RichText::new(facts).weak().small());
+                            ui.label(RichText::new(&suggestion.rationale).italics().small());
+                            ui.label(
+                                RichText::new(&suggestion.url)
+                                    .monospace()
+                                    .small()
+                                    .weak(),
+                            );
+
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(!state.busy, Button::new("Approve and add"))
+                                    .clicked()
+                                {
+                                    approve = Some((
+                                        suggestion.company.clone(),
+                                        suggestion.url.clone(),
+                                        suggestion.config.clone(),
+                                    ));
+                                }
+                                if ui
+                                    .add_enabled(!state.busy, Button::new("Skip"))
+                                    .clicked()
+                                {
+                                    skip = Some(index);
+                                }
+                            });
+                            ui.separator();
+                        }
+                    });
+            }
+
+            ui.add_space(8.0);
+            if ui
+                .add_enabled(!state.busy, Button::new("Close"))
+                .clicked()
+            {
+                close = true;
+            }
+        });
+
+    if let Some((company, url, scraper_config)) = approve {
+        *action = Some(PortalsAction::ApproveSuggestion {
+            company,
+            url,
+            scraper_config,
+            fetch_after: suggestions.fetch_after,
+        });
+    }
+    if let Some(index) = skip {
+        suggestions.rows.remove(index);
+    }
+
+    close
 }
 
 #[cfg(test)]

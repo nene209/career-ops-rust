@@ -1,6 +1,6 @@
 # Live (Network) Tests
 
-**Last reviewed:** 2026-11-07
+**Last reviewed:** 2026-11-08
 **Why this file exists:** the default test suite must be offline, deterministic,
 and fast. A few tests cannot be any of those things because their subject is the
 outside world: a job board changed its JSON, a detail page is no longer served,
@@ -53,6 +53,7 @@ Add a row here in the same change that adds or removes a live test.
 | `deepseek_accepts_the_configured_key` | `crates/core/tests/llm_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | `https://api.deepseek.com/user/balance` | The key is accepted and the provider is reachable. `verify()` asks for the balance, so a pass spends no tokens and produces no completion. | **Keep live.** It is the only check that a key and the endpoint still agree; Phase 3's structured-output calls will be cassette-backed. |
 | `deepseek_scores_the_fixtures_in_their_bands` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | The curated Phase 3 fixtures (strong, weak, borderline) | The real model still lands each fixture in its documented score band, and the report stores. Also the cassette recorder when `CAREER_OPS_RECORD_CASSETTES=1`. | **Keep live.** The offline suite replays cassettes (`evaluation_fixtures.rs`); only the live run proves the model's judgment and keeps the recordings honest. |
 | `deepseek_writes_a_usable_cover_letter` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | The strong fixture + a reference letter | The letter avoids the prompt's banned phrases and em dashes, and a model judge scores its semantic similarity against the reference at 0.7 or above. | **Keep live.** The banned-phrase check is also offline; the similarity judgment needs a model. |
+| `deepseek_proposes_real_boards` | `crates/core/tests/suggest_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | DeepSeek, one suggestion call against a throwaway vault | The real model still returns the suggestion contract, and every derived URL sits on the engine's own host, so a reply cannot point the app at an arbitrary site. | **Keep live.** The offline suite uses a scripted backend; only the live run proves the prompt still elicits the contract. |
 
 `live_probe`, `live_probe_challenged`, `registry_entry`, `live_portal_urls`,
 `live_scraper_config`, and `live_portal_name` in `app.rs` are helpers for the
@@ -111,18 +112,23 @@ diff before committing; see `docs/llm-testing.md`):
 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test llm_eval_live -- --ignored --nocapture
 
+# One suggestion call, printing the proposals it accepted.
+DEEPSEEK_API_KEY=sk-... \
+    cargo test -p career-ops-core --test suggest_live -- --ignored --nocapture
 ```bash
 # Re-record crates/core/tests/cassettes from a passing run.
 CAREER_OPS_RECORD_CASSETTES=1 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test llm_eval_live -- --ignored --nocapture
 ```
 
-**Usage ledger:** a live evaluation and letter also write `llm_usage` rows. The
-ignored tests use a throwaway vault, so those rows are not visible in the app;
-when a live evaluation is run through the app (manual §6e), the **Usage** screen
-should show `source = reported` for DeepSeek. A row that says `estimated` means
-the provider sent no usage block and the four-characters-per-token fallback ran.
-What the ledger stores and what the cost means are in `docs/usage.md`.
+**Usage ledger:** a live evaluation and letter also write `llm_usage` rows,
+and so do triage and portal suggestions (`task = 'triage'` and
+`task = 'suggest_portals'`). The ignored tests use a throwaway vault, so those
+rows are not visible in the app; when a live evaluation is run through the app
+(manual §6e), the **Usage** screen should show `source = reported` for DeepSeek.
+A row that says `estimated` means the provider sent no usage block and the
+four-characters-per-token fallback ran. What the ledger stores and what the cost
+means are in `docs/usage.md`.
 
 The ATS adapters are gated by an environment variable rather than `#[ignore]`,
 so they run as normal tests that print "skipping" and return:

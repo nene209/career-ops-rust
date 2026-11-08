@@ -53,11 +53,13 @@ pub enum Variable {
     Preferences,
     /// The batch's postings, one `id | title | company | brief` line each.
     Jobs,
+    /// The embedded known sites, one `name | engine | slug` line each.
+    KnownSites,
 }
 
 impl Variable {
     /// Every name a prompt template may contain.
-    pub const ALL: [Variable; 7] = [
+    pub const ALL: [Variable; 8] = [
         Variable::CvSummary,
         Variable::JobDescription,
         Variable::CompanyName,
@@ -65,6 +67,7 @@ impl Variable {
         Variable::Tone,
         Variable::Preferences,
         Variable::Jobs,
+        Variable::KnownSites,
     ];
 
     /// What the evaluation and cover-letter pipelines fill.
@@ -79,6 +82,13 @@ impl Variable {
     /// What the triage pipeline fills.
     pub const TRIAGE: [Variable; 3] = [Variable::Preferences, Variable::CvSummary, Variable::Jobs];
 
+    /// What the portal-suggestion pipeline fills.
+    pub const SUGGEST: [Variable; 3] = [
+        Variable::CvSummary,
+        Variable::Preferences,
+        Variable::KnownSites,
+    ];
+
     /// The name inside the braces. Part of the template contract.
     pub fn name(self) -> &'static str {
         match self {
@@ -89,6 +99,7 @@ impl Variable {
             Self::Tone => "tone",
             Self::Preferences => "preferences",
             Self::Jobs => "jobs",
+            Self::KnownSites => "known_sites",
         }
     }
 
@@ -101,6 +112,7 @@ impl Variable {
             "tone" => Some(Self::Tone),
             "preferences" => Some(Self::Preferences),
             "jobs" => Some(Self::Jobs),
+            "known_sites" => Some(Self::KnownSites),
             _ => None,
         }
     }
@@ -115,6 +127,7 @@ impl Variable {
             Self::Tone => "An optional register for a cover letter; empty when unset.",
             Self::Preferences => "The acquisition preferences, as a short advice block.",
             Self::Jobs => "The batch's postings, one id | title | company | brief line each.",
+            Self::KnownSites => "The embedded known sites, one name | engine | slug line each.",
         }
     }
 }
@@ -130,6 +143,7 @@ pub struct Variables<'a> {
     pub tone: &'a str,
     pub preferences: &'a str,
     pub jobs: &'a str,
+    pub known_sites: &'a str,
 }
 
 impl Variables<'_> {
@@ -142,6 +156,7 @@ impl Variables<'_> {
             Variable::Tone => self.tone,
             Variable::Preferences => self.preferences,
             Variable::Jobs => self.jobs,
+            Variable::KnownSites => self.known_sites,
         }
     }
 }
@@ -189,6 +204,7 @@ pub fn variables_for_category(category: &str) -> Option<&'static [Variable]> {
     match category {
         "evaluate" | "cover_letter" => Some(&Variable::EVALUATION),
         "triage" => Some(&Variable::TRIAGE),
+        "suggest" => Some(&Variable::SUGGEST),
         _ => None,
     }
 }
@@ -314,17 +330,18 @@ mod tests {
             tone: "",
             preferences: "Keywords: rust",
             jobs: "1 | Compiler Engineer | Acme | Build compilers.",
+            known_sites: "- Figma | greenhouse | slug: figma",
         }
     }
 
     #[test]
     fn every_variable_is_substituted() {
-        let template = "{{company_name}} / {{job_title}}\n{{job_description}}\n{{cv_summary}}\n[{{tone}}]\n{{preferences}}\n{{jobs}}";
+        let template = "{{company_name}} / {{job_title}}\n{{job_description}}\n{{cv_summary}}\n[{{tone}}]\n{{preferences}}\n{{jobs}}\n{{known_sites}}";
         let rendered = render(template, &variables()).expect("render");
 
         assert_eq!(
             rendered,
-            "Acme / Compiler Engineer\nBuild compilers.\nAda Lovelace\nExperience:\n- Analytical engine\n[]\nKeywords: rust\n1 | Compiler Engineer | Acme | Build compilers."
+            "Acme / Compiler Engineer\nBuild compilers.\nAda Lovelace\nExperience:\n- Analytical engine\n[]\nKeywords: rust\n1 | Compiler Engineer | Acme | Build compilers.\n- Figma | greenhouse | slug: figma"
         );
     }
 
@@ -384,6 +401,7 @@ mod tests {
         assert!(variables_for_category("evaluate").is_some());
         assert!(variables_for_category("cover_letter").is_some());
         assert!(variables_for_category("triage").is_some());
+        assert!(variables_for_category("suggest").is_some());
         assert!(
             variables_for_category("render").is_none(),
             "reference prompts may use their own placeholders"
@@ -401,6 +419,12 @@ mod tests {
         assert!(triage.contains(&Variable::Preferences));
         assert!(triage.contains(&Variable::Jobs));
         assert!(!triage.contains(&Variable::JobDescription));
+
+        let suggest = variables_for_category("suggest").expect("suggest");
+        assert!(suggest.contains(&Variable::KnownSites));
+        assert!(suggest.contains(&Variable::Preferences));
+        assert!(!suggest.contains(&Variable::Jobs));
+        assert!(!suggest.contains(&Variable::JobDescription));
     }
 
     #[test]
@@ -417,6 +441,14 @@ mod tests {
         assert!(validate_for_category("evaluate", "{{job_description}}").is_ok());
         assert_eq!(
             validate_for_category("evaluate", "{{jobs}}").expect_err("triage-only variable"),
+            RenderError::Unknown {
+                name: "jobs".into()
+            }
+        );
+
+        assert!(validate_for_category("suggest", "{{known_sites}} {{preferences}}").is_ok());
+        assert_eq!(
+            validate_for_category("suggest", "{{jobs}}").expect_err("triage-only variable"),
             RenderError::Unknown {
                 name: "jobs".into()
             }

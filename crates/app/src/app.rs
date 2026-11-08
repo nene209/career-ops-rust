@@ -60,6 +60,7 @@ use career_ops_core::repo::llm_usage as usage_repo;
 use career_ops_core::repo::portals::{self as portal_repo, NewPortal, RenderMode};
 use career_ops_core::repo::profile::{self as profile_repo, ProfileDetails};
 use career_ops_core::repo::prompts::{self as prompt_repo, PromptThread};
+use career_ops_core::suggest::{self, SuggestError, SuggestReport};
 use career_ops_core::triage::{
     self, TriageChoice, TriageError, TriageEstimate, TriageReport, TriageRequest,
 };
@@ -78,7 +79,7 @@ use crate::screens::pipeline::{
 };
 use crate::screens::portals::{
     ConfigPreview, ManualSuccess, PortalForm, PortalFormData, PortalModal, PortalsAction,
-    PortalsRenderState, PortalsView, PreviewInputs, PreviewSample, StalledWalk,
+    PortalsRenderState, PortalsView, PreviewInputs, PreviewSample, StalledWalk, SuggestionView,
 };
 use crate::screens::prompts::{PromptsAction, PromptsRenderState};
 use crate::screens::settings::{SettingsAction, SettingsRenderState};
@@ -193,6 +194,20 @@ enum PortalsTask {
         /// edited form cannot show a stale report.
         inputs: PreviewInputs,
     },
+    Suggest(AsyncTask<std::result::Result<SuggestReport, SuggestError>>),
+    /// Create an approved proposal, then (optionally) fetch it and reload.
+    Approve(AsyncTask<CoreResult<ApproveResult>>),
+}
+
+/// What an approved suggestion produced.
+struct ApproveResult {
+    list: Vec<PortalWithHealth>,
+    /// The approved portal's URL, so the modal can drop exactly that row.
+    url: String,
+    company: String,
+    /// `None` when **Fetch after adding** was off; an error here is a fetch
+    /// failure, not a create failure — the portal is already stored.
+    fetch: Option<std::result::Result<service::FetchReport, String>>,
 }
 
 enum PortalsPoll {
@@ -204,6 +219,8 @@ enum PortalsPoll {
         std::result::Result<PreviewReport, FetchError>,
         PreviewInputs,
     ),
+    Suggest(std::result::Result<SuggestReport, SuggestError>),
+    Approve(CoreResult<ApproveResult>),
     Cancelled,
 }
 
@@ -255,6 +272,8 @@ pub struct CareerOpsApp {
     /// A walk that stopped at a page it could not read, so the screen can offer
     /// **Skip page N**.
     fetch_all_stalled: Option<StalledWalk>,
+    /// The suggestion call's stop flag. A fresh token per run, like triage.
+    suggest_cancel: CancelToken,
 
     pipeline: PipelineViewModel,
     pipeline_view: PipelineView,
@@ -420,6 +439,7 @@ impl CareerOpsApp {
             fetch_all_progress: Arc::new(Mutex::new(None)),
             fetch_all_cancel: Arc::new(AtomicBool::new(false)),
             fetch_all_stalled: None,
+            suggest_cancel: CancelToken::default(),
             pipeline: PipelineViewModel::default(),
             pipeline_view: PipelineView::default(),
             pipeline_loaded: false,
@@ -651,6 +671,14 @@ impl CareerOpsApp {
                 body,
             } => self.start_manual_text(title, company, body),
             PortalsAction::TestConfig(data) => self.start_config_preview(data),
+            PortalsAction::SuggestPortals => self.start_suggest_portals(),
+            PortalsAction::CancelSuggestions => self.suggest_cancel.cancel(),
+            PortalsAction::ApproveSuggestion {
+                company,
+                url,
+                scraper_config,
+                fetch_after,
+            } => self.start_suggestion_approve(company, url, scraper_config, fetch_after),
             PortalsAction::ShowInPipeline => {
                 self.portals_view.modal = None;
                 self.navigation.navigate_to(MainScreen::Pipeline);
@@ -1068,6 +1096,7 @@ impl CareerOpsApp {
         self.fetch_all_progress = Arc::new(Mutex::new(None));
         self.fetch_all_cancel = Arc::new(AtomicBool::new(false));
         self.fetch_all_stalled = None;
+        self.suggest_cancel = CancelToken::default();
 
         self.pipeline = PipelineViewModel::default();
         self.pipeline_view = PipelineView::default();
@@ -1480,6 +1509,110 @@ impl CareerOpsApp {
         self.portals_task = Some(PortalsTask::Preview { task, inputs });
     }
 
+    /// Ask the configured model for boards the user could add.
+    ///
+    /// Nothing is written: the report only opens the review modal. The backend
+    /// is built here for the same reason as an evaluation.
+    fn start_suggest_portals(&mut self) {
+        if !self.begin_portals_task() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.portals_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.portals_error = None;
+        self.portals_message = None;
+        self.suggest_cancel = CancelToken::new(Arc::new(AtomicBool::new(false)));
+        let cancel = self.suggest_cancel.clone();
+
+        let injected = self.completion_backend.clone();
+        let task = self.spawn(async move {
+            if let Some(backend) = injected {
+                return suggest::suggest_portals(&pool, &cancel, backend.as_ref()).await;
+            }
+
+            let config = LlmConfig::load(&pool).await.map_err(SuggestError::from)?;
+            let Some(key) = llm::keys::get_api_key(config.provider).map_err(SuggestError::from)?
+            else {
+                return Err(SuggestError::from(llm::LlmError::MissingApiKey {
+                    provider: config.provider,
+                }));
+            };
+            let client = config.build_client(&key).map_err(SuggestError::from)?;
+            suggest::suggest_portals(&pool, &cancel, &client).await
+        });
+
+        self.portals_task = Some(PortalsTask::Suggest(task));
+    }
+
+    /// Create one approved proposal, optionally fetch it, and reload the list.
+    ///
+    /// The create is the only step that can fail the task. A fetch failure
+    /// leaves the portal stored and is reported as a message, because the user
+    /// approved the portal, not its first fetch.
+    fn start_suggestion_approve(
+        &mut self,
+        company: String,
+        url: String,
+        scraper_config: Option<String>,
+        fetch_after: bool,
+    ) {
+        let scraper_config = match scraper_config.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => match serde_json::from_str(raw) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    self.portals_error = Some(format!(
+                        "The suggestion's config is not valid JSON: {error}"
+                    ));
+                    return;
+                }
+            },
+            _ => None,
+        };
+
+        if !self.begin_portals_task() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.portals_error = Some("The database is not open.".into());
+            return;
+        };
+
+        let input = NewPortal {
+            company_name: company.clone(),
+            url: url.clone(),
+            render_mode: RenderMode::Static,
+            scraper_config,
+        };
+        let source = Arc::clone(&self.fetch_source);
+        let browser = Arc::clone(&self.browser);
+        let task = self.spawn(async move {
+            let portal = portal_repo::create(&pool, input).await?;
+            let fetch = if fetch_after {
+                Some(
+                    service::fetch_one(&pool, portal.id, source.as_ref(), Some(browser.as_ref()))
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            } else {
+                None
+            };
+            let list = service::list_with_health(&pool).await?;
+            Ok(ApproveResult {
+                list,
+                url,
+                company,
+                fetch,
+            })
+        });
+
+        self.portals_task = Some(PortalsTask::Approve(task));
+    }
+
     fn start_manual_text(&mut self, title: String, company: String, body: String) {
         if !self.begin_portals_task() {
             return;
@@ -1574,6 +1707,34 @@ impl CareerOpsApp {
                 TaskPoll::Ready(result) => {
                     finished = true;
                     Some(PortalsPoll::Preview(result, inputs.clone()))
+                }
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    None
+                }
+                TaskPoll::Cancelled => {
+                    finished = true;
+                    Some(PortalsPoll::Cancelled)
+                }
+            },
+            PortalsTask::Suggest(task) => match task.try_recv() {
+                TaskPoll::Ready(result) => {
+                    finished = true;
+                    Some(PortalsPoll::Suggest(result))
+                }
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    None
+                }
+                TaskPoll::Cancelled => {
+                    finished = true;
+                    Some(PortalsPoll::Cancelled)
+                }
+            },
+            PortalsTask::Approve(task) => match task.try_recv() {
+                TaskPoll::Ready(result) => {
+                    finished = true;
+                    Some(PortalsPoll::Approve(result))
                 }
                 TaskPoll::Pending => {
                     ctx.request_repaint_after(std::time::Duration::from_millis(50));
@@ -1740,6 +1901,63 @@ impl CareerOpsApp {
                     }
                 }
             }
+            PortalsPoll::Suggest(result) => match result {
+                Ok(report) => {
+                    let count = report.suggestions.len();
+                    self.portals_error = None;
+                    self.portals_message = Some(format!("{count} portal suggestions."));
+                    self.portals_view.modal = Some(PortalModal::Suggestion(SuggestionView {
+                        rows: report.suggestions,
+                        model: report.model_used,
+                        cost_usd: report.actual_cost_usd.or(report.estimated_cost_usd),
+                        elapsed_secs: report.elapsed.as_secs_f64(),
+                        fetch_after: false,
+                    }));
+                }
+                Err(error) => {
+                    let text = error.to_string();
+                    if text.contains("cancelled") {
+                        self.portals_message = Some("Suggestion cancelled.".into());
+                    } else {
+                        self.portals_message = None;
+                        self.portals_error = Some(format!("Could not suggest portals: {error}"));
+                    }
+                }
+            },
+            PortalsPoll::Approve(result) => match result {
+                Ok(report) => {
+                    self.portals.replace_entries(report.list);
+                    self.portals_loaded = true;
+                    self.portals_error = None;
+
+                    // Drop exactly the approved row; the URL is what the review
+                    // row and the created portal share.
+                    if let Some(PortalModal::Suggestion(suggestions)) = &mut self.portals_view.modal
+                    {
+                        suggestions.rows.retain(|row| row.url != report.url);
+                    }
+
+                    self.portals_message = Some(match report.fetch {
+                        None => format!("Added {}.", report.company),
+                        Some(Ok(fetched)) => match &fetched.outcome {
+                            Ok(outcome) => {
+                                format!("Added {} and {}.", report.company, fetch_summary(outcome))
+                            }
+                            Err(error) => {
+                                self.portals_error = Some(classified_error_message(error));
+                                format!("Added {}; its first fetch failed.", report.company)
+                            }
+                        },
+                        Some(Err(error)) => {
+                            self.portals_error = Some(error);
+                            format!("Added {}; its first fetch failed.", report.company)
+                        }
+                    });
+                }
+                Err(error) => {
+                    self.portals_error = Some(format!("Could not add the portal: {error}"));
+                }
+            },
             PortalsPoll::Cancelled => {
                 self.fetching_portal = None;
                 if let Some(form) = self.portals_view.form_mut() {
@@ -4141,6 +4359,7 @@ impl eframe::App for CareerOpsApp {
                         .ok()
                         .and_then(|progress| *progress),
                     stalled: self.fetch_all_stalled,
+                    suggesting: matches!(&self.portals_task, Some(PortalsTask::Suggest(_))),
                     error: self.portals_error.as_deref(),
                     message: self.portals_message.as_deref(),
                 };
@@ -6649,6 +6868,149 @@ mod tests {
         assert_eq!(stored.triage_model.as_deref(), Some("deepseek-flash"));
         assert!(stored.triage_prompt_hash.is_some());
         assert!(stored.triaged_at.is_some());
+    }
+
+    fn suggestion_reply() -> String {
+        r#"{"suggestions":[
+            {"company":"Figma","engine":"greenhouse","slug":"figma","open_roles":24,"rationale":"Design tooling matches the CV."},
+            {"company":"NVIDIA","engine":"eightfold","slug":"nvidia.com","rationale":"GPU tooling."}
+        ]}"#
+            .to_string()
+    }
+
+    /// A vault whose profile has the CV summary the suggestion prompt needs.
+    fn app_with_a_cv(dir: &Path) -> (CareerOpsApp, egui::Context) {
+        let backend = Arc::new(FakeEvalBackend::new(suggestion_reply()));
+        let (app, ctx) = unlocked_app_with_backend(dir, backend);
+        let pool = app.pool().expect("pool");
+        app.runtime()
+            .block_on(profile_repo::update_details(
+                &pool,
+                &ProfileDetails {
+                    name: "Ada Lovelace".into(),
+                    email: "ada@example.com".into(),
+                    phone: None,
+                    location: Some("London".into()),
+                    summary: Some("Mathematician.".into()),
+                },
+            ))
+            .expect("profile");
+        (app, ctx)
+    }
+
+    #[test]
+    fn suggesting_portals_opens_the_review_modal() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = app_with_a_cv(dir.path());
+
+        app.handle_portals_action(PortalsAction::SuggestPortals);
+        wait_until(&mut app, &ctx, |app| {
+            matches!(&app.portals_view.modal, Some(PortalModal::Suggestion(_)))
+        });
+
+        assert!(app.portals_error.is_none(), "{:?}", app.portals_error);
+        let Some(PortalModal::Suggestion(view)) = &app.portals_view.modal else {
+            panic!("the review modal is open");
+        };
+        assert_eq!(view.rows.len(), 2);
+        assert_eq!(view.rows[0].url, "https://job-boards.greenhouse.io/figma");
+        assert_eq!(
+            view.rows[0].config.as_deref(),
+            Some(known_sites::FIGMA.config)
+        );
+        assert_eq!(view.rows[1].url, "https://jobs.nvidia.com/careers");
+    }
+
+    #[test]
+    fn approving_a_suggestion_adds_the_portal_and_removes_the_row() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = app_with_a_cv(dir.path());
+        let pool = app.pool().expect("pool");
+
+        app.handle_portals_action(PortalsAction::SuggestPortals);
+        wait_until(&mut app, &ctx, |app| {
+            matches!(&app.portals_view.modal, Some(PortalModal::Suggestion(_)))
+        });
+
+        app.handle_portals_action(PortalsAction::ApproveSuggestion {
+            company: "Figma".into(),
+            url: "https://job-boards.greenhouse.io/figma".into(),
+            scraper_config: Some(known_sites::FIGMA.config.into()),
+            fetch_after: false,
+        });
+        wait_until(&mut app, &ctx, |app| app.portals_task.is_none());
+
+        assert!(app.portals_error.is_none(), "{:?}", app.portals_error);
+        let stored = app
+            .runtime()
+            .block_on(portal_repo::find_by_url(
+                &pool,
+                "https://job-boards.greenhouse.io/figma",
+            ))
+            .expect("find")
+            .expect("the approved portal is stored");
+        assert_eq!(stored.company_name, "Figma");
+        assert_eq!(
+            stored.scraper_config.as_deref(),
+            Some(known_sites::FIGMA.config),
+            "a known board keeps its hand-written config"
+        );
+
+        let Some(PortalModal::Suggestion(view)) = &app.portals_view.modal else {
+            panic!("the review modal stays open");
+        };
+        assert_eq!(view.rows.len(), 1, "only the approved row is gone");
+        assert_eq!(view.rows[0].company, "NVIDIA");
+        assert!(app
+            .portals_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Added Figma")));
+    }
+
+    #[test]
+    fn approving_with_fetch_after_fetches_the_new_portal() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = app_with_a_cv(dir.path());
+        let pool = app.pool().expect("pool");
+
+        app.handle_portals_action(PortalsAction::SuggestPortals);
+        wait_until(&mut app, &ctx, |app| {
+            matches!(&app.portals_view.modal, Some(PortalModal::Suggestion(_)))
+        });
+
+        app.handle_portals_action(PortalsAction::ApproveSuggestion {
+            company: "NVIDIA".into(),
+            url: "https://jobs.nvidia.com/careers".into(),
+            scraper_config: Some(r#"{"provider":"eightfold","domain":"nvidia.com"}"#.into()),
+            fetch_after: true,
+        });
+        wait_until(&mut app, &ctx, |app| app.portals_task.is_none());
+
+        let stored = app
+            .runtime()
+            .block_on(portal_repo::find_by_url(
+                &pool,
+                "https://jobs.nvidia.com/careers",
+            ))
+            .expect("find")
+            .expect("the approved portal is stored");
+        assert!(
+            stored.last_fetch_attempt_at.is_some(),
+            "Fetch after adding ran the first fetch"
+        );
+        assert!(app
+            .portals_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Added NVIDIA")));
     }
 
     /// A generated letter is stored, the row's delete gate follows, and the

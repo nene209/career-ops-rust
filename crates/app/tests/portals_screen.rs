@@ -7,13 +7,14 @@
 use career_ops_app::screens::portals::{
     self, ConfigPreview, ManualEntryView, ManualTab, PortalForm, PortalFormData, PortalModal,
     PortalsAction, PortalsRenderState, PortalsView, PreviewInputs, PreviewSample, PreviewState,
-    RenderModeChoice, StalledWalk, DETAIL_TOGGLE_LABEL,
+    RenderModeChoice, StalledWalk, SuggestionView, DETAIL_TOGGLE_LABEL,
 };
 use career_ops_app::view_models::portals::{
     BatchProgress, HealthBadge, PortalRow, PortalsViewModel, SidecarStatus,
 };
 use career_ops_core::acquisition::config::{Provider, ScraperConfig};
 use career_ops_core::portals::service::FetchAllProgress;
+use career_ops_core::suggest::PortalSuggestion;
 use egui::accesskit::Role;
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
@@ -32,6 +33,7 @@ fn idle_state<'a>() -> PortalsRenderState<'a> {
         fetch_all_portal: None,
         fetch_all_progress: None,
         stalled: None,
+        suggesting: false,
         error: None,
         message: None,
     }
@@ -1284,4 +1286,217 @@ fn a_hand_edited_config_disables_the_detail_toggle() {
     let _ = harness.get_by_label(
         "This config was edited by hand; set `detail.enabled` in the JSON to change enrichment.",
     );
+}
+
+// ----------------------------------------------------------------------
+// WS4: portal suggestions
+// ----------------------------------------------------------------------
+
+fn suggestion(company: &str, engine: &str, url: &str, rationale: &str) -> PortalSuggestion {
+    PortalSuggestion {
+        company: company.into(),
+        host: url
+            .split("//")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .unwrap_or("example.com")
+            .into(),
+        engine_label: engine.into(),
+        open_roles: Some(24),
+        rationale: rationale.into(),
+        url: url.into(),
+        config: None,
+    }
+}
+
+fn suggestions_view() -> SuggestionView {
+    SuggestionView {
+        rows: vec![
+            suggestion(
+                "Figma",
+                "Greenhouse",
+                "https://job-boards.greenhouse.io/figma",
+                "Design tooling matches the CV.",
+            ),
+            suggestion(
+                "Spotify",
+                "Lever",
+                "https://jobs.lever.co/spotify",
+                "Audio platform work.",
+            ),
+        ],
+        model: "deepseek-flash".into(),
+        cost_usd: Some(0.003),
+        elapsed_secs: 3.2,
+        fetch_after: false,
+    }
+}
+
+#[test]
+fn suggest_portals_emits_the_action() {
+    let view_model = PortalsViewModel::default();
+    let mut harness = test_harness(&view_model, PortalsView::default(), idle_state());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Suggest portals")
+        .click();
+    harness.run();
+
+    assert!(harness
+        .state()
+        .actions
+        .contains(&PortalsAction::SuggestPortals));
+}
+
+#[test]
+fn a_running_suggestion_disables_the_button_and_offers_stop() {
+    let view_model = PortalsViewModel::default();
+    let state = PortalsRenderState {
+        busy: true,
+        suggesting: true,
+        ..idle_state()
+    };
+    let mut harness = test_harness(&view_model, PortalsView::default(), state);
+    harness.run();
+
+    let _ = harness.get_by_label("Suggesting portals…");
+    assert!(harness
+        .get_by_role_and_label(Role::Button, "Suggest portals")
+        .accesskit_node()
+        .is_disabled());
+
+    harness.get_by_role_and_label(Role::Button, "Stop").click();
+    harness.run();
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PortalsAction::CancelSuggestions)
+    );
+}
+
+#[test]
+fn the_suggestion_modal_lists_each_proposal_with_its_cost() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Suggestion(suggestions_view())),
+    };
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("2 proposals");
+    let _ = harness.get_by_label("· deepseek-flash · $0.0030 · 3.2s");
+    let _ = harness.get_by_label(
+        "Each row is a proposal. Nothing is added to your portals until you approve it.",
+    );
+    let _ = harness.get_by_label("Figma");
+    let _ = harness.get_by_label("Greenhouse · 24 open roles · job-boards.greenhouse.io");
+    let _ = harness.get_by_label("Design tooling matches the CV.");
+    let _ = harness.get_by_label("https://job-boards.greenhouse.io/figma");
+    let _ = harness.get_by_label("Spotify");
+    let _ = harness.get_by_label("Audio platform work.");
+}
+
+#[test]
+fn approving_a_proposal_emits_the_add_action_with_its_url_and_config() {
+    let view_model = PortalsViewModel::default();
+
+    // One row, so the approve button is unambiguous. Two rows means two
+    // buttons, which is why the multi-row case is only asserted for rendering.
+    let mut single = suggestions_view();
+    single.rows.truncate(1);
+    single.rows[0].config = Some(r#"{"provider":"selectors"}"#.into());
+    let view = PortalsView {
+        modal: Some(PortalModal::Suggestion(single)),
+    };
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Approve and add")
+        .click();
+    harness.run();
+
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PortalsAction::ApproveSuggestion {
+            company: "Figma".into(),
+            url: "https://job-boards.greenhouse.io/figma".into(),
+            scraper_config: Some(r#"{"provider":"selectors"}"#.into()),
+            fetch_after: false,
+        })
+    );
+}
+
+#[test]
+fn fetch_after_adding_is_carried_by_the_approval() {
+    let view_model = PortalsViewModel::default();
+    let mut single = suggestions_view();
+    single.rows.truncate(1);
+    let view = PortalsView {
+        modal: Some(PortalModal::Suggestion(single)),
+    };
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    harness.get_by_label("Fetch after adding").click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Approve and add")
+        .click();
+    harness.run();
+
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PortalsAction::ApproveSuggestion {
+            company: "Figma".into(),
+            url: "https://job-boards.greenhouse.io/figma".into(),
+            scraper_config: None,
+            fetch_after: true,
+        })
+    );
+}
+
+#[test]
+fn skipping_a_proposal_removes_it_without_an_action() {
+    let view_model = PortalsViewModel::default();
+    let mut single = suggestions_view();
+    single.rows.truncate(1);
+    let view = PortalsView {
+        modal: Some(PortalModal::Suggestion(single)),
+    };
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    harness.get_by_role_and_label(Role::Button, "Skip").click();
+    harness.run();
+
+    let state = harness.state();
+    let Some(PortalModal::Suggestion(suggestions)) = &state.view.modal else {
+        panic!("the modal stays open");
+    };
+    assert!(suggestions.rows.is_empty(), "the skipped row is gone");
+    assert!(
+        !state
+            .actions
+            .iter()
+            .any(|action| matches!(action, PortalsAction::ApproveSuggestion { .. })),
+        "a skip adds nothing"
+    );
+    let _ = harness.get_by_label("All suggestions handled. Close this window when you are done.");
+}
+
+#[test]
+fn closing_the_suggestion_modal_leaves_the_portals_alone() {
+    let view_model = PortalsViewModel::default();
+    let view = PortalsView {
+        modal: Some(PortalModal::Suggestion(suggestions_view())),
+    };
+    let mut harness = test_harness(&view_model, view, idle_state());
+    harness.run();
+
+    harness.get_by_role_and_label(Role::Button, "Close").click();
+    harness.run();
+
+    assert!(harness.state().view.modal.is_none());
+    assert!(harness.state().actions.is_empty(), "closing adds nothing");
 }

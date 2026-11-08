@@ -20,6 +20,7 @@ pub mod preferences;
 pub mod prompt_render;
 pub mod prompts_seed;
 pub mod repo;
+pub mod suggest;
 pub mod text;
 pub mod triage;
 

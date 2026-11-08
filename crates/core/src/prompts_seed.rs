@@ -119,6 +119,13 @@ pub const SYSTEM_PROMPTS: &[SeedPrompt] = &[
         category: "triage",
         content: include_str!("../prompts/triage_batch.md"),
     },
+    // Phase 3.2's portal-suggestion prompt. It asks for companies and board
+    // slugs, never URLs, and the service derives and validates the rest.
+    SeedPrompt {
+        name: "suggest",
+        category: "suggest",
+        content: include_str!("../prompts/suggest_portals.md"),
+    },
     // ------------------------------------------------------------------
     // Optional — present in the original repo, useful in later phases.
     // Comment out any row whose file you did not copy.
@@ -335,6 +342,7 @@ mod tests {
             "render",
             "cover_letter",
             "triage",
+            "suggest",
             "utility",
         ];
         for seed in SYSTEM_PROMPTS {
@@ -356,6 +364,18 @@ mod tests {
 
         assert_eq!(seed.category, "triage");
         assert!(seed.content.contains("{{jobs}}"));
+        assert!(seed.content.contains("{{preferences}}"));
+    }
+
+    #[test]
+    fn the_suggestion_prompt_is_seeded() {
+        let seed = SYSTEM_PROMPTS
+            .iter()
+            .find(|seed| seed.name == "suggest")
+            .expect("the suggestion prompt is seeded");
+
+        assert_eq!(seed.category, "suggest");
+        assert!(seed.content.contains("{{known_sites}}"));
         assert!(seed.content.contains("{{preferences}}"));
     }
 
