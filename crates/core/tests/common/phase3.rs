@@ -255,3 +255,130 @@ impl CompletionBackend for LetterCassetteBackend {
         Ok(Completion::text_only(self.cassette.reply.clone()))
     }
 }
+
+// ----------------------------------------------------------------------
+// Triage cassette (Phase 3.2 WS5)
+// ----------------------------------------------------------------------
+
+/// One posting in the triage batch. The cassette's decision ids are 1..=4 on a
+/// fresh database, so the offline replay and the live recorder insert exactly
+/// this list, in this order.
+#[derive(Debug, Clone, Copy)]
+pub struct TriageSample {
+    pub title: &'static str,
+    pub company: &'static str,
+    pub brief: &'static str,
+}
+
+pub const TRIAGE_SAMPLES: [TriageSample; 4] = [
+    TriageSample {
+        title: "Senior Rust Engineer",
+        company: "Acme",
+        brief: "Build offline-first desktop software with Rust, SQLite, and egui. Own the storage \
+                layer and its migrations.",
+    },
+    TriageSample {
+        title: "Staff Compiler Engineer",
+        company: "Globex",
+        brief: "Work on the compiler backend and developer tooling. Rust or C++ experience \
+                preferred.",
+    },
+    TriageSample {
+        title: "Brand Marketing Manager",
+        company: "Initech",
+        brief: "Own campaign planning, messaging, and launch events for the developer platform.",
+    },
+    TriageSample {
+        title: "Software Engineer",
+        company: "Hooli",
+        brief: "Join our team. We build products.",
+    },
+];
+
+/// Store the four samples in order. A fresh database gives them ids 1..=4,
+/// which is what the cassette records.
+pub async fn store_triage_samples(db: &super::TestDb) -> Vec<JobDescription> {
+    let mut jobs = Vec::with_capacity(TRIAGE_SAMPLES.len());
+    for (index, sample) in TRIAGE_SAMPLES.iter().enumerate() {
+        let job = job_repo::upsert(
+            &db.pool,
+            job_repo::NewJobDescription {
+                title: sample.title.into(),
+                company: sample.company.into(),
+                source_url: format!("https://example.com/triage/{index}"),
+                raw_text: sample.brief.into(),
+                fetch_tier: FetchTier::Tier1bHtml,
+                external_id: None,
+            },
+        )
+        .await
+        .expect("store triage sample");
+        jobs.push(job);
+    }
+    jobs
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriageCassette {
+    pub model: String,
+    pub synthetic: bool,
+    pub recorded_at: String,
+    #[serde(default)]
+    pub note: String,
+    /// The model's JSON object, stored structured so a human can read a diff.
+    pub reply: serde_json::Value,
+}
+
+pub fn load_triage() -> TriageCassette {
+    let path = cassette_path("triage");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+}
+
+pub fn save_triage(cassette: &TriageCassette) {
+    let path = cassette_path("triage");
+    let text = serde_json::to_string_pretty(cassette).expect("serialize the cassette");
+    std::fs::write(&path, format!("{text}\n"))
+        .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+}
+
+/// Replays the triage cassette and records the prompts it was given.
+pub struct TriageCassetteBackend {
+    cassette: TriageCassette,
+    prompts: Mutex<Vec<String>>,
+}
+
+impl TriageCassetteBackend {
+    pub fn new() -> Self {
+        Self {
+            cassette: load_triage(),
+            prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+
+    pub fn cassette(&self) -> &TriageCassette {
+        &self.cassette
+    }
+}
+
+#[async_trait]
+impl CompletionBackend for TriageCassetteBackend {
+    async fn complete(
+        &self,
+        prompt: &str,
+        _model: Option<&str>,
+        json_mode: bool,
+        _deltas: Option<&DeltaSink>,
+    ) -> Result<Completion, LlmError> {
+        assert!(json_mode, "triage asks for JSON mode");
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        Ok(Completion::text_only(
+            serde_json::to_string(&self.cassette.reply).expect("serialize the recorded reply"),
+        ))
+    }
+}

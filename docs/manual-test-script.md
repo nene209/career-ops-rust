@@ -1,7 +1,7 @@
 # Manual Test Script
 
 **Owner:** whoever is about to declare a UI phase done, or is about to start Phase 3.
-**Last updated:** 2026-11-06
+**Last updated:** 2026-11-08
 **Applies to:** the `career-ops` binary built from this workspace.
 
 Automated tests cover the state machine, the view models, and the screens with
@@ -206,13 +206,13 @@ points at the text that produced it.
 
 | # | Step | Expected |
 | :-- | :--- | :--- |
-| 6c.1 | Select **Prompts**. | The left pane lists the seeded prompts grouped by category (`shared`, `evaluate`, `scan`, `render`, `cover_letter`, `utility`), each with its owner, latest version, version count, and date. The row the app will use is marked `(in use)`. Nothing is selected yet. |
+| 6c.1 | Select **Prompts**. | The left pane lists the seeded prompts grouped by category (`shared`, `evaluate`, `scan`, `render`, `cover_letter`, `triage`, `suggest`, `utility`), each with its owner, latest version, version count, and date. The row the app will use is marked `(in use)`. Nothing is selected yet. |
 | 6c.2 | Select **evaluate** under System. | The right pane names the category and says **System · read-only**. The content is shown in a monospace frame with no editor, and the only action is **Duplicate as my copy**. |
 | 6c.3 | Click **Duplicate as my copy**. | The header reports "Created your copy of `evaluate` at version 1…", the user row appears marked `(in use)`, the system row loses the marker and stays listed, and the detail switches to the new copy with an editor. |
 | 6c.4 | Change a sentence in **Prompt content** and click **Save new version**. | "Saved `evaluate` as version 2." appears, the version list gains v2, and the editor reloads with the saved text. **Save new version** is disabled until the text changes again. |
 | 6c.5 | Click **v1** in the version list, then tick **Compare with current**. | The content shows v1 read-only with **Back to latest** and **Revert to this version**. The diff marks the earlier line as removed and the current line as added. **Used by** lists nothing for a version that has never been sent. |
 | 6c.6 | Click **Revert to this version**. | "Saved `evaluate` as version 3 from the earlier text." appears; v3 is the old content as a new row, and v2 and v1 are still listed. |
-| 6c.7 | Replace the content with `{{not_a_variable}}` and click **Save new version**. | The save is refused with a message naming the unknown variable and the five that exist; no version is added. |
+| 6c.7 | Replace the content with `{{not_a_variable}}` and click **Save new version**. | The save is refused with a message naming the unknown variable and the eight that exist; no version is added. |
 | 6c.8 | Select **pdf** (category `render`) and duplicate it. | The editor accepts `{{PHOTO}}`: reference categories are not rendered by the app, and the pane says so instead of listing variables. |
 
 ## 6d. Evaluation and cover letters
@@ -254,6 +254,30 @@ A row that says `estimated` instead of `reported` is not a bug on DeepSeek: it
 means the provider sent no usage block and the four-characters-per-token fallback
 ran. Note it in the report so the reason is visible later. `docs/usage.md` records
 what is stored, what the cost means, and what is deliberately absent.
+
+## 6f. Assisted triage and portal suggestions
+
+Both are advisory: triage sorts the queue the user already controls, and a
+suggestion adds nothing until it is approved. Both spend tokens. 🌐 marks a
+step that needs the network; set up the key and CV first (§6a, §6d.1), and have
+a few postings fetched with the queue state `new`.
+
+| # | Step | Expected |
+| :-- | :--- | :--- |
+| 6f.1 | Look at the Pipeline header with new, non-excluded rows present. | **Triage (N)** counts them. Click it: a confirmation names the batch size, the model, the input/output token estimate, and the estimated cost. **Run triage** is disabled until the estimate lands. **Cancel** closes the window, spends nothing, and changes no row. |
+| 6f.2 | Click **Triage (N)** again and then **Run triage**. 🌐 | The header shows "Triaging N jobs…" with **Stop**. On completion it reports "Triaged N jobs: X worth details, Y to evaluate, Z skipped, W unsure · $… · …s". The **Triaged** filter lists exactly the covered rows. Open one: a "Triage" line shows the decision badge and the stored sentence below the badges. A skipped row is gone from **All** and appears under **Dismissed**. |
+| 6f.3 | Open a skipped row under **Dismissed** and click **Mark for evaluation**. | The queue badge becomes **Evaluate** and the row is now also listed under **Triaged**; its badge still reads **Skip**, because that is the recorded decision and the user's change is separate. Nothing about the triage provenance is rewritten. |
+| 6f.4 | With new rows left, start **Triage** and press **Stop** before it finishes. 🌐 | "Triage cancelled." appears and no row's queue or reason changed: the decisions are applied only after the whole reply validates. The **Usage** screen records the call with outcome `cancelled`, because the request was sent. |
+| 6f.5 | Select **Portals** and click **Suggest portals**. 🌐 | The header shows "Suggesting portals…" with **Stop**. Afterwards a review window lists each proposal with its company, engine, open-role count when known, one-sentence rationale, and derived URL, plus the model name, cost, and elapsed time. No portal has been added yet. |
+| 6f.6 | Click **Skip** on one proposal, then **Approve and add** on another. | Skip removes only that row and writes nothing. Approve adds exactly that board to the portal list, removes only that row from the review window, and the header reports "Added <company>." The URL shown in the modal is the one stored. |
+| 6f.7 | Approve a suggestion whose board is already a portal. | The header reports "<company> is already a portal." and the list still has one row for that URL; the existing portal's cursor and health are untouched. Skip the row to put it away. |
+| 6f.8 | Tick **Fetch after adding**, then approve another proposal. 🌐 | The portal is added and fetched once; the header reports both the addition and the fetch (or that the first fetch failed, with the portal still added). The row starts Healthy or Broken accordingly. |
+| 6f.9 | Open **Usage** and click **Reload**. | The recent calls include the triage runs with task `triage` and the suggestion call with task `suggest_portals`; each has a token count and a cost (or `—` when the model is unpriced). |
+| 6f.10 | On a vault with no CV summary, click **Suggest portals** (or **Triage**). | The header reports "Add your CV in CV / Profile before…", the usage ledger gains no row, and no portal or queue state changes. |
+
+A triage batch covers at most 50 postings per click; the button's count is every
+new row, so a large backlog takes more than one click. A row the batch has
+already sorted is no longer `new` and is left out of the next run.
 
 ## 7. Idle behaviour
 

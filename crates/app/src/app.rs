@@ -1591,6 +1591,14 @@ impl CareerOpsApp {
         let source = Arc::clone(&self.fetch_source);
         let browser = Arc::clone(&self.browser);
         let task = self.spawn(async move {
+            // Approving a board that is already configured would add a second
+            // row for the same URL. The user's existing portal (with its cursor
+            // and health) is the one to keep.
+            if portal_repo::find_by_url(&pool, &url).await?.is_some() {
+                return Err(CoreError::Message(format!(
+                    "{company} is already a portal."
+                )));
+            }
             let portal = portal_repo::create(&pool, input).await?;
             let fetch = if fetch_after {
                 Some(
@@ -6971,6 +6979,67 @@ mod tests {
             .portals_message
             .as_deref()
             .is_some_and(|message| message.contains("Added Figma")));
+    }
+
+    #[test]
+    fn approving_a_board_that_is_already_a_portal_adds_nothing() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = app_with_a_cv(dir.path());
+        let pool = app.pool().expect("pool");
+
+        app.runtime()
+            .block_on(portal_repo::create(
+                &pool,
+                NewPortal {
+                    company_name: "Figma".into(),
+                    url: "https://job-boards.greenhouse.io/figma".into(),
+                    render_mode: RenderMode::Static,
+                    scraper_config: serde_json::from_str(known_sites::FIGMA.config).ok(),
+                },
+            ))
+            .expect("seed the existing portal");
+
+        app.handle_portals_action(PortalsAction::SuggestPortals);
+        wait_until(&mut app, &ctx, |app| {
+            matches!(&app.portals_view.modal, Some(PortalModal::Suggestion(_)))
+        });
+
+        app.handle_portals_action(PortalsAction::ApproveSuggestion {
+            company: "Figma".into(),
+            url: "https://job-boards.greenhouse.io/figma".into(),
+            scraper_config: Some(known_sites::FIGMA.config.into()),
+            fetch_after: false,
+        });
+        wait_until(&mut app, &ctx, |app| app.portals_task.is_none());
+
+        assert!(
+            app.portals_error
+                .as_deref()
+                .is_some_and(|error| error.contains("already a portal")),
+            "{:?}",
+            app.portals_error
+        );
+        let portals = app
+            .runtime()
+            .block_on(portal_repo::list(&pool))
+            .expect("list");
+        assert_eq!(
+            portals
+                .iter()
+                .filter(|portal| portal.url == "https://job-boards.greenhouse.io/figma")
+                .count(),
+            1,
+            "the existing portal is kept and no duplicate is added"
+        );
+
+        // The row stays so the user can skip it deliberately.
+        let Some(PortalModal::Suggestion(view)) = &app.portals_view.modal else {
+            panic!("the review modal stays open");
+        };
+        assert_eq!(view.rows.len(), 2);
     }
 
     #[test]

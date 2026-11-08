@@ -54,6 +54,7 @@ Add a row here in the same change that adds or removes a live test.
 | `deepseek_scores_the_fixtures_in_their_bands` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | The curated Phase 3 fixtures (strong, weak, borderline) | The real model still lands each fixture in its documented score band, and the report stores. Also the cassette recorder when `CAREER_OPS_RECORD_CASSETTES=1`. | **Keep live.** The offline suite replays cassettes (`evaluation_fixtures.rs`); only the live run proves the model's judgment and keeps the recordings honest. |
 | `deepseek_writes_a_usable_cover_letter` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | The strong fixture + a reference letter | The letter avoids the prompt's banned phrases and em dashes, and a model judge scores its semantic similarity against the reference at 0.7 or above. | **Keep live.** The banned-phrase check is also offline; the similarity judgment needs a model. |
 | `deepseek_proposes_real_boards` | `crates/core/tests/suggest_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | DeepSeek, one suggestion call against a throwaway vault | The real model still returns the suggestion contract, and every derived URL sits on the engine's own host, so a reply cannot point the app at an arbitrary site. | **Keep live.** The offline suite uses a scripted backend; only the live run proves the prompt still elicits the contract. |
+| `deepseek_triages_a_small_batch` | `crates/core/tests/triage_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | The four postings in `common::phase3::TRIAGE_SAMPLES` | The real model returns one decision per posting with a reason, the choices are valid, the queue and `triage_*` columns follow, and the call writes `task = 'triage'`. Also the cassette recorder when `CAREER_OPS_RECORD_CASSETTES=1`. | **Keep live.** The offline suite replays `tests/cassettes/triage.json`; only the live run proves the prompt still elicits the contract and keeps the recording honest. |
 
 `live_probe`, `live_probe_challenged`, `registry_entry`, `live_portal_urls`,
 `live_scraper_config`, and `live_portal_name` in `app.rs` are helpers for the
@@ -115,7 +116,23 @@ DEEPSEEK_API_KEY=sk-... \
 # One suggestion call, printing the proposals it accepted.
 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test suggest_live -- --ignored --nocapture
+
+# One triage batch, printing the four decisions it stored.
+DEEPSEEK_API_KEY=sk-... \
+    cargo test -p career-ops-core --test triage_live -- --ignored --nocapture
+```
+
+The triage cassette is the one live reply the offline suite replays. Re-record it
+from a passing run (the four sample ids are `1..=4` on a fresh vault):
+
 ```bash
+CAREER_OPS_RECORD_CASSETTES=1 DEEPSEEK_API_KEY=sk-... \
+    cargo test -p career-ops-core --test triage_live -- --ignored --nocapture
+```
+
+Review the diff: the cassette is a fixture, and a changed decision is a changed
+expectation. The suggestion call records no cassette; its assertion is about the
+derived URL, which a replayed reply cannot prove.bash
 # Re-record crates/core/tests/cassettes from a passing run.
 CAREER_OPS_RECORD_CASSETTES=1 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test llm_eval_live -- --ignored --nocapture

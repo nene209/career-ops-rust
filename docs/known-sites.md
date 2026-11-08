@@ -85,6 +85,28 @@ The SmartRecruiters cap is an upper bound: a board with fewer than 25 postings
 enriches all of them, and a larger board enriches the first 25. Raise the cap in
 the portal form if a specific board needs more.
 
+## Portal suggestions (Phase 3.2)
+
+**Suggest portals** on the Portals screen asks the configured model for 5–10
+companies whose careers page uses an engine the app can fetch. It is a
+suggestion, never an automatic addition:
+
+- The model returns a company, an engine, an optional role count, and one
+  sentence. It never returns a URL. The app builds the URL from the engine and
+  a board slug, and a slug that is not one safe path segment is refused.
+- A derived URL that matches an entry in this registry keeps that entry's exact
+  config (Ubisoft's detail cap, Figma's `{"provider":"selectors"}`).
+- A board the registry does not know gets no config for an ATS engine, because
+  the URL selects the adapter, and `{"provider":"eightfold","domain":…}` for
+  Eightfold.
+- **Nothing is added until the user clicks Approve and add.** Skip leaves the
+  portal list untouched, and **Fetch after adding** is off by default.
+- Approving a board that is already a portal is refused, so the existing row
+  and its continuation cursor are kept.
+- The `{{known_sites}}` block in the prompt is generated from this registry and
+  lists only the engines a slug can address. Waymo's selector config is not
+  something the model can propose.
+
 ## What "verified" means
 
 `verified_at` is the date the registry live check below passed for that entry.

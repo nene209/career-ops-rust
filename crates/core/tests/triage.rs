@@ -203,6 +203,52 @@ async fn a_batch_applies_every_decision_and_records_provenance() {
 }
 
 #[tokio::test]
+async fn the_recorded_cassette_covers_every_decision() {
+    let db = common::TestDb::new_raw().await;
+    phase3::seed(&db).await;
+    let jobs = phase3::store_triage_samples(&db).await;
+    let backend = phase3::TriageCassetteBackend::new();
+
+    let report = run_triage(&db.pool, &TriageRequest::new(ids(&jobs)), &backend)
+        .await
+        .expect("triage");
+
+    // The cassette is the output contract the live test records: one decision
+    // per posting, every choice represented.
+    assert_eq!(report.decisions.len(), jobs.len());
+    let mut choices: Vec<&str> = report
+        .decisions
+        .iter()
+        .map(|decision| decision.decision.as_str())
+        .collect();
+    choices.sort_unstable();
+    assert_eq!(choices, vec!["evaluate", "skip", "unsure", "worth_details"]);
+
+    for decision in &report.decisions {
+        assert!(!decision.reason.trim().is_empty());
+        let row = job_repo::get(&db.pool, decision.job_id)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(
+            row.triage_decision.as_deref(),
+            Some(decision.decision.as_str())
+        );
+        assert_eq!(row.triage_reason.as_deref(), Some(decision.reason.as_str()));
+        assert_eq!(row.queue_state, decision.decision.queue_state().as_str());
+    }
+
+    // The prompt saw the four briefs, not markup or file paths.
+    let prompts = backend.prompts();
+    assert_eq!(prompts.len(), 1);
+    for sample in phase3::TRIAGE_SAMPLES {
+        assert!(prompts[0].contains(sample.title), "{}", sample.title);
+    }
+
+    db.close().await;
+}
+
+#[tokio::test]
 async fn a_batch_over_the_limit_is_refused_before_the_call() {
     let (db, jobs) = seeded_jobs(DEFAULT_BATCH_LIMIT + 1).await;
     let backend = ScriptedBackend::with_reply("{}");

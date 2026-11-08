@@ -1,0 +1,30 @@
+{
+  "model": "deepseek-flash",
+  "synthetic": true,
+  "recorded_at": "2026-11-08",
+  "note": "Hand-authored placeholder covering the four decisions. Re-record with CAREER_OPS_RECORD_CASSETTES=1 and a real key (see docs/LIVE_TESTS.md); the four posting ids are 1-4 on a fresh vault.",
+  "reply": {
+    "decisions": [
+      {
+        "job_id": 1,
+        "decision": "evaluate",
+        "reason": "Rust, SQLite, and egui match the CV's shipped desktop work; the title alone is enough to evaluate."
+      },
+      {
+        "job_id": 2,
+        "decision": "worth_details",
+        "reason": "Compiler and developer-tooling work fits, but the brief does not say whether the stack is Rust."
+      },
+      {
+        "job_id": 3,
+        "decision": "skip",
+        "reason": "Marketing campaign ownership is outside the candidate's engineering work."
+      },
+      {
+        "job_id": 4,
+        "decision": "unsure",
+        "reason": "The brief says nothing about the team, stack, or seniority."
+      }
+    ]
+  }
+}
