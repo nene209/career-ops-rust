@@ -1,0 +1,24 @@
+{
+  "fixture": "borderline",
+  "model": "deepseek-chat",
+  "synthetic": true,
+  "recorded_at": "2026-11-07",
+  "note": "Hand-authored placeholder. Re-record with CAREER_OPS_RECORD_CASSETTES=1 and a real key (see docs/LIVE_TESTS.md).",
+  "reply": {
+    "match_score": 0.5,
+    "recommendation": "no_match",
+    "strengths": [
+      "Production Rust is the core requirement and the candidate has six years.",
+      "Embedded storage experience is listed as a nice-to-have and is a strong match.",
+      "A security background is partially evidenced by encryption work."
+    ],
+    "gaps": [
+      "Kubernetes is a stated requirement and the summary shows no container orchestration.",
+      "The role carries a 24/7 on-call rotation; the summary states no on-call experience.",
+      "gRPC and SLO ownership are not evidenced.",
+      "The summary does not state willingness to work hybrid in Berlin."
+    ],
+    "rationale": "The language and storage overlap is real, but the operational half of the role (Kubernetes, gRPC, on-call, SLOs) is absent from the summary. That is a large enough gap that the global score sits below the apply threshold, with a clear path to close it.",
+    "full_report_markdown": "## Summary\n\nBorderline. The candidate matches the Rust and embedded-storage parts of the role, but not the operational parts: Kubernetes, gRPC, an SLO, and a 24/7 on-call rotation. The score is below the apply threshold because the posting treats those as requirements.\n\n## Requirement table\n\n| Requirement | Importance | Match | Evidence |\n| :--- | :--- | :--- | :--- |\n| Production Rust | critical (stated) | Strong | Six years across two roles. |\n| Kubernetes | critical (stated) | Missing | No orchestration experience stated. |\n| gRPC | high (stated) | Missing | Not in the summary. |\n| On-call under an SLO | high (stated) | Missing | No incident-response experience stated. |\n| Embedded storage | preferred (stated) | Strong | SQLite and local-first storage. |\n| Security background | preferred (stated) | Partial | Encryption at rest shipped. |\n\n## Red flags\n\n- The on-call requirement is a lifestyle change; confirm it is acceptable before applying.\n- Hybrid Berlin is not addressed in the summary.\n\n## Posting legitimacy\n\nhigh_confidence. The requirements and the team context are specific.\n\n## Next step\n\nApply only if on-call and Berlin are acceptable; otherwise use the storage strengths for a product-engineering role."
+  }
+}

@@ -20,6 +20,8 @@
 
 #![allow(dead_code)]
 
+pub mod phase3;
+
 use std::path::Path;
 use std::sync::Once;
 

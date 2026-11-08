@@ -1,0 +1,23 @@
+Ada Lovelace
+London | ada@example.com
+
+Summary:
+Rust engineer with six years building offline-first desktop applications. Deep
+experience with SQLite, egui, and local-first sync. Shipped an encrypted
+desktop app used by 12,000 people. Comfortable owning a feature from schema to
+UI, and writing the tests that keep it honest.
+
+Experience:
+- Senior Rust Engineer, Analytical Engines (2021 - present)
+  Built the local-first storage layer for a desktop product: SQLite with
+  envelope encryption, a migration runner, and crash-safe writes. Led the egui
+  front end and reduced cold start from 4.2s to 0.9s.
+- Rust Engineer, Difference Systems (2019 - 2021)
+  Wrote a headless browser sidecar and the JSON extraction layer behind it.
+  Cut scraping failures by 40 percent with fixture-driven parsers.
+
+Education:
+- BSc Computer Science, University of London (2015 - 2019)
+
+Skills:
+- Rust, SQLite, egui, async Rust, HTTP scraping, test design

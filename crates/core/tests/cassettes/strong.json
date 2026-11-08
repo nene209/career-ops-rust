@@ -1,0 +1,23 @@
+{
+  "fixture": "strong",
+  "model": "deepseek-chat",
+  "synthetic": true,
+  "recorded_at": "2026-11-07",
+  "note": "Hand-authored placeholder. Re-record with CAREER_OPS_RECORD_CASSETTES=1 and a real key (see docs/LIVE_TESTS.md).",
+  "reply": {
+    "match_score": 0.9,
+    "recommendation": "strong_match",
+    "strengths": [
+      "Six years of Rust with an offline-first desktop product, matching the core requirement.",
+      "Production SQLite with migrations and crash-safe writes, named explicitly in the posting.",
+      "egui front-end ownership plus a measured startup improvement.",
+      "Encryption at rest and local-first sync, both listed as nice-to-haves."
+    ],
+    "gaps": [
+      "No named cross-platform packaging experience; mitigate by describing the shipped desktop builds.",
+      "Hybrid London working is compatible but the summary does not state availability; confirm before applying."
+    ],
+    "rationale": "The posting asks for the candidate's exact stack and product shape. Evidence is specific in the summary, and the two gaps are minor and answerable. The role is a strong match.",
+    "full_report_markdown": "## Summary\n\nStrong match. The posting asks for a senior Rust engineer who owns an offline-first desktop application with SQLite and egui; the summary shows six years of exactly that, including migrations, crash-safe writes, and a measured startup improvement.\n\n## Requirement table\n\n| Requirement | Importance | Match | Evidence |\n| :--- | :--- | :--- | :--- |\n| Six or more years of Rust | critical (stated) | Strong | Six years of Rust across two roles. |\n| Production SQLite | critical (stated) | Strong | Local-first storage layer with migrations and envelope encryption. |\n| Desktop UI toolkit, egui preferred | high (stated) | Strong | Led the egui front end; cold start 4.2s to 0.9s. |\n| Tests before shipping | meaningful (stated) | Strong | Fixture-driven parsers and a test habit stated in the summary. |\n| Encryption at rest | preferred (stated) | Strong | Envelope encryption shipped. |\n| Cross-platform packaging | preferred (inferred) | Partial | No named packaging work. |\n\n## Red flags\n\nNone. The posting is specific, internally consistent, and states no on-call or Kubernetes requirement.\n\n## Posting legitimacy\n\nhigh_confidence. The scope, stack, and team size are concrete.\n\n## Next step\n\nApply, and ask about packaging ownership in the first call."
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "fixture": "weak",
+  "model": "deepseek-chat",
+  "synthetic": true,
+  "recorded_at": "2026-11-07",
+  "note": "Hand-authored placeholder. Re-record with CAREER_OPS_RECORD_CASSETTES=1 and a real key (see docs/LIVE_TESTS.md).",
+  "reply": {
+    "match_score": 0.2,
+    "recommendation": "no_match",
+    "strengths": [
+      "The candidate writes clearly, which a brand role values.",
+      "Experience shipping a product end to end shows ownership."
+    ],
+    "gaps": [
+      "No marketing or communications degree; the posting states it as a requirement.",
+      "No consumer brand, paid social, or agency experience in the summary.",
+      "No portfolio of campaign work with measurable lift.",
+      "The candidate is in London; the role is on-site in New York."
+    ],
+    "rationale": "This is a brand marketing role with requirements the candidate does not meet: a marketing degree, five years of consumer brand work, and a campaign portfolio. The overlap is only general product experience. Recommend against applying.",
+    "full_report_markdown": "## Summary\n\nNot a match. The role is a brand marketing manager; the candidate is a Rust engineer. The posting requires a marketing degree, five years of consumer brand experience, and campaign work with measurable lift, none of which the summary supports.\n\n## Requirement table\n\n| Requirement | Importance | Match | Evidence |\n| :--- | :--- | :--- | :--- |\n| Marketing or communications degree | critical (stated) | Missing | BSc Computer Science only. |\n| Five years of consumer brand experience | critical (stated) | Missing | No brand or marketing role in the summary. |\n| Campaign portfolio with measurable lift | critical (stated) | Missing | No campaign work. |\n| Agency experience | preferred (stated) | Missing | None stated. |\n| On-site New York | critical (stated) | Missing | Candidate is in London. |\n\n## Red flags\n\n- Work authorization and location are unresolved for an on-site New York role.\n\n## Posting legitimacy\n\nhigh_confidence. The posting is specific about scope and expectations.\n\n## Next step\n\nDo not apply. A marketing-adjacent product role would fit better."
+  }
+}

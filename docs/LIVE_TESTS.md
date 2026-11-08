@@ -51,6 +51,8 @@ Add a row here in the same change that adds or removes a live test.
 | `obscura_returns_post_js_dom` | `crates/core/tests/obscura_spike.rs` | Binary availability (`vendor/obscura` or `OBSCURA_BIN`); returns early otherwise | `https://github.com/nene209/career-ops-rust` | The sidecar starts, CDP drives a page, post-JS DOM exists, and killing the sidecar is detectable. | **Candidate to make local.** Serve a page with inline JavaScript from a temp dir instead of GitHub; it proves the same thing without an external dependency. Do that if this spike is ever promoted beyond a Phase 2 gate. |
 | `obscura_print_to_pdf_if_supported` | `crates/core/tests/obscura_spike.rs` | None — it does **not** call `obscura_available()` | The sidecar | Records whether `printToPDF` works (the Phase 2 assumption is that it does not). | **Fix the gate first.** It spawns the binary unconditionally, which is why the standard validation command skips the whole file with `--skip obscura`. Add the availability check before relying on `cargo test` without that skip. |
 | `deepseek_accepts_the_configured_key` | `crates/core/tests/llm_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | `https://api.deepseek.com/user/balance` | The key is accepted and the provider is reachable. `verify()` asks for the balance, so a pass spends no tokens and produces no completion. | **Keep live.** It is the only check that a key and the endpoint still agree; Phase 3's structured-output calls will be cassette-backed. |
+| `deepseek_scores_the_fixtures_in_their_bands` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | The curated Phase 3 fixtures (strong, weak, borderline) | The real model still lands each fixture in its documented score band, and the report stores. Also the cassette recorder when `CAREER_OPS_RECORD_CASSETTES=1`. | **Keep live.** The offline suite replays cassettes (`evaluation_fixtures.rs`); only the live run proves the model's judgment and keeps the recordings honest. |
+| `deepseek_writes_a_usable_cover_letter` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | The strong fixture + a reference letter | The letter avoids the prompt's banned phrases and em dashes, and a model judge scores its semantic similarity against the reference at 0.7 or above. | **Keep live.** The banned-phrase check is also offline; the similarity judgment needs a model. |
 
 `live_probe`, `live_probe_challenged`, `registry_entry`, `live_portal_urls`,
 `live_scraper_config`, and `live_portal_name` in `app.rs` are helpers for the
@@ -100,6 +102,20 @@ DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test llm_live -- --ignored --nocapture
 ```
 
+The Phase 3 fixture checks spend tokens and run on demand. The same command
+with `CAREER_OPS_RECORD_CASSETTES=1` rewrites the offline cassettes (review the
+diff before committing; see `docs/llm-testing.md`):
+
+```bash
+# Score the three fixtures and judge the cover letter.
+DEEPSEEK_API_KEY=sk-... \
+    cargo test -p career-ops-core --test llm_eval_live -- --ignored --nocapture
+
+# Re-record crates/core/tests/cassettes from a passing run.
+CAREER_OPS_RECORD_CASSETTES=1 DEEPSEEK_API_KEY=sk-... \
+    cargo test -p career-ops-core --test llm_eval_live -- --ignored --nocapture
+```
+
 The ATS adapters are gated by an environment variable rather than `#[ignore]`,
 so they run as normal tests that print "skipping" and return:
 
@@ -130,10 +146,10 @@ date update.
 ### How the normal suite excludes them
 
 `cargo test --workspace --features career-ops-app/keychain --offline -- --skip
-obscura` is the standard validation command. It excludes the app live tests and
-the DeepSeek key check by `#[ignore]`, the ATS tests by their environment gate,
-and the spike by name. Dropping `--skip obscura` on a machine with the binary
-runs the spike too.
+obscura` is the standard validation command. It excludes the app live tests,
+the DeepSeek key and fixture checks, by `#[ignore]`; the ATS tests by their
+environment gate; and the spike by name. Dropping `--skip obscura` on a machine
+with the binary runs the spike too.
 
 ---
 

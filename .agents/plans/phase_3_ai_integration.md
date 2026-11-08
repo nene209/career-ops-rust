@@ -1,7 +1,7 @@
 # Phase 3: AI Integration — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.30), §12
-**Status:** In progress v0.15 — WS1–WS6 are complete (provider, keys, compact prompts, scoped versioning, strict rendering, evaluation with migration 0006, cover letters, the Prompt Manager, and the evaluation UI with injection defenses); WS7 can start
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.31), §12
+**Status:** Complete v0.16 — WS1–WS7 are implemented and the offline suite is green. Manual script §6c/§6d and the live fixture checks await the owner's run; see `.agents/plans/phase_3_retrospective.md`
 **Last updated:** 2026-11-07
 **Duration:** 3–4 weeks
 **Depends on:** Phase 2 completion, Phase 2.7 (CV/Profile editor), Phase 2.8 (fetch controls and detail opt-in), Phase 2.9 (queue state and preferences); see Entry Conditions
@@ -27,6 +27,7 @@
 | v0.13 | **WS4 implemented.** `core::cover_letter` shares the evaluation's primitives rather than duplicating them: the `CompletionBackend` trait moves to **`core::llm`** (evaluation re-exports it, so no caller changed), and `prompt_render` now owns `MAX_CV_CHARS`, `estimated_tokens`, and `take_chars` for both flows. `run_cover_letter` normalizes the posting with `plain_text`, resolves `active_for_use`, renders the five variables with the **trimmed optional tone**, refuses a prompt over the model's context window, ensures the application, and stores free text (`json_mode = false`) with `model_used`, `prompt_version`, `prompt_hash`, and `input_chars`. `repo::cover_letters` adds insert/get/list/latest/delete. Regeneration is an insert, so every draft stays comparable; an empty reply is an error, not a stored blank; and a letter never changes the application's status or the job's queue. The app gains `PipelineAction::GenerateCoverLetter { job_id, tone }`, `start_cover_letter`/`poll_cover_letter`, and a `has_user_state` update; the model seam is now `with_completion_backend` and serves both pipelines. **Deviations:** letters are not streamed (the WS4 request shape has no `stream`; WS6 can add it), and `cover_letters.input_chars` records the **assembled prompt** per the 0006 column comment, not the job text that evaluation records. Tests: 11 in `crates/core/tests/cover_letter.rs` and two app tests (a stored letter plus the missing-key path). |
 | v0.14 | **WS5 implemented.** `repo::prompts` gains `list_threads` (one row per `(name, is_system)` with latest version, count, and timestamp, ordered so both owners read together) and `usage(content_hash)` (evaluation reports and cover letters that recorded a version, joined to the posting). `core::prompt_render` gains `validate` (placeholder check without substitution), `variables_for_category` (only `evaluate` and `cover_letter` have the closed five; reference categories may use their own syntax — `pdf.md` genuinely uses `{{PHOTO}}`), and `Variable::description` for the reference panel. The **Prompts** screen replaces the placeholder: a left list grouped by category with **In use** markers, and a right pane with read-only system content, a user editor, a version list with hash prefixes and usage counts, a cached line diff against the current version, a "Used by" section, and the variable reference. **Duplicate as my copy**, **Save new version**, **ShowVersion**, and **Revert to this version** all write through `create_version`, so history is append-only; validation runs on save and refuses an unknown variable before any write. **A real bug surfaced and was fixed:** a detail load for a previously selected thread could overwrite the new selection because the task was single-flight — the app now records which selection a load is for and discards a stale result. Manual script gains **§6c**. Tests: 3 core integration tests, 2 renderer unit tests, 5 `egui_kittest` screen tests, and 2 app tests (the full duplicate/edit/revert flow and the validation rules). |
 | v0.15 | **WS6 implemented.** The Pipeline detail gains three tabs — **Description**, **Evaluation**, **Cover letter** — and the two placeholder buttons become real: **Evaluate** (or **Fetch description and evaluate** when the stored text is thin) and **Generate cover letter**. The Evaluation tab shows prompt/model overrides, the report (score, recommendation, model, prompt version, narrative), a **History** list with every stored run, and an **Evaluate without description** link for a teaser; the cover-letter tab shows the letter, earlier generations, and a tone override. The row gains a compact score badge with the band in its hover, and the score, status, queue, delete gate, and history all follow a run without a full reload. **Streaming** text is displayed while the call runs, with **Stop**; `core::llm::CancelToken` races the provider future against the flag (`biased` so a pre-set Stop never sends the request), and cancellation takes the failure path: the status is restored and nothing is stored. **Injection defense:** `prompt_render::untrusted_block` fences the posting between explicit markers and neutralizes a forged marker; both compact prompts state the data/instruction rule; output validation and the absence of tools remain the strongest layers. `docs/prompt-injection.md` records the layers, the offline tests, and the residual risk. **Deviation:** `rig` 0.46 has a `documents` channel that would separate the posting structurally; it is not used because the prompt contract is a single templated `{{job_description}}` that user prompts rely on. **Deviations in UI:** evaluation history is a list, not a diff; the full report stays markdown (the structured strengths/gaps live in it). Manual script gains **§6d**. Tests: 21 evaluation (cancellation + a hostile posting), 12 cover-letter (cancellation), 47 `egui_kittest` Pipeline tests (tabs, thin/full, streaming, Stop, history, cover letter, score badge), and 169 app tests (score, re-evaluate with an override, and a mid-call Stop). |
+| v0.16 | **WS7 implemented, with an API substitution.** `rig` **0.46 has no `evals` module and no `experimental` feature**, so the planned `LlmScoreMetric`/`SemanticSimilarityMetric` tests cannot exist at the pinned version. The substitute is a curated fixture set and a cassette layer that stays inside the app's own `CompletionBackend`: `tests/fixtures/phase3/` holds a CV and three postings (strong, weak, borderline) with documented score bands; `tests/cassettes/` holds one recorded reply per fixture plus a reference letter; `evaluation_fixtures.rs` replays them offline and asserts the band, the lifecycle, the fenced prompt, the output contract, and the letter's banned phrases; `llm_eval_live.rs` contains the `#[ignore]`d band and similarity checks and acts as the recorder (`CAREER_OPS_RECORD_CASSETTES=1`). The shipped cassettes are marked **synthetic** until recorded with a key; `docs/llm-testing.md` records the workflow, and `docs/LIVE_TESTS.md` indexes both live tests. Exit criterion 13 is amended to the fixture/cassette suite. The retrospective is `.agents/plans/phase_3_retrospective.md`. |
 
 ---
 
@@ -802,6 +803,13 @@ Job descriptions are untrusted input. A malicious job posting could contain inst
 
 ## Workstream 7 — LLM Evaluation Testing
 
+> **Implemented differently (v0.16).** `rig` 0.46 has no `evals` module and no
+> `experimental` feature, so the API in deliverable 1 does not exist at the
+> pinned version. The shipped work is a curated fixture set plus cassette replay
+> in `crates/core/tests/evaluation_fixtures.rs`, with the live band and
+> similarity checks in `crates/core/tests/llm_eval_live.rs` and the workflow in
+> `docs/llm-testing.md`. The text below is kept as the original intent.
+
 **Priority:** After evaluation pipeline works. Can run in parallel with UI work.
 **Estimated duration:** 3–5 days
 
@@ -964,7 +972,7 @@ Phase 3 is complete when **all** of the following are true:
 10. Prompt injection defenses are implemented and tested against malicious fixtures.
 11. A `NoMatch` report marks an eligible application `not_a_match`; a submitted application is left alone.
 12. Migration 0006 applies to an existing 0005 database and preserves rows.
-13. `rig::evals` tests run in the default suite against cassettes and pass.
+| 13 | The prompt-quality suite runs in the default suite against cassettes, with live checks gated and indexed | `evaluation_fixtures.rs` (offline replay), `llm_eval_live.rs` (`#[ignore]`), `docs/llm-testing.md`, `docs/LIVE_TESTS.md` |
 14. CI is green on Linux, macOS, and Windows, including cassette, injection-defense, and UI jobs.
 15. A short Phase 3 retrospective memo exists, recording `rig` integration friction, provider quirks, prompt-size decisions, and injection-defense effectiveness.
 16. Writing a report sets `queue_state = 'evaluated'` in the same transaction, and the Pipeline row's badge updates without a reload (WS3, note 13; WS6, item 9).
@@ -974,7 +982,7 @@ Phase 3 is complete when **all** of the following are true:
 
 ## Open Questions (Phase 3 Owns)
 
-The main plan (v0.30) tracks cross-phase questions in Appendix B, and Phases
+The main plan (v0.31) tracks cross-phase questions in Appendix B, and Phases
 2.5/2.6 record their own Q-18–Q-23 in their phase plans. Phase 3's questions
 were resolved on 2026-11-05, and **Q-43 on 2026-11-06**.
 

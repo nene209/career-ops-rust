@@ -1,0 +1,8 @@
+{
+  "fixture": "strong",
+  "model": "deepseek-chat",
+  "synthetic": true,
+  "recorded_at": "2026-11-07",
+  "note": "Hand-authored placeholder. Re-record with CAREER_OPS_RECORD_CASSETTES=1 and a real key (see docs/LIVE_TESTS.md).",
+  "reply": "Dear Hiring Manager,\n\nYour posting describes an offline-first desktop application with SQLite as the source of truth, and that is the product I have spent six years building. At Analytical Engines I designed the local-first storage layer: SQLite with envelope encryption, a migration runner, and crash-safe writes. I led the egui front end and cut cold start from 4.2 seconds to 0.9.\n\nBefore that, at Difference Systems, I wrote a headless browser sidecar and the fixture-driven parsers behind it, which cut scraping failures by 40 percent. That work is where I learned to make a parser prove itself against saved responses before trusting it in production.\n\nI write tests before shipping, and I care about the small, reversible change. I would like to bring that habit to your storage layer and your desktop client, and to own a feature from schema to screen.\n\nSincerely,\nAda Lovelace"
+}
