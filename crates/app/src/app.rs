@@ -56,6 +56,7 @@ use career_ops_core::repo::cover_letters as cover_letter_repo;
 use career_ops_core::repo::cv_entries as cv_entry_repo;
 use career_ops_core::repo::evaluation_reports as evaluation_repo;
 use career_ops_core::repo::job_descriptions as job_repo;
+use career_ops_core::repo::llm_usage as usage_repo;
 use career_ops_core::repo::portals::{self as portal_repo, NewPortal, RenderMode};
 use career_ops_core::repo::profile::{self as profile_repo, ProfileDetails};
 use career_ops_core::repo::prompts::{self as prompt_repo, PromptThread};
@@ -78,6 +79,7 @@ use crate::screens::portals::{
 };
 use crate::screens::prompts::{PromptsAction, PromptsRenderState};
 use crate::screens::settings::{SettingsAction, SettingsRenderState};
+use crate::screens::usage::{UsageAction, UsageRenderState};
 use crate::state::{AppState, Screen};
 use crate::view_models::cv_profile::{CvEntryDraft, CvProfileViewModel};
 use crate::view_models::logs::LogsView;
@@ -85,6 +87,7 @@ use crate::view_models::pipeline::{PipelineDetail, PipelineViewModel, StatusLabe
 use crate::view_models::portals::{BatchProgress, PortalsViewModel};
 use crate::view_models::prompts::{PromptDetail, PromptSelection, PromptsView, PromptsViewModel};
 use crate::view_models::settings::SettingsViewModel;
+use crate::view_models::usage::UsageViewModel;
 
 type StateTask = AsyncTask<(AppState, CoreResult<()>)>;
 
@@ -144,6 +147,7 @@ enum ScreenAction {
     CvProfile(CvProfileAction),
     Prompts(PromptsAction),
     Settings(SettingsAction),
+    Usage(UsageAction),
     Logs(LogsAction),
 }
 
@@ -335,6 +339,15 @@ pub struct CareerOpsApp {
     /// The provider a running connection test is for, for its message.
     llm_testing: Option<LlmProvider>,
 
+    /// The read-only usage ledger. The screen is loaded lazily, like every
+    /// other data-backed screen.
+    usage: UsageViewModel,
+    usage_loaded: bool,
+    usage_error: Option<String>,
+    /// Tagged with the range it was loaded for, so a slow load cannot overwrite
+    /// a range the user chose while it ran.
+    usage_task: Option<AsyncTask<CoreResult<(crate::view_models::usage::Range, UsageViewModel)>>>,
+
     /// The logging seam. `main` installs the file sink; tests get the buffer.
     logs: LogHandle,
     logs_view: LogsView,
@@ -456,6 +469,10 @@ impl CareerOpsApp {
             api_key_task: None,
             llm_test_task: None,
             llm_testing: None,
+            usage: UsageViewModel::default(),
+            usage_loaded: false,
+            usage_error: None,
+            usage_task: None,
             logs,
             logs_view: LogsView::default(),
             logs_snapshot: Vec::new(),
@@ -717,6 +734,23 @@ impl CareerOpsApp {
                 self.navigation.navigate_to(MainScreen::Logs);
             }
             LogsAction::CloseDrawer => self.logs_view.drawer_open = false,
+        }
+    }
+
+    /// Execute an intent emitted by the Usage screen.
+    pub fn handle_usage_action(&mut self, action: UsageAction) {
+        match action {
+            UsageAction::SetRange(range) => {
+                if self.usage.range != range {
+                    self.usage.range = range;
+                    self.usage_loaded = false;
+                    self.start_usage_load();
+                }
+            }
+            UsageAction::Reload => {
+                self.usage_loaded = false;
+                self.start_usage_load();
+            }
         }
     }
 
@@ -1078,6 +1112,11 @@ impl CareerOpsApp {
         self.api_key_task = None;
         self.llm_test_task = None;
         self.llm_testing = None;
+
+        self.usage = UsageViewModel::default();
+        self.usage_loaded = false;
+        self.usage_error = None;
+        self.usage_task = None;
     }
 
     fn pool(&self) -> Option<sqlx::SqlitePool> {
@@ -2747,6 +2786,67 @@ impl CareerOpsApp {
         }
     }
 
+    fn start_usage_load(&mut self) {
+        if self.usage_task.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.usage_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.usage_error = None;
+        let range = self.usage.range;
+        let since = range.since(chrono::Utc::now());
+        let task = self.spawn(async move {
+            let by_model = usage_repo::totals_by_provider_model(&pool, since).await?;
+            let by_task = usage_repo::totals_by_task(&pool, since).await?;
+            // A glance, not a log viewer: the ledger is the record, and fifty
+            // rows is what fits the screen without paging.
+            let recent = usage_repo::recent(&pool, since, 50).await?;
+            Ok((
+                range,
+                UsageViewModel::from_rows(range, by_model, by_task, recent),
+            ))
+        });
+        self.usage_task = Some(task);
+    }
+
+    fn poll_usage_task(&mut self, ctx: &egui::Context) {
+        let poll = match self.usage_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Ready(result) => {
+                self.usage_task = None;
+                match result {
+                    Ok((loaded_range, view_model)) if loaded_range == self.usage.range => {
+                        self.usage = view_model;
+                        self.usage_loaded = true;
+                        self.usage_error = None;
+                    }
+                    // The user picked another range while this load ran. Its
+                    // rows answer the old question, so they are discarded and
+                    // the current range is loaded instead.
+                    Ok(_) => self.start_usage_load(),
+                    Err(error) => self.usage_error = Some(error.to_string()),
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Cancelled => {
+                self.usage_task = None;
+                self.usage_error = Some("The operation was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
     fn start_preferences_save(&mut self, preferences: Preferences) {
         if self.settings_save_task.is_some() {
             return;
@@ -3721,6 +3821,7 @@ impl eframe::App for CareerOpsApp {
                 self.poll_settings_task(ui.ctx());
                 self.poll_preferences_save(ui.ctx());
                 self.poll_llm_tasks(ui.ctx());
+                self.poll_usage_task(ui.ctx());
                 self.drain_batch_progress();
 
                 // The buffer is where background tasks report; without a wake
@@ -3792,6 +3893,14 @@ impl eframe::App for CareerOpsApp {
                     self.start_settings_load();
                 }
 
+                if self.navigation.current() == MainScreen::Usage
+                    && self.usage_task.is_none()
+                    && !self.usage_loaded
+                    && self.usage_error.is_none()
+                {
+                    self.start_usage_load();
+                }
+
                 let render_state = PortalsRenderState {
                     loading: matches!(&self.portals_task, Some(PortalsTask::List { .. })),
                     busy: self.portals_task.is_some() || self.fetch_all_task.is_some(),
@@ -3856,6 +3965,11 @@ impl eframe::App for CareerOpsApp {
                     message: self.settings_message.as_deref(),
                 };
 
+                let usage_state = UsageRenderState {
+                    loading: self.usage_task.is_some(),
+                    error: self.usage_error.as_deref(),
+                };
+
                 let log_path = self.logs.path().map(|path| path.display().to_string());
                 let logs_state = LogsRenderState {
                     path: log_path.as_deref(),
@@ -3898,6 +4012,7 @@ impl eframe::App for CareerOpsApp {
                 let prompt_detail = self.prompt_detail.as_ref();
                 let prompts_view = &mut self.prompts_view;
                 let settings = &mut self.settings;
+                let usage = &self.usage;
                 let logs_snapshot = &self.logs_snapshot;
                 let logs_view = &mut self.logs_view;
 
@@ -3935,6 +4050,8 @@ impl eframe::App for CareerOpsApp {
                                 screens::settings::show(ui, settings, settings_state)
                                     .map(ScreenAction::Settings)
                             }
+                            MainScreen::Usage => screens::usage::show(ui, usage, usage_state)
+                                .map(ScreenAction::Usage),
                         }
                     });
 
@@ -3954,6 +4071,7 @@ impl eframe::App for CareerOpsApp {
                     Some(ScreenAction::CvProfile(action)) => self.handle_cv_profile_action(action),
                     Some(ScreenAction::Prompts(action)) => self.handle_prompts_action(action),
                     Some(ScreenAction::Settings(action)) => self.handle_settings_action(action),
+                    Some(ScreenAction::Usage(action)) => self.handle_usage_action(action),
                     Some(ScreenAction::Logs(action)) => self.handle_logs_action(action),
                     None => {}
                 }
@@ -4528,6 +4646,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_usage_screen_loads_the_ledger_and_keeps_the_range() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+
+        let pool = app.pool().expect("pool");
+        let rows = [usage_repo::NewLlmUsage {
+            provider: "deepseek",
+            model: "deepseek-flash",
+            task: "evaluation",
+            application_id: None,
+            job_description_id: None,
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            total_tokens: Some(120),
+            cached_input_tokens: None,
+            reasoning_tokens: None,
+            source: "reported",
+            cost_usd: Some(0.000027),
+            cost_complete: Some(true),
+            outcome: "ok",
+            error_kind: None,
+            duration_ms: 12,
+        }];
+        app.runtime()
+            .block_on(usage_repo::insert_many(&pool, &rows))
+            .expect("insert usage");
+
+        app.navigation.navigate_to(MainScreen::Usage);
+        app.start_usage_load();
+        wait_until(&mut app, &ctx, |app| {
+            app.usage_task.is_none() && app.usage_loaded
+        });
+
+        assert_eq!(app.usage.totals.calls, 1);
+        assert_eq!(app.usage.by_provider_model[0].model, "deepseek-flash");
+        assert_eq!(app.usage.recent.len(), 1);
+        assert_eq!(
+            app.usage.range,
+            crate::view_models::usage::Range::Last30Days
+        );
+
+        // A range change reloads and keeps the new selection.
+        app.handle_usage_action(UsageAction::SetRange(crate::view_models::usage::Range::All));
+        wait_until(&mut app, &ctx, |app| {
+            app.usage_task.is_none() && app.usage_loaded
+        });
+        assert_eq!(app.usage.range, crate::view_models::usage::Range::All);
+        assert_eq!(app.usage.totals.calls, 1);
+    }
+
     /// Create a vault in `dir` and return an app that has unlocked it.
     ///
     /// The caller holds `KEYCHAIN_TEST_LOCK`; the helper does not, so the guard
@@ -4805,6 +4976,7 @@ mod tests {
             app.poll_settings_task(ctx);
             app.poll_preferences_save(ctx);
             app.poll_llm_tasks(ctx);
+            app.poll_usage_task(ctx);
             app.drain_batch_progress();
             if condition(app) {
                 return;

@@ -119,6 +119,14 @@ pub fn placeholder(ui: &mut Ui, screen: MainScreen) {
             )
             .show(ui);
         }
+        MainScreen::Usage => {
+            EmptyState::new(
+                "[#]",
+                "Usage",
+                "LLM calls and what they cost will appear here.",
+            )
+            .show(ui);
+        }
         MainScreen::Logs => {
             EmptyState::new(
                 ">_",

@@ -16,6 +16,8 @@ pub enum MainScreen {
     CvProfile,
     Prompts,
     Settings,
+    /// What the LLM calls used and cost.
+    Usage,
     /// Last, after a separator: diagnostics, not day-to-day work.
     Logs,
 }
@@ -28,6 +30,7 @@ impl MainScreen {
             MainScreen::CvProfile => "CV / Profile",
             MainScreen::Prompts => "Prompts",
             MainScreen::Settings => "Settings",
+            MainScreen::Usage => "Usage",
             MainScreen::Logs => "Logs",
         }
     }
@@ -39,6 +42,7 @@ impl MainScreen {
             MainScreen::CvProfile,
             MainScreen::Prompts,
             MainScreen::Settings,
+            MainScreen::Usage,
             MainScreen::Logs,
         ]
     }

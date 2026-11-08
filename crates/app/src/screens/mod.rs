@@ -18,5 +18,6 @@ pub mod portals;
 pub mod prompts;
 pub mod settings;
 pub mod shell;
+pub mod usage;
 
 pub use components::{labelled_input, labelled_multiline, EmptyState, LoadingSpinner, StatusBadge};
