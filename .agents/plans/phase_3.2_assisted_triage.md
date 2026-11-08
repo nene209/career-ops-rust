@@ -126,7 +126,7 @@ The user sees the decisions in the Pipeline (a **Triaged** filter, badges) and c
 Before the call:
 
 ```
-Triage 47 new jobs with deepseek-chat
+Triage 47 new jobs with deepseek-flash
 ~12,000 input tokens, ~$0.003, ~8 seconds
 [ Cancel ] [ Run triage ]
 ```

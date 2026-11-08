@@ -29,7 +29,7 @@ is worse than three with clear ones.
 ```json
 {
   "fixture": "strong",
-  "model": "deepseek-chat",
+  "model": "deepseek-flash",
   "synthetic": true,
   "recorded_at": "2026-11-07",
   "note": "Hand-authored placeholder ...",

@@ -1059,7 +1059,7 @@ fn evaluation(id: i64, score: f32, recommendation: &str, content: &str) -> Evalu
     EvaluationRow {
         id,
         generated_at: format!("2026-01-0{id} 10:00"),
-        model_used: "deepseek-chat".into(),
+        model_used: "deepseek-flash".into(),
         prompt_version: Some(1),
         match_score: Some(score),
         recommendation: Some(recommendation.into()),
@@ -1229,7 +1229,7 @@ fn the_cover_letter_tab_shows_the_latest_letter() {
         cover_letters: vec![CoverLetterRow {
             id: 4,
             generated_at: "2026-01-04 10:00".into(),
-            model_used: "deepseek-chat".into(),
+            model_used: "deepseek-flash".into(),
             prompt_version: Some(1),
             content: "Dear Hiring Manager".into(),
         }],

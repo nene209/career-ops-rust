@@ -164,7 +164,7 @@ fn usage_lists_the_reports_that_used_the_version() {
             kind: PromptUsageKind::Evaluation,
             id: 7,
             generated_at: fixed_time(),
-            model_used: "deepseek-chat".into(),
+            model_used: "deepseek-flash".into(),
             job_title: Some("Engineer".into()),
             company: Some("Acme".into()),
         }],
@@ -179,8 +179,8 @@ fn usage_lists_the_reports_that_used_the_version() {
     });
     harness.run();
 
-    let _ =
-        harness.get_by_label("Evaluation #7 · Engineer at Acme · 2026-01-02 03:04 · deepseek-chat");
+    let _ = harness
+        .get_by_label("Evaluation #7 · Engineer at Acme · 2026-01-02 03:04 · deepseek-flash");
 }
 
 #[test]
