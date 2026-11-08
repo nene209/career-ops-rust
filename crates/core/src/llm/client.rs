@@ -12,10 +12,12 @@ use futures_util::StreamExt;
 use sqlx::SqlitePool;
 use zeroize::Zeroizing;
 
+use super::backend::Completion;
 use super::capabilities::{capabilities, ModelCapabilities, StructuredOutput};
 use super::config::{LlmConfig, LlmProvider};
 use super::error::LlmError;
 use super::keys;
+use super::usage::Usage;
 
 /// Where a streamed reply's fragments go.
 pub type DeltaSink = tokio::sync::mpsc::UnboundedSender<String>;
@@ -98,7 +100,7 @@ impl LlmClient {
             .map_err(|error| LlmError::from_rig(self.provider, error))
     }
 
-    /// Send one prompt and return the model's text.
+    /// Send one prompt and return the model's text and its usage.
     ///
     /// `model_override` comes from a request, so a re-evaluation can try a
     /// different model without rebuilding the client. `json_mode` asks the
@@ -116,10 +118,9 @@ impl LlmClient {
         model_override: Option<&str>,
         json_mode: bool,
         deltas: Option<&DeltaSink>,
-    ) -> Result<String, LlmError> {
-        let model = self
-            .client
-            .chat(model_override.unwrap_or(self.model.as_str()));
+    ) -> Result<Completion, LlmError> {
+        let model = model_override.unwrap_or(self.model.as_str());
+        let chat = self.client.chat(model);
 
         let mut request = rig::completion::CompletionRequest::new(prompt.to_string());
         request.temperature = Some(f64::from(self.temperature));
@@ -136,14 +137,14 @@ impl LlmClient {
         }
 
         let Some(sink) = deltas else {
-            let response = model
+            let response = chat
                 .call(request)
                 .await
                 .map_err(|error| LlmError::from_rig(self.provider, error))?;
-            return Ok(response_text(&response));
+            return Ok(completion(&response, self.provider, model));
         };
 
-        let mut stream = model
+        let mut stream = chat
             .stream(request)
             .map_err(|error| LlmError::from_rig(self.provider, error))?;
 
@@ -162,17 +163,33 @@ impl LlmClient {
         }
 
         // The folded reply is authoritative: a provider may split or resend
-        // fragments, and the assembled text is what call() would return.
+        // fragments, and the assembled text is what call() would return. The
+        // folded response also carries the usage the stream reported.
         let response = stream
             .finish()
             .await
             .map_err(|error| LlmError::from_rig(self.provider, error))?;
         let assembled = response_text(&response);
-        Ok(if assembled.is_empty() {
-            text
-        } else {
-            assembled
+        Ok(Completion {
+            text: if assembled.is_empty() {
+                text
+            } else {
+                assembled
+            },
+            usage: Usage::from_rig(self.provider, model, &response.usage),
         })
+    }
+}
+
+/// A response as the application's [`Completion`], usage included.
+fn completion(
+    response: &rig::completion::CompletionResponse,
+    provider: LlmProvider,
+    model: &str,
+) -> Completion {
+    Completion {
+        text: response_text(response),
+        usage: Usage::from_rig(provider, model, &response.usage),
     }
 }
 

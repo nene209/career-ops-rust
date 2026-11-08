@@ -5772,12 +5772,14 @@ mod tests {
             model: Option<&str>,
             _json_mode: bool,
             deltas: Option<&career_ops_core::llm::DeltaSink>,
-        ) -> Result<String, llm::LlmError> {
+        ) -> Result<career_ops_core::llm::Completion, llm::LlmError> {
             self.models.lock().unwrap().push(model.map(str::to_string));
             if let Some(sink) = deltas {
                 let _ = sink.send("streaming fragment ".into());
             }
-            Ok(self.reply.clone())
+            Ok(career_ops_core::llm::Completion::text_only(
+                self.reply.clone(),
+            ))
         }
     }
 
@@ -5806,7 +5808,7 @@ mod tests {
             _model: Option<&str>,
             _json_mode: bool,
             _deltas: Option<&career_ops_core::llm::DeltaSink>,
-        ) -> Result<String, llm::LlmError> {
+        ) -> Result<career_ops_core::llm::Completion, llm::LlmError> {
             self.started.store(true, Ordering::Relaxed);
             std::future::pending().await
         }

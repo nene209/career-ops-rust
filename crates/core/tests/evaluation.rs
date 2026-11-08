@@ -18,7 +18,7 @@ use career_ops_core::acquisition::router::FetchSource;
 use career_ops_core::evaluation::{
     run_evaluation, CompletionBackend, EvaluationRequest, Recommendation,
 };
-use career_ops_core::llm::{CancelToken, DeltaSink, LlmError};
+use career_ops_core::llm::{CancelToken, Completion, DeltaSink, LlmError};
 use career_ops_core::model::{
     Application, ApplicationStatus, FetchTier, JobDescription, QueueState,
 };
@@ -1010,13 +1010,13 @@ impl CompletionBackend for FakeBackend {
         _model: Option<&str>,
         _json_mode: bool,
         deltas: Option<&DeltaSink>,
-    ) -> Result<String, LlmError> {
+    ) -> Result<Completion, LlmError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         if let Some(sink) = deltas {
             let _ = sink.send("fragment".into());
         }
         match self.replies.lock().unwrap().pop_front() {
-            Some(Reply::Text(text)) => Ok(text),
+            Some(Reply::Text(text)) => Ok(Completion::text_only(text)),
             Some(Reply::Fail) => Err(LlmError::Transport("fake transport failure".into())),
             None => Err(LlmError::Transport("the fake ran out of replies".into())),
         }

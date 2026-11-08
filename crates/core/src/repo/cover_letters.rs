@@ -5,7 +5,7 @@
 //! generation is cheap and the alternative loses work.
 
 use chrono::Utc;
-use sqlx::SqlitePool;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::error::{CoreError, Result};
 use crate::model::CoverLetter;
@@ -24,6 +24,17 @@ pub struct NewCoverLetter<'a> {
 }
 
 pub async fn insert(pool: &SqlitePool, input: NewCoverLetter<'_>) -> Result<i64> {
+    let mut tx = pool.begin().await?;
+    let id = insert_tx(&mut tx, input).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Insert a letter inside a caller's transaction.
+///
+/// The service writes the letter and its usage row together, so a letter can
+/// never be stored without the record of what it cost.
+pub async fn insert_tx(tx: &mut Transaction<'_, Sqlite>, input: NewCoverLetter<'_>) -> Result<i64> {
     let now: chrono::DateTime<Utc> = Utc::now();
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO cover_letters
@@ -39,7 +50,7 @@ pub async fn insert(pool: &SqlitePool, input: NewCoverLetter<'_>) -> Result<i64>
     .bind(input.prompt_version)
     .bind(input.prompt_hash)
     .bind(input.input_chars)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await?;
 
     Ok(id)

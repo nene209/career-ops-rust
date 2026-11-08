@@ -1,7 +1,7 @@
 # Phase 3.1: LLM Usage Tracking — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.32), §12
-**Status:** Planned — not started
+**Status:** In progress — WS0 and WS1 complete; WS2–WS3 not started
 **Last updated:** 2026-11-07
 **Duration:** 3–4 days
 **Depends on:** Phase 3 (`core::llm`, `rig` 0.46, `CompletionBackend`, evaluation and cover-letter pipelines, migration 0006)
@@ -14,6 +14,7 @@
 | Version | Change |
 | :--- | :--- |
 | v0.1 | Initial plan. Adds a per-call LLM usage ledger (migration **0007**), captures `rig`'s reported token counters instead of the character proxy, derives cost only from a known price, and adds a read-only **Usage** screen grouped by provider/model and by task. Also carries the default-model change to `deepseek-flash` as WS0, because `deepseek-chat` is absent from `rig`'s price catalog and therefore cannot be costed. Phase 3.2's migration moves to **0008**. |
+| v0.2 | **WS0 and WS1 implemented.** WS0 switched the default to `deepseek-flash` and named it in `capabilities::deepseek`. WS1 lands the ledger: `CompletionBackend` returns `Completion { text, usage }` (with `Completion::text_only` for the seven fakes and cassettes), `core::llm::usage` owns `Usage`/`Task`/`Source`/`Outcome`/`Call`, and `Usage::from_rig` maps `rig`'s counters and prices them from `rig`'s built-in catalog when the provider sends no cost of its own (a unit test pins Flash at 0.15/0.6 per million; a provider-reported cost wins; an unlisted model stays unpriced). Migration **0007** and `repo::llm_usage` add `insert_many_tx`/`insert_many`/`record_best_effort` plus the three screen reads (`totals_by_provider_model`, `totals_by_task`, `recent`). The evaluation service now returns every attempt — repair included — and writes the rows in the report transaction, or best-effort before returning a failure; the cover letter uses `insert_tx` so the letter and its one row commit together, and an empty reply records the call but stores no letter. **Deviations:** `Call` omits the application/job ids that `NewLlmUsage::from_call` takes, so the ledger stays a repository concern; `tool_use_prompt_tokens` and `cache_creation_input_tokens` are not columns because DeepSeek reports neither; `RecentCall` carries `error_kind` for the screen; no per-job list (Q-49). Sixteen new tests (eight capture, eight repository/migration), full suite green. |
 
 ---
 

@@ -17,7 +17,9 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use career_ops_core::cover_letter::{run_cover_letter, CoverLetterRequest};
 use career_ops_core::evaluation::{run_evaluation, EvaluationRequest};
-use career_ops_core::llm::{CompletionBackend, DeltaSink, LlmClient, LlmConfig, LlmError};
+use career_ops_core::llm::{
+    Completion, CompletionBackend, DeltaSink, LlmClient, LlmConfig, LlmError,
+};
 use career_ops_core::repo::job_descriptions as job_repo;
 use chrono::Utc;
 use zeroize::Zeroizing;
@@ -72,13 +74,13 @@ impl CompletionBackend for RecordingBackend {
         model: Option<&str>,
         json_mode: bool,
         deltas: Option<&DeltaSink>,
-    ) -> Result<String, LlmError> {
-        let reply = self
+    ) -> Result<Completion, LlmError> {
+        let completion = self
             .inner
             .complete_text(prompt, model, json_mode, deltas)
             .await?;
-        self.replies.lock().unwrap().push(reply.clone());
-        Ok(reply)
+        self.replies.lock().unwrap().push(completion.text.clone());
+        Ok(completion)
     }
 }
 
@@ -195,7 +197,7 @@ async fn deepseek_writes_a_usable_cover_letter() {
         .complete_text(&prompt, None, false, None)
         .await
         .expect("the judge answered");
-    let score = first_float(&reply).unwrap_or_else(|| panic!("no number in `{reply}`"));
+    let score = first_float(&reply.text).unwrap_or_else(|| panic!("no number in `{}`", reply.text));
     eprintln!("cover letter similarity: {score:.2}");
     assert!(
         score >= 0.7,

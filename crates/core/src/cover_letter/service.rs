@@ -10,13 +10,16 @@
 //! the letter changed.
 
 use sqlx::SqlitePool;
+use std::time::Instant;
 
 use crate::error::{CoreError, Result};
+use crate::llm::usage::{elapsed_ms, Call, Task};
 use crate::llm::{capabilities, CancelToken, CompletionBackend, LlmConfig, LlmError};
 use crate::prompt_render::{
     estimated_tokens, render, take_chars, untrusted_block, Variables, MAX_CV_CHARS,
 };
 use crate::repo::cover_letters::{self, NewCoverLetter};
+use crate::repo::llm_usage::{self, NewLlmUsage};
 use crate::repo::{applications, job_descriptions, profile, prompts};
 use crate::text;
 
@@ -138,26 +141,63 @@ pub async fn run_cover_letter(
 
     let application = applications::ensure(pool, job.id).await?;
 
-    let reply = {
+    let started = Instant::now();
+    let result = {
         // `biased` so a token already set when the call starts wins without
         // polling the provider.
         tokio::select! {
             biased;
-            _ = request.cancel.wait() => return Err(CoreError::from(LlmError::Cancelled)),
-            result = backend.complete(&assembled, model_override, false, None) => {
-                result.map_err(CoreError::from)?
-            }
+            _ = request.cancel.wait() => Err(LlmError::Cancelled),
+            result = backend.complete(&assembled, model_override, false, None) => result,
         }
     };
-    let content = reply.trim();
+    let duration_ms = elapsed_ms(started);
+    let call = match &result {
+        Ok(completion) => Call::completed(
+            &config,
+            Task::CoverLetter,
+            &completion.usage,
+            &assembled,
+            &completion.text,
+            duration_ms,
+        ),
+        Err(error) => Call::failed(&config, Task::CoverLetter, &assembled, error, duration_ms),
+    };
+    let completion = match result {
+        Ok(completion) => completion,
+        Err(error) => {
+            // The failed call still spent tokens; record it, then report the
+            // provider's error unchanged.
+            llm_usage::record_best_effort(
+                pool,
+                std::slice::from_ref(&call),
+                Some(application.id),
+                Some(job.id),
+            )
+            .await;
+            return Err(CoreError::from(error));
+        }
+    };
+
+    let content = completion.text.trim();
     if content.is_empty() {
+        // The provider succeeded but produced nothing usable. The tokens were
+        // still spent, so the call is recorded and the empty letter is not.
+        llm_usage::record_best_effort(
+            pool,
+            std::slice::from_ref(&call),
+            Some(application.id),
+            Some(job.id),
+        )
+        .await;
         return Err(CoreError::Message(
             "the model returned an empty cover letter".into(),
         ));
     }
 
-    let cover_letter_id = cover_letters::insert(
-        pool,
+    let mut tx = pool.begin().await?;
+    let cover_letter_id = cover_letters::insert_tx(
+        &mut tx,
         NewCoverLetter {
             application_id: application.id,
             content,
@@ -168,6 +208,14 @@ pub async fn run_cover_letter(
         },
     )
     .await?;
+
+    let usage_rows = [NewLlmUsage::from_call(
+        &call,
+        Some(application.id),
+        Some(job.id),
+    )];
+    llm_usage::insert_many_tx(&mut tx, &usage_rows).await?;
+    tx.commit().await?;
 
     tracing::info!(
         job = job.id,

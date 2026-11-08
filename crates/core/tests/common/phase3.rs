@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use career_ops_core::llm::{CompletionBackend, DeltaSink, LlmError};
+use career_ops_core::llm::{Completion, CompletionBackend, DeltaSink, LlmError};
 use career_ops_core::model::{FetchTier, JobDescription};
 use career_ops_core::prompts_seed::seed_or_update_system_prompts;
 use career_ops_core::repo::job_descriptions as job_repo;
@@ -202,7 +202,7 @@ impl CompletionBackend for CassetteBackend {
         model: Option<&str>,
         json_mode: bool,
         _deltas: Option<&DeltaSink>,
-    ) -> Result<String, LlmError> {
+    ) -> Result<Completion, LlmError> {
         assert!(
             model.is_none_or(|model| model == self.cassette.model),
             "the cassette was recorded with `{}`, not `{}`",
@@ -217,7 +217,9 @@ impl CompletionBackend for CassetteBackend {
             );
         }
         self.prompts.lock().unwrap().push(prompt.to_string());
-        Ok(serde_json::to_string(&self.cassette.reply).expect("serialize the recorded reply"))
+        Ok(Completion::text_only(
+            serde_json::to_string(&self.cassette.reply).expect("serialize the recorded reply"),
+        ))
     }
 }
 
@@ -248,8 +250,8 @@ impl CompletionBackend for LetterCassetteBackend {
         _model: Option<&str>,
         _json_mode: bool,
         _deltas: Option<&DeltaSink>,
-    ) -> Result<String, LlmError> {
+    ) -> Result<Completion, LlmError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
-        Ok(self.cassette.reply.clone())
+        Ok(Completion::text_only(self.cassette.reply.clone()))
     }
 }

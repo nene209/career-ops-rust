@@ -9,12 +9,14 @@
 //!   - settings      (key/value JSON store)
 //!   - prompts       (versioned)
 //!   - templates     (versioned, same shape as prompts)
+//!   - llm_usage     (append-only ledger, one row per provider call)
 
 pub mod applications;
 pub mod cover_letters;
 pub mod cv_entries;
 pub mod evaluation_reports;
 pub mod job_descriptions;
+pub mod llm_usage;
 pub mod portals;
 pub mod profile;
 pub mod prompts;

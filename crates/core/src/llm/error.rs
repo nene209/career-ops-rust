@@ -62,6 +62,24 @@ pub enum LlmError {
 }
 
 impl LlmError {
+    /// A stable, snake_case name for the failure, for a record that outlives
+    /// this build (the usage ledger's `error_kind`). The `Display` text is for
+    /// people and may be reworded; this must not be.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::MissingApiKey { .. } => "missing_api_key",
+            Self::UnsupportedProvider { .. } => "unsupported_provider",
+            Self::Keychain(_) => "keychain",
+            Self::InvalidAuthentication { .. } => "invalid_authentication",
+            Self::RateLimited { .. } => "rate_limited",
+            Self::ContextLengthExceeded { .. } => "context_length",
+            Self::Provider { .. } => "provider",
+            Self::Transport(_) => "transport",
+            Self::InvalidResponse(_) => "invalid_response",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
     /// Whether the same request may reasonably be sent again. A missing key,
     /// a rejected key, and a prompt that is too long are not transient; a
     /// rate limit, a transport failure, and a provider's 5xx are.

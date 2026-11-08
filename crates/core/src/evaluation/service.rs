@@ -12,14 +12,19 @@
 //!    that still says `evaluate`.
 
 use sqlx::SqlitePool;
+use std::time::Instant;
 
 use crate::acquisition::manual;
 use crate::acquisition::router::FetchSource;
 use crate::error::{CoreError, Result};
-use crate::llm::{capabilities, CancelToken, CompletionBackend, DeltaSink, LlmConfig, LlmError};
+use crate::llm::usage::{elapsed_ms, Call, Task};
+use crate::llm::{
+    capabilities, CancelToken, Completion, CompletionBackend, DeltaSink, LlmConfig, LlmError,
+};
 use crate::model::{ApplicationStatus, QueueState};
 use crate::prompt_render::{estimated_tokens, render, take_chars, untrusted_block, Variables};
 use crate::repo::evaluation_reports::{self, NewEvaluationReport};
+use crate::repo::llm_usage::{self, NewLlmUsage};
 use crate::repo::{applications, job_descriptions, profile, prompts};
 use crate::text;
 
@@ -213,9 +218,14 @@ pub async fn run_evaluation(
         applications::transition(pool, application.id, ApplicationStatus::Evaluating).await?;
     }
 
-    let output = match ask(backend, &assembled, request, deltas).await {
+    // The call's usage is recorded beside the report: one row per attempt,
+    // including a repair. A failed call still spent tokens, so its rows are
+    // written best-effort before the error is returned.
+    let (asked, calls) = ask(backend, &assembled, request, deltas, &config).await;
+    let output = match asked {
         Ok(output) => output,
         Err(error) => {
+            llm_usage::record_best_effort(pool, &calls, Some(application.id), Some(job.id)).await;
             if moved_to_evaluating {
                 if let Err(restore) = applications::transition(pool, application.id, previous).await
                 {
@@ -247,6 +257,12 @@ pub async fn run_evaluation(
         },
     )
     .await?;
+
+    let usage_rows: Vec<NewLlmUsage<'_>> = calls
+        .iter()
+        .map(|call| NewLlmUsage::from_call(call, Some(application.id), Some(job.id)))
+        .collect();
+    llm_usage::insert_many_tx(&mut tx, &usage_rows).await?;
 
     applications::finish_evaluation_tx(
         &mut tx,
@@ -320,41 +336,105 @@ pub async fn run_batch(
 ///
 /// The repair is a second call because a streamed reply cannot be parsed
 /// before it ends; the second call does not stream, so the display is not
-/// doubled.
+/// doubled. Every attempt, successful or not, is returned as a [`Call`] so the
+/// caller can record it.
 async fn ask(
     backend: &dyn CompletionBackend,
     prompt: &str,
     request: &EvaluationRequest,
     deltas: Option<&DeltaSink>,
-) -> Result<EvaluationOutput> {
+    config: &LlmConfig,
+) -> (Result<EvaluationOutput>, Vec<Call>) {
     let model = request.model_override.as_deref();
     let deltas = if request.stream { deltas } else { None };
+    let mut calls = Vec::new();
 
-    let first = complete_or_cancel(backend, prompt, model, true, deltas, request.cancel.clone())
-        .await
-        .map_err(CoreError::from)?;
+    let (first, call) = timed_call(
+        backend,
+        prompt,
+        model,
+        true,
+        deltas,
+        request.cancel.clone(),
+        config,
+        Task::Evaluation,
+    )
+    .await;
+    calls.push(call);
 
-    match parse_output(&first) {
-        Ok(output) => Ok(output),
+    let first = match first {
+        Ok(completion) => completion,
+        Err(error) => return (Err(CoreError::from(error)), calls),
+    };
+
+    match parse_output(&first.text) {
+        Ok(output) => (Ok(output), calls),
         Err(reason) => {
             tracing::warn!(%reason, "the evaluation reply was not usable; asking once more");
             let repair = format!(
                 "{prompt}\n\nYour previous reply could not be used: {reason}. Reply with only the \
                  JSON object described above, with no prose and no code fences."
             );
-            let second =
-                complete_or_cancel(backend, &repair, model, true, None, request.cancel.clone())
-                    .await
-                    .map_err(CoreError::from)?;
-            parse_output(&second).map_err(|reason| {
-                CoreError::Message(format!("the model's reply was not usable: {reason}"))
-            })
+            let (second, call) = timed_call(
+                backend,
+                &repair,
+                model,
+                true,
+                None,
+                request.cancel.clone(),
+                config,
+                Task::EvaluationRepair,
+            )
+            .await;
+            calls.push(call);
+
+            let result = match second {
+                Ok(completion) => parse_output(&completion.text).map_err(|reason| {
+                    CoreError::Message(format!("the model's reply was not usable: {reason}"))
+                }),
+                Err(error) => Err(CoreError::from(error)),
+            };
+            (result, calls)
         }
     }
 }
 
 fn normalized_chars(raw: &str) -> usize {
     text::plain_text(raw, usize::MAX).text.chars().count()
+}
+
+/// One provider call, timed, with its usage turned into a recordable [`Call`].
+///
+/// The clock runs around the whole attempt, so a streamed reply's duration is
+/// what the user waited for, and a failure has a duration too.
+#[allow(clippy::too_many_arguments)]
+async fn timed_call(
+    backend: &dyn CompletionBackend,
+    prompt: &str,
+    model: Option<&str>,
+    json_mode: bool,
+    deltas: Option<&DeltaSink>,
+    cancel: CancelToken,
+    config: &LlmConfig,
+    task: Task,
+) -> (std::result::Result<Completion, LlmError>, Call) {
+    let started = Instant::now();
+    let result = complete_or_cancel(backend, prompt, model, json_mode, deltas, cancel).await;
+    let duration_ms = elapsed_ms(started);
+
+    let call = match &result {
+        Ok(completion) => Call::completed(
+            config,
+            task,
+            &completion.usage,
+            prompt,
+            &completion.text,
+            duration_ms,
+        ),
+        Err(error) => Call::failed(config, task, prompt, error, duration_ms),
+    };
+
+    (result, call)
 }
 
 /// One provider call, raced against the request's stop token.
@@ -369,7 +449,7 @@ async fn complete_or_cancel(
     json_mode: bool,
     deltas: Option<&DeltaSink>,
     cancel: CancelToken,
-) -> std::result::Result<String, LlmError> {
+) -> std::result::Result<Completion, LlmError> {
     tokio::select! {
         biased;
         _ = cancel.wait() => Err(LlmError::Cancelled),

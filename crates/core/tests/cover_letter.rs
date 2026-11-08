@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use career_ops_core::cover_letter::{run_cover_letter, CoverLetterRequest};
-use career_ops_core::llm::{CancelToken, CompletionBackend, DeltaSink, LlmError};
+use career_ops_core::llm::{CancelToken, Completion, CompletionBackend, DeltaSink, LlmError};
 use career_ops_core::model::{
     Application, ApplicationStatus, FetchTier, JobDescription, QueueState,
 };
@@ -433,11 +433,11 @@ impl CompletionBackend for FakeBackend {
         _model: Option<&str>,
         json_mode: bool,
         _deltas: Option<&DeltaSink>,
-    ) -> Result<String, LlmError> {
+    ) -> Result<Completion, LlmError> {
         assert!(!json_mode, "a cover letter is free text, not JSON");
         self.prompts.lock().unwrap().push(prompt.to_string());
         match self.replies.lock().unwrap().pop_front() {
-            Some(Reply::Text(text)) => Ok(text),
+            Some(Reply::Text(text)) => Ok(Completion::text_only(text)),
             Some(Reply::Fail) => Err(LlmError::Transport("fake transport failure".into())),
             None => Err(LlmError::Transport("the fake ran out of replies".into())),
         }

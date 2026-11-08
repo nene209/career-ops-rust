@@ -20,6 +20,8 @@
 //! - [`client`]: builds the `rig` client, verifies a key, and reports status.
 //! - [`error`]: the application-level taxonomy `rig` errors map onto.
 //! - [`retry`]: attempts and delays for transient failures.
+//! - [`usage`]: what a call used and cost, and the [`Call`] recorded per
+//!   provider call.
 //! - [`keys`]: the OS-keychain namespace. API keys never touch the database.
 
 pub mod backend;
@@ -30,11 +32,13 @@ pub mod config;
 pub mod error;
 pub mod keys;
 pub mod retry;
+pub mod usage;
 
-pub use backend::CompletionBackend;
+pub use backend::{Completion, CompletionBackend};
 pub use cancel::CancelToken;
 pub use capabilities::{capabilities, ModelCapabilities, StructuredOutput};
 pub use client::{status, DeltaSink, LlmClient, LlmStatus};
 pub use config::{LlmConfig, LlmProvider};
 pub use error::LlmError;
 pub use retry::{with_retry, RetryPolicy};
+pub use usage::{Call, Outcome, Source, Task, Usage};
