@@ -1,10 +1,10 @@
 # Phase 3.2: Assisted Triage — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.22), §12
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.32), §12
 **Status:** Planned — not started
-**Last updated:** 2026-11-06
+**Last updated:** 2026-11-07
 **Duration:** 5–7 days
-**Depends on:** Phase 3 (`rig` integration, compact prompt conventions, `active_for_use`, `applications::ensure`, cassette test patterns), Phase 2.9 (queue state, preferences, `fetch_descriptions_batch`), Phase 2.7 (`cv_summary`)
+**Depends on:** Phase 3 (`rig` integration, compact prompt conventions, `active_for_use`, `applications::ensure`, cassette test patterns), Phase 3.1 (`core::llm::usage` and the `llm_usage` ledger, so a triage call records its tokens and cost like every other call), Phase 2.9 (queue state, preferences, `fetch_descriptions_batch`), Phase 2.7 (`cv_summary`)
 **Blocks:** nothing. The aggregator/web search idea remains out of scope and would be a separate, later phase if it ever happens.
 
 ---
@@ -16,6 +16,7 @@
 | v0.1 | Initial plan. Adds LLM-assisted triage on top of Phase 2.9's manual queue, and suggest-and-approve portal additions on top of Phase 2.6's registry. Every action is advisory: the agent proposes, the user approves. It is explicitly not an autonomous agent, and it does not add web search, an aggregator, or autonomous portal addition. One migration (0007) for triage provenance. |
 | v0.2 | The queue phase was renumbered from 3.1 to **Phase 2.9** and now lands before Phase 3, so this plan depends on 2.9 (queue, preferences) and Phase 3 (`rig`) rather than on a phase that came after it. Migration 0007 is unchanged: 2.9 takes 0005, Phase 3 takes 0006. |
 | v0.3 | Phase 2.9 shipped, so the two inputs this plan only assumed are now code. **The queue exists** (`job_descriptions.queue_state`, migration 0005) with the three values triage writes, and a row is hidden from the default view once it is `dismissed`, which is what makes a triage decision reviewable rather than destructive. **`manual::fetch_descriptions_batch` exists** (20 per click, cancellable, `details_needed` → `evaluate`), so a `worth_details` decision has a batch to hand the work to instead of a second implementation. `PipelineViewModel::set_queue` updates one row in place, and `set_queue_states` writes a batch, so the review UI can apply accepted decisions without a reload. Entry Conditions records all of it. |
+| v0.4 | **Phase 3.1 (LLM Usage Tracking) lands before this phase.** Its migration takes **0007**, so this plan's triage provenance moves to **0008**. Triage reuses the shipped seam: the one provider call is recorded in `llm_usage` with `task = 'triage'`, and `TriageReport.actual_cost_usd` is read from that row instead of a second cost derivation. Manual script §6c is already the Prompts section, so this plan's UI steps become **§6f** (Phase 3.1 takes §6e for Usage). |
 
 ---
 
@@ -45,7 +46,7 @@ The distinction is deliberate and comes from Phase 2's trust model: every fetch 
 | :--- | :--- |
 | Batch triage prompt (compact, derived from preferences + CV summary) | Autonomous crawling, autonomous portal addition, autonomous evaluation |
 | Structured output `TriageOutput` with per-job `{ decision, reason }` | Web search |
-| `triage_*` columns on `job_descriptions` (migration 0007) | An aggregator integration (a separate future phase if at all) |
+| `triage_*` columns on `job_descriptions` (migration 0008) | An aggregator integration (a separate future phase if at all) |
 | Triage batch service with cost/size estimate and cancellation | A triage dashboard or historical analytics |
 | Review UI in the Pipeline: agent decisions visible, override per row | Training or fine-tuning a triage model |
 | Portal suggestions with a review modal (approve → add portal) | Automatic approval based on confidence |
@@ -151,7 +152,7 @@ Anthropic · greenhouse · 24 open roles
 
 Approving adds the portal and (in a follow-up click) fetches it; skipping hides the row. Nothing is added without the user clicking Approve. The proposal does not include a fetch — Approve adds the portal, and the user can then use the Phase 2.8 controls to fetch.
 
-### 6. Migration 0007
+### 6. Migration 0008
 
 ```sql
 ALTER TABLE job_descriptions ADD COLUMN triage_decision TEXT;
@@ -216,13 +217,13 @@ pub struct TriageReport {
     pub model_used: String,
     pub input_chars: usize,
     pub estimated_cost_usd: f64,
-    pub actual_cost_usd: Option<f64>,
+    pub actual_cost_usd: Option<f64>,   // from the recorded llm_usage row
     pub elapsed: std::time::Duration,
 }
 ```
 
-2. Cost estimation from a token count and the model's current price (looked up in the capability registry from Phase 3's WS1).
-3. Application of decisions to `job_descriptions.queue_state` and `queue_reason` in a single transaction, plus the `triage_*` provenance columns.
+2. Cost estimation from a token count and the model's current price (looked up in the capability registry from Phase 3's WS1). The **actual** figure is not recomputed: the call is recorded in `llm_usage` (Phase 3.1) and the report reads that row, so triage and evaluation agree on how a cost is defined.
+3. Application of decisions to `job_descriptions.queue_state` and `queue_reason` in a single transaction, plus the `triage_*` provenance columns. The usage row is written best-effort before the decisions are applied: a failed or unusable reply still spent tokens, and its record must survive the refusal.
 4. A hard bound of 50 ids per call (100 with a config override). The UI enforces the bound; the service refuses anything larger with `TriageError::BatchTooLarge`.
 5. Cancellation via `AsyncTask` drop (the underlying call is not cancellable mid-request, but the application of decisions is skipped).
 6. A `applications::ensure` call is **not** made — triage does not create application rows. A `Skip` and an `Evaluate` are both queue-state changes; the row moves into the application lifecycle only when Phase 3's evaluation runs.
@@ -237,6 +238,7 @@ pub struct TriageReport {
 | A response with a missing id is rejected, not applied partially | Cassette test |
 | A response with an unknown enum value is rejected | Cassette test |
 | Cost is estimated before the call | Unit test |
+| The call writes one `llm_usage` row with `task = 'triage'` and the actual cost comes from it | Core test |
 | Cancellation applies no decisions | App test |
 
 ---
@@ -324,7 +326,7 @@ pub struct PortalSuggestion {
 
 **Estimated duration:** 0.5 day.
 
-1. Manual script §6c: run triage on a small batch, verify decisions and reasons, override a Skip, and add a suggested portal.
+1. Manual script §6f: run triage on a small batch, verify decisions and reasons, override a Skip, and add a suggested portal.
 2. `docs/LIVE_TESTS.md`: entry for the live triage test and the live suggestion test, with cassette recording commands.
 3. `docs/known-sites.md`: note that portal suggestions are suggestions; the user approves before adding.
 4. Full validation; parent plan v0.15 changelog and Phase 3.2 row.
@@ -343,7 +345,7 @@ pub struct PortalSuggestion {
 | App | End-to-end triage with a mocked LLM through `career_ops_app` |
 | Live (ignored) | One DeepSeek triage call; one suggestion call; indexed in `docs/LIVE_TESTS.md` |
 
-No new dependency beyond Phase 3's `rig`. One migration (0007).
+No new dependency beyond Phase 3's `rig`. One migration (0008).
 
 ---
 
@@ -367,10 +369,10 @@ No new dependency beyond Phase 3's `rig`. One migration (0007).
 3. Every triaged row records `triage_decision`, `triage_reason`, `triage_model`, `triage_prompt_hash`, `triaged_at`.
 4. The Triage UI shows the pre-call cost, the post-call summary, and a Triaged filter; every decision is overridable.
 5. Portal suggestions propose companies with engine, roles, and rationale; approval adds a portal through `known_sites::lookup`; nothing is added without approval.
-6. Migration 0007 applies to a 0006 database and preserves rows.
+6. Migration 0008 applies to a 0007 database and preserves rows.
 7. Offline suite, fmt, and clippy are clean.
 8. Cassette tests cover all four decisions and the rejection paths; live tests are indexed in `docs/LIVE_TESTS.md`.
-9. Manual script §6c, `docs/known-sites.md`, parent plan, and a short retrospective are updated.
+9. Manual script §6f, `docs/known-sites.md`, parent plan, and a short retrospective are updated.
 
 ---
 
