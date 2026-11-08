@@ -1,6 +1,6 @@
 # Live (Network) Tests
 
-**Last reviewed:** 2026-11-06
+**Last reviewed:** 2026-11-07
 **Why this file exists:** the default test suite must be offline, deterministic,
 and fast. A few tests cannot be any of those things because their subject is the
 outside world: a job board changed its JSON, a detail page is no longer served,
@@ -111,10 +111,18 @@ diff before committing; see `docs/llm-testing.md`):
 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test llm_eval_live -- --ignored --nocapture
 
+```bash
 # Re-record crates/core/tests/cassettes from a passing run.
 CAREER_OPS_RECORD_CASSETTES=1 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test llm_eval_live -- --ignored --nocapture
 ```
+
+**Usage ledger:** a live evaluation and letter also write `llm_usage` rows. The
+ignored tests use a throwaway vault, so those rows are not visible in the app;
+when a live evaluation is run through the app (manual §6e), the **Usage** screen
+should show `source = reported` for DeepSeek. A row that says `estimated` means
+the provider sent no usage block and the four-characters-per-token fallback ran.
+What the ledger stores and what the cost means are in `docs/usage.md`.
 
 The ATS adapters are gated by an environment variable rather than `#[ignore]`,
 so they run as normal tests that print "skipping" and return:
