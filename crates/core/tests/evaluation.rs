@@ -411,7 +411,7 @@ async fn an_evaluation_stores_provenance_and_moves_discovered_to_ready() {
 
     assert_eq!(result.match_score, 0.9);
     assert_eq!(result.recommendation, Recommendation::StrongMatch);
-    assert_eq!(result.model_used, "deepseek-chat");
+    assert_eq!(result.model_used, "deepseek-flash");
     assert_eq!(result.prompt_version, 1, "the seeded prompt is version 1");
     assert!(!result.prompt_hash.is_empty());
     assert!(result.input_chars > 0, "the prompt carried the description");

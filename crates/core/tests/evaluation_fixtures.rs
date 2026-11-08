@@ -150,7 +150,7 @@ async fn the_cover_letter_cassette_stays_within_the_prompt_rules() {
         .expect("get")
         .expect("letter");
     assert_eq!(stored.content, result.content);
-    assert_eq!(stored.model_used, "deepseek-chat");
+    assert_eq!(stored.model_used, "deepseek-flash");
     assert_eq!(stored.prompt_version, Some(1));
 
     // The letter saw the fenced posting, not markup.

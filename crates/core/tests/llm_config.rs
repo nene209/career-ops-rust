@@ -13,7 +13,7 @@ async fn the_llm_config_round_trips_through_settings() {
     let db = common::TestDb::new_raw().await;
 
     // A vault that has never opened the AI section uses the documented
-    // defaults: DeepSeek, `deepseek-chat`.
+    // defaults: DeepSeek, `deepseek-flash`.
     assert_eq!(
         LlmConfig::load(&db.pool).await.unwrap(),
         LlmConfig::default()
@@ -75,7 +75,7 @@ async fn saving_normalizes_an_empty_model() {
     .await
     .unwrap();
 
-    assert_eq!(saved.model, "deepseek-chat");
+    assert_eq!(saved.model, "deepseek-flash");
     assert_eq!(saved.temperature, 2.0);
     assert_eq!(LlmConfig::load(&db.pool).await.unwrap(), saved);
 

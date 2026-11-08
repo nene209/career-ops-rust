@@ -36,7 +36,7 @@ async fn a_cover_letter_is_stored_with_provenance() {
         .expect("write");
 
     assert_eq!(result.content, LETTER.trim());
-    assert_eq!(result.model_used, "deepseek-chat");
+    assert_eq!(result.model_used, "deepseek-flash");
     assert_eq!(result.prompt_version, 1, "the seeded prompt is version 1");
     assert!(!result.prompt_hash.is_empty());
     assert!(result.input_chars > 0, "the assembled prompt was counted");
@@ -47,7 +47,7 @@ async fn a_cover_letter_is_stored_with_provenance() {
         .expect("letter");
     assert_eq!(stored.application_id, result.application_id);
     assert_eq!(stored.content, LETTER.trim());
-    assert_eq!(stored.model_used, "deepseek-chat");
+    assert_eq!(stored.model_used, "deepseek-flash");
     assert_eq!(stored.prompt_version, Some(1));
     assert_eq!(
         stored.prompt_hash.as_deref(),

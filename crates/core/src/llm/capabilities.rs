@@ -86,6 +86,11 @@ fn deepseek(model: &str) -> ModelCapabilities {
     // turn and, as of the V3 generation, did not offer function calling or
     // JSON mode. Erring unavailable means WS3 refuses rather than sending a
     // request the model cannot answer.
+    //
+    // `deepseek-flash` is the default since Phase 3.1 and is a reasoning
+    // model too, but its catalog entry lists structured output, so it takes
+    // the chat path below. `deepseek-chat` is the alias earlier builds
+    // stored; both are named here so a future rename is a deliberate change.
     if model.contains("reasoner") {
         return ModelCapabilities {
             structured_output: StructuredOutput::Unavailable,
@@ -99,8 +104,10 @@ fn deepseek(model: &str) -> ModelCapabilities {
         structured_output: StructuredOutput::JsonObject,
         streaming: true,
         tools: true,
-        // DeepSeek publishes 64K for the chat models. Revisit when it
-        // publishes otherwise; the character budget is the enforced limit.
+        // DeepSeek publishes 64K for the chat models; the catalog lists 1M
+        // for Flash. Keep the smaller number: the enforced limit is the
+        // character budget in `LlmConfig`, so understating the window only
+        // refuses a prompt the app never builds.
         context_window: Some(65_536),
     }
 }
@@ -128,8 +135,17 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_model_gets_the_provider_defaults() {
+    fn the_default_model_takes_json_mode_and_tools() {
         let found = capabilities(LlmProvider::DeepSeek, "deepseek-flash");
+        assert_eq!(found.structured_output, StructuredOutput::JsonObject);
+        assert!(found.streaming);
+        assert!(found.tools);
+        assert_eq!(found.context_window, Some(65_536));
+    }
+
+    #[test]
+    fn an_unknown_model_gets_the_provider_defaults() {
+        let found = capabilities(LlmProvider::DeepSeek, "deepseek-v9-unlisted");
         assert_eq!(found.structured_output, StructuredOutput::JsonObject);
         assert!(found.tools);
     }

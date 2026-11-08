@@ -4403,7 +4403,7 @@ mod tests {
         wait_until(&mut app, &ctx, |app| {
             app.settings_task.is_none() && app.settings_loaded
         });
-        assert_eq!(app.settings.llm.model, "deepseek-chat");
+        assert_eq!(app.settings.llm.model, "deepseek-flash");
         assert!(!app.settings.llm.has_api_key);
 
         app.handle_settings_action(SettingsAction::SaveLlm(LlmConfig {

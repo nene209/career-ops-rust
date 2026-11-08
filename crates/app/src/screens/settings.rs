@@ -217,7 +217,7 @@ fn ai_section(
 
     labelled_input(ui, "Model", &mut view_model.llm.model, false);
     ui.label(
-        RichText::new("The model name the provider serves, for example deepseek-chat.")
+        RichText::new("The model name the provider serves, for example deepseek-flash.")
             .weak()
             .small(),
     );

@@ -274,7 +274,7 @@ mod tests {
             .expect("client");
 
         assert_eq!(client.provider(), LlmProvider::DeepSeek);
-        assert_eq!(client.model(), "deepseek-chat");
+        assert_eq!(client.model(), "deepseek-flash");
     }
 
     #[test]

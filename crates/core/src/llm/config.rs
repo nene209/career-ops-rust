@@ -69,12 +69,15 @@ impl LlmProvider {
         matches!(self, Self::DeepSeek)
     }
 
-    /// The model DeepSeek's API serves under its stable alias. `rig` also
-    /// exposes `deepseek-flash` and the versioned names; the alias is the
-    /// default because DeepSeek keeps it pointed at the current chat model.
+    /// The model DeepSeek's API serves as its general-purpose default.
+    ///
+    /// `deepseek-flash` is the active model in `rig`'s catalog, which is also
+    /// where a price comes from when the provider does not report one. The
+    /// older `deepseek-chat` alias is not listed there, so a configuration
+    /// still holding it is preserved but cannot be priced.
     pub fn default_model(self) -> Option<&'static str> {
         match self {
-            Self::DeepSeek => Some("deepseek-chat"),
+            Self::DeepSeek => Some("deepseek-flash"),
             _ => None,
         }
     }
@@ -247,10 +250,10 @@ mod tests {
     }
 
     #[test]
-    fn the_default_is_deepseek_chat() {
+    fn the_default_is_deepseek_flash() {
         let config = LlmConfig::default();
         assert_eq!(config.provider, LlmProvider::DeepSeek);
-        assert_eq!(config.model, "deepseek-chat");
+        assert_eq!(config.model, "deepseek-flash");
         assert!(config.max_tokens.is_none());
         assert_eq!(config.max_job_chars, DEFAULT_MAX_JOB_CHARS);
     }
@@ -267,7 +270,7 @@ mod tests {
         }
         .sanitized();
 
-        assert_eq!(config.model, "deepseek-chat");
+        assert_eq!(config.model, "deepseek-flash");
         assert_eq!(config.temperature, 2.0);
         assert_eq!(config.max_job_chars, 1_000);
         assert_eq!(config.thin_description_chars, 1);
