@@ -50,11 +50,13 @@ use career_ops_core::portals::service::{
     PortalWithHealth,
 };
 use career_ops_core::preferences::Preferences;
+use career_ops_core::prompt_render;
 use career_ops_core::repo::applications as application_repo;
 use career_ops_core::repo::cv_entries as cv_entry_repo;
 use career_ops_core::repo::job_descriptions as job_repo;
 use career_ops_core::repo::portals::{self as portal_repo, NewPortal, RenderMode};
 use career_ops_core::repo::profile::{self as profile_repo, ProfileDetails};
+use career_ops_core::repo::prompts::{self as prompt_repo, PromptThread};
 use career_ops_core::{CoreError, Result as CoreResult};
 use tokio::runtime::Runtime;
 
@@ -72,12 +74,14 @@ use crate::screens::portals::{
     ConfigPreview, ManualSuccess, PortalForm, PortalFormData, PortalModal, PortalsAction,
     PortalsRenderState, PortalsView, PreviewInputs, PreviewSample, StalledWalk,
 };
+use crate::screens::prompts::{PromptsAction, PromptsRenderState};
 use crate::screens::settings::{SettingsAction, SettingsRenderState};
 use crate::state::{AppState, Screen};
 use crate::view_models::cv_profile::{CvEntryDraft, CvProfileViewModel};
 use crate::view_models::logs::LogsView;
 use crate::view_models::pipeline::{PipelineViewModel, StatusLabel};
 use crate::view_models::portals::{BatchProgress, PortalsViewModel};
+use crate::view_models::prompts::{PromptDetail, PromptSelection, PromptsView, PromptsViewModel};
 use crate::view_models::settings::SettingsViewModel;
 
 type StateTask = AsyncTask<(AppState, CoreResult<()>)>;
@@ -99,6 +103,23 @@ type PipelineLoad = CoreResult<(
 /// render both from one task.
 type CvProfileLoad = CoreResult<(Profile, Vec<CvEntry>)>;
 
+/// Every prompt thread, for the Prompt Manager's list.
+type PromptsLoad = CoreResult<Vec<PromptThread>>;
+
+/// Why a prompt was written, so the message says which action happened.
+#[derive(Debug, Clone, Copy)]
+enum PromptWriteKind {
+    Saved,
+    Duplicated,
+    Reverted,
+}
+
+/// A finished prompt write and what caused it.
+struct PromptWriteOutcome {
+    prompt: career_ops_core::model::Prompt,
+    kind: PromptWriteKind,
+}
+
 /// How many recent jobs the Pipeline loads at once.
 ///
 /// Phase 2.1 renders the list in a plain `ScrollArea`; a bounded page keeps the
@@ -113,6 +134,7 @@ enum ScreenAction {
     Portals(PortalsAction),
     Pipeline(PipelineAction),
     CvProfile(CvProfileAction),
+    Prompts(PromptsAction),
     Settings(SettingsAction),
     Logs(LogsAction),
 }
@@ -264,6 +286,21 @@ pub struct CareerOpsApp {
     cv_profile_entry_task: Option<EntryTask>,
     cv_profile_deleting: Option<i64>,
 
+    /// The Prompt Manager: the thread list, the selected detail, and the
+    /// editor state for a user copy.
+    prompts: PromptsViewModel,
+    prompts_view: PromptsView,
+    prompts_loaded: bool,
+    prompts_error: Option<String>,
+    prompts_message: Option<String>,
+    prompts_task: Option<AsyncTask<PromptsLoad>>,
+    prompt_detail: Option<PromptDetail>,
+    /// The selection the running detail load is for. A user can select another
+    /// thread while it runs; its result must not overwrite the new pane.
+    prompt_detail_for: Option<PromptSelection>,
+    prompt_detail_task: Option<AsyncTask<CoreResult<PromptDetail>>>,
+    prompt_write_task: Option<AsyncTask<CoreResult<PromptWriteOutcome>>>,
+
     /// The acquisition preferences form and the value storage holds.
     settings: SettingsViewModel,
     settings_loaded: bool,
@@ -376,6 +413,16 @@ impl CareerOpsApp {
             cv_profile_save_task: None,
             cv_profile_entry_task: None,
             cv_profile_deleting: None,
+            prompts: PromptsViewModel::default(),
+            prompts_view: PromptsView::default(),
+            prompts_loaded: false,
+            prompts_error: None,
+            prompts_message: None,
+            prompts_task: None,
+            prompt_detail: None,
+            prompt_detail_for: None,
+            prompt_detail_task: None,
+            prompt_write_task: None,
             settings: SettingsViewModel::default(),
             settings_loaded: false,
             settings_error: None,
@@ -969,6 +1016,17 @@ impl CareerOpsApp {
         self.cv_profile_save_task = None;
         self.cv_profile_entry_task = None;
         self.cv_profile_deleting = None;
+
+        self.prompts = PromptsViewModel::default();
+        self.prompts_view = PromptsView::default();
+        self.prompts_loaded = false;
+        self.prompts_error = None;
+        self.prompts_message = None;
+        self.prompts_task = None;
+        self.prompt_detail = None;
+        self.prompt_detail_for = None;
+        self.prompt_detail_task = None;
+        self.prompt_write_task = None;
 
         self.settings = SettingsViewModel::default();
         self.settings_loaded = false;
@@ -2889,6 +2947,354 @@ impl CareerOpsApp {
     // ------------------------------------------------------------------
     // End CV / Profile
     // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // Prompts
+    // ------------------------------------------------------------------
+
+    /// Execute an intent emitted by the Prompt Manager.
+    ///
+    /// Public so tests can drive the same path the UI uses without rendering.
+    pub fn handle_prompts_action(&mut self, action: PromptsAction) {
+        match action {
+            PromptsAction::Reload => {
+                self.prompts_loaded = false;
+                self.prompt_detail = None;
+                self.start_prompts_load();
+            }
+            PromptsAction::Select(selection) => {
+                self.prompts_view.select(selection, None);
+                self.prompt_detail = None;
+                self.prompts_error = None;
+                self.prompts_message = None;
+                self.start_prompt_detail_load();
+            }
+            PromptsAction::SaveDraft(content) => self.save_prompt_draft(content),
+            PromptsAction::DuplicateAsUser => self.duplicate_prompt_as_user(),
+            PromptsAction::ShowVersion(version) => {
+                self.prompts_view
+                    .show_version(version, self.prompt_detail.as_ref());
+            }
+            PromptsAction::RevertToVersion(version_id) => self.revert_prompt(version_id),
+            PromptsAction::SetCompare(on) => {
+                self.prompts_view
+                    .set_compare(on, self.prompt_detail.as_ref());
+            }
+        }
+    }
+
+    fn start_prompts_load(&mut self) {
+        if self.prompts_task.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.prompts_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.prompts_error = None;
+        self.prompts_task = Some(self.spawn(async move { prompt_repo::list_threads(&pool).await }));
+    }
+
+    fn poll_prompts_task(&mut self, ctx: &egui::Context) {
+        let poll = match self.prompts_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.prompts_task = None;
+                match result {
+                    Ok(threads) => {
+                        self.prompts = PromptsViewModel::from_threads(threads);
+                        self.prompts_loaded = true;
+                        self.prompts_error = None;
+                        // A reload (including one after a write) must refresh the
+                        // selected thread's versions as well as the list.
+                        if self.prompts_view.selected.is_some() {
+                            self.start_prompt_detail_load();
+                        }
+                    }
+                    Err(error) => self.prompts_error = Some(error.to_string()),
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.prompts_task = None;
+                self.prompts_error = Some("The prompt list was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn start_prompt_detail_load(&mut self) {
+        if self.prompt_detail_task.is_some() {
+            return;
+        }
+        let Some(selection) = self.prompts_view.selected.clone() else {
+            return;
+        };
+        let Some(pool) = self.pool() else {
+            self.prompts_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.prompt_detail_for = Some(selection.clone());
+        self.prompt_detail_task = Some(self.spawn(async move {
+            let versions =
+                prompt_repo::list_versions(&pool, &selection.name, selection.is_system).await?;
+            let category = versions
+                .first()
+                .map(|prompt| prompt.category.clone())
+                .unwrap_or_default();
+            let mut usage = HashMap::new();
+            for version in &versions {
+                usage.insert(
+                    version.id,
+                    prompt_repo::usage(&pool, &version.content_hash).await?,
+                );
+            }
+            Ok(PromptDetail::from_versions(
+                &selection.name,
+                &category,
+                selection.is_system,
+                versions,
+                &usage,
+            ))
+        }));
+    }
+
+    fn poll_prompt_detail(&mut self, ctx: &egui::Context) {
+        let poll = match self.prompt_detail_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.prompt_detail_task = None;
+                let for_selection = self.prompt_detail_for.take();
+                // A selection made while this load ran wins; drop the stale
+                // result and load the thread the user is looking at now.
+                if for_selection != self.prompts_view.selected {
+                    self.start_prompt_detail_load();
+                    ctx.request_repaint();
+                    return;
+                }
+                match result {
+                    Ok(detail) => {
+                        let same_selection =
+                            self.prompts_view
+                                .selected
+                                .as_ref()
+                                .is_some_and(|selection| {
+                                    selection.name == detail.name
+                                        && selection.is_system == detail.is_system
+                                });
+                        if same_selection {
+                            // The editor follows the stored latest version, but
+                            // never over anything the user is typing.
+                            if !detail.is_system && !self.prompts_view.dirty {
+                                if let Some(latest) = detail.latest() {
+                                    if self.prompts_view.selected_version.is_none() {
+                                        self.prompts_view.editor = latest.content.clone();
+                                    }
+                                }
+                            }
+                            if self
+                                .prompts_view
+                                .selected_version
+                                .is_some_and(|id| detail.version(id).is_none())
+                            {
+                                self.prompts_view.selected_version = None;
+                            }
+                        }
+                        self.prompt_detail = Some(detail);
+                        self.prompts_error = None;
+                    }
+                    Err(error) => self.prompts_error = Some(error.to_string()),
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.prompt_detail_task = None;
+                self.prompt_detail_for = None;
+                self.prompts_error = Some("The prompt detail was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Save the editor's content as a new version of the selected user thread.
+    fn save_prompt_draft(&mut self, content: String) {
+        let Some(detail) = self.prompt_detail.as_ref() else {
+            self.prompts_error = Some("Select a prompt first.".into());
+            return;
+        };
+        if detail.is_system {
+            self.prompts_error =
+                Some("System prompts are read-only. Duplicate one to edit your own copy.".into());
+            return;
+        }
+
+        let name = detail.name.clone();
+        let category = detail.category.clone();
+        let unchanged = detail
+            .latest()
+            .is_some_and(|latest| latest.content == content);
+
+        if content.trim().is_empty() {
+            self.prompts_error = Some("The prompt is empty.".into());
+            return;
+        }
+        if unchanged {
+            self.prompts_message = Some("No changes to save.".into());
+            return;
+        }
+        if let Err(error) = prompt_render::validate(&content) {
+            // Only the categories the app renders have a closed variable set;
+            // the reference prompts may use their own placeholder syntax.
+            if prompt_render::variables_for_category(&category).is_some() {
+                self.prompts_error = Some(format!("This prompt cannot be saved: {error}"));
+                return;
+            }
+        }
+
+        self.start_prompt_write(name, category, content, PromptWriteKind::Saved);
+    }
+
+    /// Create an editable copy of the selected system prompt.
+    fn duplicate_prompt_as_user(&mut self) {
+        let Some(detail) = self.prompt_detail.as_ref() else {
+            self.prompts_error = Some("Select a prompt first.".into());
+            return;
+        };
+        if !detail.is_system {
+            self.prompts_error = Some("This prompt already has an editable copy.".into());
+            return;
+        }
+        let Some(latest) = detail.latest() else {
+            self.prompts_error = Some("This prompt has no versions to copy.".into());
+            return;
+        };
+
+        let name = detail.name.clone();
+        let category = detail.category.clone();
+        let content = latest.content.clone();
+        self.start_prompt_write(name, category, content, PromptWriteKind::Duplicated);
+    }
+
+    /// Save a historical version's content as the next version.
+    fn revert_prompt(&mut self, version_id: i64) {
+        let Some(detail) = self.prompt_detail.as_ref() else {
+            self.prompts_error = Some("Select a prompt first.".into());
+            return;
+        };
+        if detail.is_system {
+            self.prompts_error =
+                Some("System prompts are read-only. Duplicate one to edit your own copy.".into());
+            return;
+        }
+        let Some(version) = detail.version(version_id) else {
+            self.prompts_error = Some("That version is no longer loaded.".into());
+            return;
+        };
+
+        let name = detail.name.clone();
+        let category = detail.category.clone();
+        let content = version.content.clone();
+        self.start_prompt_write(name, category, content, PromptWriteKind::Reverted);
+    }
+
+    fn start_prompt_write(
+        &mut self,
+        name: String,
+        category: String,
+        content: String,
+        kind: PromptWriteKind,
+    ) {
+        if self.prompt_write_task.is_some() {
+            return;
+        }
+        let Some(pool) = self.pool() else {
+            self.prompts_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.prompts_error = None;
+        self.prompts_message = None;
+        self.prompt_write_task = Some(self.spawn(async move {
+            let prompt =
+                prompt_repo::create_version(&pool, &name, &category, &content, false).await?;
+            Ok(PromptWriteOutcome { prompt, kind })
+        }));
+    }
+
+    fn poll_prompt_write(&mut self, ctx: &egui::Context) {
+        let poll = match self.prompt_write_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+
+        match poll {
+            TaskPoll::Pending => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            TaskPoll::Ready(result) => {
+                self.prompt_write_task = None;
+                match result {
+                    Ok(outcome) => {
+                        let name = outcome.prompt.name.clone();
+                        let version = outcome.prompt.version;
+                        self.prompts_message = Some(match outcome.kind {
+                            PromptWriteKind::Saved => {
+                                format!("Saved `{name}` as version {version}.")
+                            }
+                            PromptWriteKind::Duplicated => format!(
+                                "Created your copy of `{name}` at version {version}. The system \
+                                 prompt is unchanged and stays available."
+                            ),
+                            PromptWriteKind::Reverted => {
+                                format!(
+                                    "Saved `{name}` as version {version} from the earlier text."
+                                )
+                            }
+                        });
+
+                        // Follow the write: the new version is the user copy, so
+                        // select that thread and let the reload refresh both panes.
+                        self.prompts_view.selected =
+                            Some(PromptSelection::new(outcome.prompt.name.clone(), false));
+                        self.prompts_view.selected_version = None;
+                        self.prompts_view.dirty = false;
+                        self.prompts_view.editor = outcome.prompt.content.clone();
+                        self.prompt_detail = None;
+                        self.prompts_loaded = false;
+                        self.start_prompts_load();
+                    }
+                    Err(error) => self.prompts_error = Some(error.to_string()),
+                }
+                ctx.request_repaint();
+            }
+            TaskPoll::Cancelled => {
+                self.prompt_write_task = None;
+                self.prompts_error = Some("The prompt write was interrupted.".into());
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // End Prompts
+    // ------------------------------------------------------------------
 }
 
 impl Drop for CareerOpsApp {
@@ -3148,6 +3554,9 @@ impl eframe::App for CareerOpsApp {
                 self.poll_cv_profile_task(ui.ctx());
                 self.poll_cv_profile_save(ui.ctx());
                 self.poll_cv_profile_entry(ui.ctx());
+                self.poll_prompts_task(ui.ctx());
+                self.poll_prompt_detail(ui.ctx());
+                self.poll_prompt_write(ui.ctx());
                 self.poll_settings_task(ui.ctx());
                 self.poll_preferences_save(ui.ctx());
                 self.poll_llm_tasks(ui.ctx());
@@ -3187,6 +3596,14 @@ impl eframe::App for CareerOpsApp {
                     && self.cv_profile_error.is_none()
                 {
                     self.start_cv_profile_load();
+                }
+
+                if self.navigation.current() == MainScreen::Prompts
+                    && self.prompts_task.is_none()
+                    && !self.prompts_loaded
+                    && self.prompts_error.is_none()
+                {
+                    self.start_prompts_load();
                 }
 
                 if self.navigation.current() == MainScreen::Settings
@@ -3233,6 +3650,13 @@ impl eframe::App for CareerOpsApp {
                     saving: self.cv_profile_save_task.is_some()
                         || self.cv_profile_entry_task.is_some(),
                     deleting: self.cv_profile_deleting,
+                };
+                let prompts_state = PromptsRenderState {
+                    loading: self.prompts_task.is_some(),
+                    detail_loading: self.prompt_detail_task.is_some(),
+                    writing: self.prompt_write_task.is_some(),
+                    error: self.prompts_error.as_deref(),
+                    message: self.prompts_message.as_deref(),
                 };
 
                 let llm_line = self.llm_status.as_ref().map(llm_status_line);
@@ -3285,6 +3709,9 @@ impl eframe::App for CareerOpsApp {
                 let pipeline_view = &mut self.pipeline_view;
                 let cv_profile = &mut self.cv_profile;
                 let cv_profile_view = &mut self.cv_profile_view;
+                let prompts = &self.prompts;
+                let prompt_detail = self.prompt_detail.as_ref();
+                let prompts_view = &mut self.prompts_view;
                 let settings = &mut self.settings;
                 let logs_snapshot = &self.logs_snapshot;
                 let logs_view = &mut self.logs_view;
@@ -3307,6 +3734,14 @@ impl eframe::App for CareerOpsApp {
                                 cv_profile_state,
                             )
                             .map(ScreenAction::CvProfile),
+                            MainScreen::Prompts => screens::prompts::show(
+                                ui,
+                                prompts,
+                                prompt_detail,
+                                prompts_view,
+                                prompts_state,
+                            )
+                            .map(ScreenAction::Prompts),
                             MainScreen::Logs => {
                                 screens::logs::show(ui, logs_snapshot, logs_view, logs_state)
                                     .map(ScreenAction::Logs)
@@ -3314,10 +3749,6 @@ impl eframe::App for CareerOpsApp {
                             MainScreen::Settings => {
                                 screens::settings::show(ui, settings, settings_state)
                                     .map(ScreenAction::Settings)
-                            }
-                            other => {
-                                screens::shell::placeholder(ui, other);
-                                None
                             }
                         }
                     });
@@ -3336,6 +3767,7 @@ impl eframe::App for CareerOpsApp {
                     Some(ScreenAction::Portals(action)) => self.handle_portals_action(action),
                     Some(ScreenAction::Pipeline(action)) => self.handle_pipeline_action(action),
                     Some(ScreenAction::CvProfile(action)) => self.handle_cv_profile_action(action),
+                    Some(ScreenAction::Prompts(action)) => self.handle_prompts_action(action),
                     Some(ScreenAction::Settings(action)) => self.handle_settings_action(action),
                     Some(ScreenAction::Logs(action)) => self.handle_logs_action(action),
                     None => {}
@@ -4144,6 +4576,9 @@ mod tests {
             app.poll_cv_profile_task(ctx);
             app.poll_cv_profile_save(ctx);
             app.poll_cv_profile_entry(ctx);
+            app.poll_prompts_task(ctx);
+            app.poll_prompt_detail(ctx);
+            app.poll_prompt_write(ctx);
             app.poll_settings_task(ctx);
             app.poll_preferences_save(ctx);
             app.poll_llm_tasks(ctx);
@@ -5428,6 +5863,245 @@ mod tests {
             "{:?}",
             app.pipeline_error
         );
+    }
+
+    /// The whole Prompt Manager flow: duplicate a system prompt, edit the copy,
+    /// and revert to an earlier version. Every write adds a version; nothing is
+    /// overwritten.
+    #[test]
+    fn prompt_manager_duplicates_edits_and_reverts() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+        let pool = app.pool().expect("pool");
+
+        app.handle_prompts_action(PromptsAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.prompts_loaded && app.prompts_task.is_none()
+        });
+        assert!(app.prompts.thread("evaluate", true).is_some());
+        assert!(
+            app.prompts.thread("evaluate", false).is_none(),
+            "a fresh install has no user copy"
+        );
+
+        app.handle_prompts_action(PromptsAction::Select(PromptSelection::new(
+            "evaluate", true,
+        )));
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_detail_task.is_none()
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.is_system)
+        });
+        let system_content = app
+            .prompt_detail
+            .as_ref()
+            .and_then(|detail| detail.latest())
+            .map(|version| version.content.clone())
+            .expect("system content");
+
+        // A system prompt cannot be saved in place.
+        app.handle_prompts_action(PromptsAction::SaveDraft(system_content.clone()));
+        assert!(
+            app.prompts_error
+                .as_deref()
+                .is_some_and(|error| error.contains("read-only")),
+            "{:?}",
+            app.prompts_error
+        );
+        assert!(app.prompt_write_task.is_none());
+
+        // Duplicate it; the app follows the write to the new user thread.
+        app.handle_prompts_action(PromptsAction::DuplicateAsUser);
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none()
+                && app.prompts_task.is_none()
+                && app.prompt_detail_task.is_none()
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| !detail.is_system)
+        });
+
+        let user = app
+            .prompts
+            .thread("evaluate", false)
+            .expect("the user thread now lists")
+            .clone();
+        assert!(user.in_use, "the copy is what the pipeline will send");
+        assert!(
+            !app.prompts
+                .thread("evaluate", true)
+                .expect("system thread")
+                .in_use,
+            "the system row stays as reference"
+        );
+        assert_eq!(
+            app.prompts_message
+                .as_deref()
+                .map(|m| m.starts_with("Created your copy")),
+            Some(true),
+            "{:?}",
+            app.prompts_message
+        );
+
+        let versions = app
+            .runtime()
+            .block_on(prompt_repo::list_versions(&pool, "evaluate", false))
+            .expect("versions");
+        assert_eq!(versions.len(), 1, "the copy starts at version 1");
+        assert_eq!(versions[0].content, system_content);
+
+        // Edit and save: a second version, still user-owned.
+        let edited = format!("{system_content}\n\nEdited marker.");
+        app.handle_prompts_action(PromptsAction::SaveDraft(edited.clone()));
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none()
+                && app.prompts_task.is_none()
+                && app.prompt_detail_task.is_none()
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.versions.len() == 2)
+        });
+
+        let versions = app
+            .runtime()
+            .block_on(prompt_repo::list_versions(&pool, "evaluate", false))
+            .expect("versions");
+        assert_eq!(versions.len(), 2, "saving never overwrites");
+        assert_eq!(versions[0].content, edited);
+        let active = app
+            .runtime()
+            .block_on(prompt_repo::active_for_use(&pool, "evaluate"))
+            .expect("resolve")
+            .expect("prompt");
+        assert_eq!(
+            active.content, edited,
+            "the user copy is used, not the system prompt"
+        );
+
+        // Revert the first version's content forward as version 3.
+        let oldest = versions.last().expect("oldest version").id;
+        app.handle_prompts_action(PromptsAction::ShowVersion(Some(oldest)));
+        assert_eq!(app.prompts_view.selected_version, Some(oldest));
+        app.handle_prompts_action(PromptsAction::RevertToVersion(oldest));
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none()
+                && app.prompts_task.is_none()
+                && app.prompt_detail_task.is_none()
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.versions.len() == 3)
+        });
+
+        let versions = app
+            .runtime()
+            .block_on(prompt_repo::list_versions(&pool, "evaluate", false))
+            .expect("versions");
+        assert_eq!(versions.len(), 3);
+        assert_eq!(
+            versions[0].content, system_content,
+            "revert writes the old text as a new version"
+        );
+        assert!(
+            app.prompts_message
+                .as_deref()
+                .is_some_and(|message| message.contains("version 3")),
+            "{:?}",
+            app.prompts_message
+        );
+    }
+
+    /// Validation runs on save: an unknown variable is refused before a write,
+    /// and a reference category is left alone.
+    #[test]
+    fn prompt_manager_rejects_an_unknown_variable() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+        let pool = app.pool().expect("pool");
+
+        app.runtime()
+            .block_on(prompt_repo::create_version(
+                &pool,
+                "evaluate",
+                "evaluate",
+                "Use {{cv_summary}}.",
+                false,
+            ))
+            .expect("user copy");
+
+        app.handle_prompts_action(PromptsAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.prompts_loaded && app.prompts_task.is_none()
+        });
+        app.handle_prompts_action(PromptsAction::Select(PromptSelection::new(
+            "evaluate", false,
+        )));
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_detail_task.is_none() && app.prompt_detail.is_some()
+        });
+
+        app.handle_prompts_action(PromptsAction::SaveDraft("Use {{not_a_variable}}.".into()));
+        assert!(
+            app.prompts_error
+                .as_deref()
+                .is_some_and(|error| error.contains("unknown variable")),
+            "{:?}",
+            app.prompts_error
+        );
+        assert!(app.prompt_write_task.is_none(), "nothing was written");
+        let versions = app
+            .runtime()
+            .block_on(prompt_repo::list_versions(&pool, "evaluate", false))
+            .expect("versions");
+        assert_eq!(versions.len(), 1);
+
+        // A reference category has no closed variable set, so the same text is
+        // allowed there (the PDF template genuinely uses `{{PHOTO}}`).
+        app.runtime()
+            .block_on(prompt_repo::create_version(
+                &pool,
+                "pdf",
+                "render",
+                "{{PHOTO}}",
+                false,
+            ))
+            .expect("pdf copy");
+        app.handle_prompts_action(PromptsAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.prompts_loaded && app.prompts_task.is_none()
+        });
+        app.handle_prompts_action(PromptsAction::Select(PromptSelection::new("pdf", false)));
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_detail_task.is_none()
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.name == "pdf")
+        });
+        app.handle_prompts_action(PromptsAction::SaveDraft("{{PHOTO}} plus {{NAME}}".into()));
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none() && app.prompts_task.is_none()
+        });
+        assert!(
+            app.prompts_error.is_none(),
+            "a reference category is not validated: {:?}",
+            app.prompts_error
+        );
+        let versions = app
+            .runtime()
+            .block_on(prompt_repo::list_versions(&pool, "pdf", false))
+            .expect("versions");
+        assert_eq!(versions.len(), 2);
     }
 
     /// A complete batch, a partial one, a stopped one and a capped one have to

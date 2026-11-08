@@ -198,6 +198,23 @@ refusal.
 | 6b.7 | ✅ Open a row's detail view and click **Dismiss**. | The header reports "Dismissed. Find it again under the Dismissed filter.", the detail view returns to the list, and the row disappears from **All** but is still there under **Dismissed**. Nothing is deleted: a portal fetch does not need to bring it back. |
 | 6b.8 | Flag a row whose posting page has no extractable description (a dead or blocked URL) and run **Fetch descriptions**. 🌐 | The header reports how many failed and exits with the first cause, e.g. "One description could not be fetched: …", and that row is still badged "Details needed". The Logs screen has one `description fetch failed` line naming the job and the cause. |
 
+## 6c. Prompts
+
+A prompt is a thread per `(name, owner)`; the user's copy wins and the shipped
+row stays as reference. Version history is append-only, so a report always
+points at the text that produced it.
+
+| # | Step | Expected |
+| :-- | :--- | :--- |
+| 6c.1 | Select **Prompts**. | The left pane lists the seeded prompts grouped by category (`shared`, `evaluate`, `scan`, `render`, `cover_letter`, `utility`), each with its owner, latest version, version count, and date. The row the app will use is marked `(in use)`. Nothing is selected yet. |
+| 6c.2 | Select **evaluate** under System. | The right pane names the category and says **System · read-only**. The content is shown in a monospace frame with no editor, and the only action is **Duplicate as my copy**. |
+| 6c.3 | Click **Duplicate as my copy**. | The header reports "Created your copy of `evaluate` at version 1…", the user row appears marked `(in use)`, the system row loses the marker and stays listed, and the detail switches to the new copy with an editor. |
+| 6c.4 | Change a sentence in **Prompt content** and click **Save new version**. | "Saved `evaluate` as version 2." appears, the version list gains v2, and the editor reloads with the saved text. **Save new version** is disabled until the text changes again. |
+| 6c.5 | Click **v1** in the version list, then tick **Compare with current**. | The content shows v1 read-only with **Back to latest** and **Revert to this version**. The diff marks the earlier line as removed and the current line as added. **Used by** lists nothing for a version that has never been sent. |
+| 6c.6 | Click **Revert to this version**. | "Saved `evaluate` as version 3 from the earlier text." appears; v3 is the old content as a new row, and v2 and v1 are still listed. |
+| 6c.7 | Replace the content with `{{not_a_variable}}` and click **Save new version**. | The save is refused with a message naming the unknown variable and the five that exist; no version is added. |
+| 6c.8 | Select **pdf** (category `render`) and duplicate it. | The editor accepts `{{PHOTO}}`: reference categories are not rendered by the app, and the pane says so instead of listing variables. |
+
 ## 7. Idle behaviour
 
 | # | Step | Expected |

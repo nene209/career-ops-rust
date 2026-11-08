@@ -80,6 +80,133 @@ pub async fn active_for_use(pool: &SqlitePool, name: &str) -> Result<Option<Prom
     latest(pool, name, true).await
 }
 
+/// One owner's latest version of a prompt, with the numbers the list shows.
+///
+/// The Prompt Manager lists a row per `(name, is_system)`: a user copy and the
+/// shipped system prompt are different threads with independent versions, so
+/// rendering them as one row would hide which one `active_for_use` picks.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PromptThread {
+    pub name: String,
+    pub category: String,
+    pub is_system: bool,
+    /// The id of the latest version in this thread.
+    pub latest_id: i64,
+    pub latest_version: i64,
+    pub version_count: i64,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+/// Which table a usage record came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptUsageKind {
+    Evaluation,
+    CoverLetter,
+}
+
+impl PromptUsageKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Evaluation => "Evaluation",
+            Self::CoverLetter => "Cover letter",
+        }
+    }
+}
+
+/// One stored artifact that recorded a prompt version's content hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptUsageEntry {
+    pub kind: PromptUsageKind,
+    pub id: i64,
+    pub generated_at: chrono::DateTime<Utc>,
+    pub model_used: String,
+    pub job_title: Option<String>,
+    pub company: Option<String>,
+}
+
+/// The latest version of every `(name, is_system)` thread, grouped for a list.
+///
+/// Ordered by category, then name, then system before user, so the caller does
+/// not have to sort and two owners of the same name sit together.
+pub async fn list_threads(pool: &SqlitePool) -> Result<Vec<PromptThread>> {
+    let rows = sqlx::query_as::<_, PromptThread>(
+        "SELECT p.name AS name,
+                p.category AS category,
+                p.is_system AS is_system,
+                p.id AS latest_id,
+                p.version AS latest_version,
+                (SELECT COUNT(*) FROM prompts q
+                  WHERE q.name = p.name AND q.is_system = p.is_system) AS version_count,
+                p.updated_at AS updated_at
+         FROM prompts p
+         WHERE p.version = (SELECT MAX(version) FROM prompts q
+                             WHERE q.name = p.name AND q.is_system = p.is_system)
+         ORDER BY p.category ASC, p.name ASC, p.is_system DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Every evaluation report and cover letter that used `content_hash`.
+///
+/// Empty for a prompt version that has never been sent. The job title and
+/// company are joined in so the UI can say *which* posting, not only an id.
+pub async fn usage(pool: &SqlitePool, content_hash: &str) -> Result<Vec<PromptUsageEntry>> {
+    type Row = (
+        i64,
+        chrono::DateTime<Utc>,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+
+    let reports = sqlx::query_as::<_, Row>(
+        "SELECT e.id, e.generated_at, e.model_used, j.title, j.company
+         FROM evaluation_reports e
+         JOIN applications a ON a.id = e.application_id
+         JOIN job_descriptions j ON j.id = a.job_description_id
+         WHERE e.prompt_hash = ?
+         ORDER BY e.generated_at DESC, e.id DESC",
+    )
+    .bind(content_hash)
+    .fetch_all(pool)
+    .await?;
+
+    let letters = sqlx::query_as::<_, Row>(
+        "SELECT c.id, c.generated_at, c.model_used, j.title, j.company
+         FROM cover_letters c
+         JOIN applications a ON a.id = c.application_id
+         JOIN job_descriptions j ON j.id = a.job_description_id
+         WHERE c.prompt_hash = ?
+         ORDER BY c.generated_at DESC, c.id DESC",
+    )
+    .bind(content_hash)
+    .fetch_all(pool)
+    .await?;
+
+    let to_entry = |kind: PromptUsageKind, (id, generated_at, model_used, title, company): Row| {
+        PromptUsageEntry {
+            kind,
+            id,
+            generated_at,
+            model_used,
+            job_title: title,
+            company,
+        }
+    };
+
+    Ok(reports
+        .into_iter()
+        .map(|row| to_entry(PromptUsageKind::Evaluation, row))
+        .chain(
+            letters
+                .into_iter()
+                .map(|row| to_entry(PromptUsageKind::CoverLetter, row)),
+        )
+        .collect())
+}
+
 /// Every version of `name` owned by `is_system`, newest first.
 pub async fn list_versions(pool: &SqlitePool, name: &str, is_system: bool) -> Result<Vec<Prompt>> {
     let rows = sqlx::query_as::<_, Prompt>(

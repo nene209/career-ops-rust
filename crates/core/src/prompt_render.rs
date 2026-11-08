@@ -79,6 +79,17 @@ impl Variable {
             _ => None,
         }
     }
+
+    /// One line for the Prompt Manager's variable reference.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::CvSummary => "The rendered CV summary from CV / Profile.",
+            Self::JobDescription => "The posting, normalized to plain text.",
+            Self::CompanyName => "The company on the posting.",
+            Self::JobTitle => "The posting's title.",
+            Self::Tone => "An optional register for a cover letter; empty when unset.",
+        }
+    }
 }
 
 /// The values a render substitutes. `tone` is `""` when unset.
@@ -134,6 +145,51 @@ impl fmt::Display for RenderError {
 }
 
 impl std::error::Error for RenderError {}
+
+/// The variable set the app renders for a prompt category, when the category
+/// is one the app feeds.
+///
+/// Only `evaluate` and `cover_letter` are rendered by a pipeline. The reference
+/// categories may contain their own placeholder syntax (the PDF template in
+/// `pdf.md` uses `{{PHOTO}}`), so validating them against this set would reject
+/// legitimate content.
+pub fn variables_for_category(category: &str) -> Option<&'static [Variable]> {
+    match category {
+        "evaluate" | "cover_letter" => Some(&Variable::ALL),
+        _ => None,
+    }
+}
+
+/// Check every placeholder without substituting anything.
+///
+/// The Prompt Manager runs this on save, so an unknown variable is an error
+/// while the user is editing rather than when an evaluation is attempted.
+pub fn validate(template: &str) -> Result<(), RenderError> {
+    let mut rest = template;
+    let mut offset = 0usize;
+
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            return Err(RenderError::Unclosed {
+                offset: offset + start,
+            });
+        };
+
+        let name = &after[..end];
+        if Variable::parse(name).is_none() {
+            return Err(RenderError::Unknown {
+                name: name.trim().to_string(),
+            });
+        }
+
+        let consumed = start + 2 + end + 2;
+        rest = &rest[consumed..];
+        offset += consumed;
+    }
+
+    Ok(())
+}
 
 /// Substitute every placeholder in `template`.
 ///
@@ -230,5 +286,31 @@ mod tests {
     fn text_without_placeholders_passes_through() {
         let template = "Plain instructions, no variables.";
         assert_eq!(render(template, &variables()).expect("render"), template);
+    }
+
+    #[test]
+    fn validate_accepts_the_known_set_and_rejects_the_rest() {
+        assert!(validate("{{company_name}} / {{ job_title }}").is_ok());
+        assert_eq!(
+            validate("{{PHOTO}}").expect_err("unknown"),
+            RenderError::Unknown {
+                name: "PHOTO".into()
+            }
+        );
+        assert_eq!(
+            validate("open {{job_title").expect_err("unclosed"),
+            RenderError::Unclosed { offset: 5 }
+        );
+    }
+
+    #[test]
+    fn only_the_rendered_categories_have_a_variable_set() {
+        assert!(variables_for_category("evaluate").is_some());
+        assert!(variables_for_category("cover_letter").is_some());
+        assert!(
+            variables_for_category("render").is_none(),
+            "reference prompts may use their own placeholders"
+        );
+        assert!(variables_for_category("utility").is_none());
     }
 }

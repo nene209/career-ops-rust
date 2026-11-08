@@ -15,6 +15,7 @@ pub mod lock;
 pub mod logs;
 pub mod pipeline;
 pub mod portals;
+pub mod prompts;
 pub mod settings;
 pub mod shell;
 
