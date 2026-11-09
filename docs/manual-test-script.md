@@ -1,7 +1,7 @@
 # Manual Test Script
 
 **Owner:** whoever is about to declare a UI phase done, or is about to start Phase 3.
-**Last updated:** 2026-11-08
+**Last updated:** 2026-11-09
 **Applies to:** the `career-ops` binary built from this workspace.
 
 Automated tests cover the state machine, the view models, and the screens with
@@ -141,7 +141,10 @@ otherwise.
 | 5.6 | Select **Pipeline**, click **Add job** in the header. | The same dialog opens. This is the shared modal, not a second implementation. |
 | 5.7 | Close the dialog. | The Pipeline list is unchanged. |
 
-## 6. ✅ Pipeline
+## 6. Pipeline
+
+Steps 6.1–6.13 are verified. Step 6.14 (pagination) was added with Phase
+3.3 and awaits the owner's pass.
 
 | # | Step | Expected |
 | :-- | :--- | :--- |
@@ -158,6 +161,10 @@ otherwise.
 | 6.11 | ✅ Open the detail view of a job that was only fetched and click **Delete job**. | The row disappears without a dialog and the header reports "Job deleted." **Refresh** does not bring it back; only the portal fetching it again does. |
 | 6.12 | ✅ Open the detail view of a job whose source stored HTML and tick **Raw text**. | The description switches to the stored markup in monospace and a note says "Stored as HTML from the source." Unticking returns to the formatted text. A manual paste with no markup has no toggle. |
 | 6.13 | ✅ Open the detail view of a job with a saved status or an evaluation and click **Delete job...**. | A window names the job and says that its application, evaluation reports, and cover letters go with it. **Delete job** stays disabled until you type `delete me`; a wrong phrase keeps it disabled, and **Cancel** closes the window and leaves the job. |
+| 6.14a | With more than 50 jobs in the Pipeline (fetch from a portal if needed), choose **50** under **Rows per page:** in the footer. | The footer reads `1–50 of N` and `Page 1 of M`, and **First** and **Previous** are disabled. The header still reads "N jobs"; only the footer states the window. The list shows exactly 50 rows. |
+| 6.14b | Click **Next**, then **Last**. | Each click advances the list to the next page and the footer range follows (`51–100 of N`, then the final range ending at N). On the last page, **Next** and **Last** are disabled. **First** and **Previous** walk back the same way. |
+| 6.14c | Go to a later page, then change the status filter; separately go to a later page and type into **Search**; then change **Rows per page:** to a different size. | Each returns the footer to `Page 1 of M` with the range restarted. The header search wording is unchanged ("X of Y jobs match"), and the page-size chip marks the chosen size. |
+| 6.14d | On a later page, open a row and click **Back to list**. | The list returns to the same page the row was on, with the same scroll position and the filter/search intact. |
 
 ## 6a. ✅ CV / Profile
 
