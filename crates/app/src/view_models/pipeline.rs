@@ -17,17 +17,43 @@ use chrono::Utc;
 
 use super::portals::relative_time;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PipelineViewModel {
     pub rows: Vec<JobRow>,
     pub filter: JobFilter,
     /// Case-insensitive substring over title and company. Kept here rather
     /// than in the screen so a reload does not clear it.
     pub search: String,
+    /// The current page, 0-based. `effective_page` clamps it for rendering;
+    /// the stored value may be stale after a reload or a row action.
+    pub page: usize,
+    /// Rows per page. The screen offers [`PAGE_SIZES`]; the value is not
+    /// persisted (Q-56).
+    pub page_size: usize,
     /// The preferences the rows were classified with. Stored so the header can
     /// tell "nothing matches" from "nothing is configured", and so saving new
     /// preferences can re-badge the loaded rows without a database reload.
     pub preferences: Preferences,
+}
+
+/// The rows one page holds by default. A page of this size renders cheaply in
+/// a plain `ScrollArea`, which is why the whole vault can be loaded (Phase 3.3).
+pub const DEFAULT_PAGE_SIZE: usize = 100;
+
+/// The page sizes the screen offers. A test may use any positive size.
+pub const PAGE_SIZES: [usize; 3] = [50, 100, 250];
+
+impl Default for PipelineViewModel {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            filter: JobFilter::default(),
+            search: String::new(),
+            page: 0,
+            page_size: DEFAULT_PAGE_SIZE,
+            preferences: Preferences::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +266,8 @@ impl PipelineViewModel {
             rows: rows_from_jobs(jobs, statuses, touched, &preferences),
             filter: JobFilter::All,
             search: String::new(),
+            page: 0,
+            page_size: DEFAULT_PAGE_SIZE,
             preferences,
         }
     }
@@ -247,6 +275,8 @@ impl PipelineViewModel {
     /// Replace the rows after a reload, keeping the user's filter and search.
     ///
     /// Both are view preferences, not data: refreshing must not reset them.
+    /// The page is kept and clamped, so a background reload does not move the
+    /// user unless the list genuinely became shorter.
     pub fn replace_jobs(
         &mut self,
         jobs: Vec<JobDescription>,
@@ -256,12 +286,14 @@ impl PipelineViewModel {
     ) {
         self.rows = rows_from_jobs(jobs, statuses, touched, &preferences);
         self.preferences = preferences;
+        self.clamp_page();
     }
 
     /// Re-badge the rows that are already loaded.
     ///
     /// Saving preferences must not require a database reload: the rows are in
-    /// memory and their classification is the only thing that changed.
+    /// memory and their classification is the only thing that changed. An
+    /// exclusion can shrink the filtered set, so the page is clamped too.
     pub fn set_preferences(&mut self, preferences: Preferences) {
         self.preferences = preferences;
         for row in &mut self.rows {
@@ -269,6 +301,7 @@ impl PipelineViewModel {
             row.preferred = matched.preferred;
             row.excluded = matched.excluded;
         }
+        self.clamp_page();
     }
 
     /// Rows matching the current filter and search, in the original
@@ -278,6 +311,90 @@ impl PipelineViewModel {
         self.rows.iter().filter(move |row| {
             self.filter.matches(row) && (query.is_empty() || row.matches_search(&query))
         })
+    }
+
+    // ------------------------------------------------------------------
+    // Pagination (Phase 3.3)
+    //
+    // The list is loaded whole (no SQL LIMIT) and filtered in memory, so the
+    // page is purely a rendering window. All of the math is here rather than
+    // in the screen: it is pure, it is unit-tested, and the header and the
+    // footer must agree on it.
+    // ------------------------------------------------------------------
+
+    /// Rows after the filter and the search.
+    pub fn filtered_len(&self) -> usize {
+        self.apply_filter().count()
+    }
+
+    /// The number of pages the filtered set needs. Always at least one, so the
+    /// footer can speak of "page 1 of 1" for an empty result.
+    pub fn page_count(&self) -> usize {
+        self.filtered_len().div_ceil(self.page_size.max(1)).max(1)
+    }
+
+    /// The page actually rendered: the stored page clamped to the last one.
+    ///
+    /// A row action can shrink the filtered set after the page was chosen;
+    /// clamping here keeps the list from going blank without mutating state
+    /// during rendering.
+    pub fn effective_page(&self) -> usize {
+        self.page.min(self.page_count().saturating_sub(1))
+    }
+
+    /// The 1-based inclusive range of the effective page, or `(0, 0)` when the
+    /// filtered set is empty.
+    pub fn page_bounds(&self) -> (usize, usize) {
+        let total = self.filtered_len();
+        if total == 0 {
+            return (0, 0);
+        }
+
+        let size = self.page_size.max(1);
+        let start = self.effective_page() * size;
+        let end = (start + size).min(total);
+        (start + 1, end)
+    }
+
+    /// The rows on the effective page, in list order.
+    pub fn page_rows(&self) -> Vec<&JobRow> {
+        let size = self.page_size.max(1);
+        let start = self.effective_page() * size;
+        self.apply_filter().skip(start).take(size).collect()
+    }
+
+    /// Change the filter and start at the first page: a different question
+    /// starts at the top.
+    pub fn set_filter(&mut self, filter: JobFilter) {
+        self.filter = filter;
+        self.page = 0;
+    }
+
+    /// Change the search and start at the first page.
+    pub fn set_search(&mut self, query: String) {
+        self.search = query;
+        self.page = 0;
+    }
+
+    /// Move to `page`, clamped to the last page.
+    pub fn set_page(&mut self, page: usize) {
+        self.page = page.min(self.page_count().saturating_sub(1));
+    }
+
+    /// Change the page size and start at the first page. A zero is ignored:
+    /// a page of no rows would make every control meaningless.
+    pub fn set_page_size(&mut self, size: usize) {
+        if size == 0 {
+            return;
+        }
+        self.page_size = size;
+        self.page = 0;
+    }
+
+    /// Clamp the stored page after the filtered set shrank, so the next render
+    /// does not have to correct it.
+    pub fn clamp_page(&mut self) {
+        self.page = self.effective_page();
     }
 
     /// Distinct companies whose rows the exclusion list hides.
@@ -358,13 +475,17 @@ impl PipelineViewModel {
     /// Returns `false` when the row is no longer in the page, which tells the
     /// app its list is stale.
     pub fn set_queue(&mut self, id: i64, state: QueueState) -> bool {
-        match self.rows.iter_mut().find(|row| row.id == id) {
-            Some(row) => {
-                row.queue = state;
-                true
-            }
-            None => false,
+        let found = if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
+            row.queue = state;
+            true
+        } else {
+            false
+        };
+        if found {
+            // A dismissal can remove the row from the current filter.
+            self.clamp_page();
         }
+        found
     }
 
     /// Replace a row's queue state and its triage decision after a batch.
@@ -373,14 +494,19 @@ impl PipelineViewModel {
     /// kept beside it because `Unsure` and `Evaluate` share a state. Returns
     /// `false` when the row is no longer in the page.
     pub fn set_triage(&mut self, id: i64, choice: TriageChoice, reason: &str) -> bool {
-        let Some(row) = self.rows.iter_mut().find(|row| row.id == id) else {
-            return false;
+        let found = if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
+            row.queue = choice.queue_state();
+            row.triage = Some(choice);
+            row.queue_reason = Some(reason.trim().to_string());
+            true
+        } else {
+            false
         };
-
-        row.queue = choice.queue_state();
-        row.triage = Some(choice);
-        row.queue_reason = Some(reason.trim().to_string());
-        true
+        if found {
+            // A skip becomes `Dismissed` and can shrink the current view.
+            self.clamp_page();
+        }
+        found
     }
 
     /// Postings a triage run may cover: new rows that the exclusion list does
@@ -876,6 +1002,7 @@ mod tests {
             filter,
             search: String::new(),
             preferences: view_model.preferences.clone(),
+            ..Default::default()
         }
         .apply_filter()
         .map(|row| row.id)
@@ -1281,5 +1408,149 @@ mod tests {
             DEFAULT_BATCH_LIMIT + 7,
             "the header still says how many there are"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Pagination (Phase 3.3 WS2)
+    // ------------------------------------------------------------------
+
+    fn paged(count: usize) -> PipelineViewModel {
+        PipelineViewModel {
+            rows: (1..=count as i64).map(|id| row(id, None)).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_default_page_is_a_hundred_rows() {
+        let view_model = PipelineViewModel::default();
+
+        assert_eq!(view_model.page, 0);
+        assert_eq!(view_model.page_size, DEFAULT_PAGE_SIZE);
+    }
+
+    #[test]
+    fn page_count_handles_zero_one_exact_and_remainder() {
+        assert_eq!(
+            paged(0).page_count(),
+            1,
+            "an empty result is still page 1 of 1"
+        );
+        assert_eq!(paged(1).page_count(), 1);
+        assert_eq!(paged(100).page_count(), 1);
+        assert_eq!(paged(101).page_count(), 2);
+        assert_eq!(paged(250).page_count(), 3);
+    }
+
+    #[test]
+    fn page_bounds_cover_first_middle_and_last_pages() {
+        let mut view_model = paged(250);
+
+        assert_eq!(view_model.page_bounds(), (1, 100));
+        view_model.set_page(1);
+        assert_eq!(view_model.page_bounds(), (101, 200));
+        view_model.set_page(2);
+        assert_eq!(view_model.page_bounds(), (201, 250));
+
+        assert_eq!(paged(0).page_bounds(), (0, 0));
+    }
+
+    #[test]
+    fn page_rows_are_the_effective_page() {
+        let mut view_model = paged(250);
+
+        let first = view_model.page_rows();
+        assert_eq!(first.len(), 100);
+        assert_eq!(first[0].id, 1);
+
+        view_model.set_page(2);
+        let last: Vec<i64> = view_model
+            .page_rows()
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(last, (201..=250).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn set_page_clamps_to_the_last_page() {
+        let mut view_model = paged(120);
+
+        view_model.set_page(99);
+        assert_eq!(view_model.page, 1);
+
+        view_model.set_page(1);
+        assert_eq!(view_model.page, 1);
+    }
+
+    #[test]
+    fn a_shrinking_set_clamps_the_stored_page() {
+        let mut view_model = paged(250);
+        view_model.set_page(2);
+
+        view_model.rows.truncate(150);
+        view_model.clamp_page();
+
+        assert_eq!(view_model.page, 1);
+        assert_eq!(view_model.page_bounds(), (101, 150));
+    }
+
+    #[test]
+    fn dismissing_the_last_row_on_the_last_page_clamps_the_page() {
+        let mut view_model = paged(101);
+        view_model.set_page(1);
+
+        assert!(view_model.set_queue(101, QueueState::Dismissed));
+
+        assert_eq!(view_model.page, 0, "the dismissed row was the last page");
+        assert_eq!(view_model.page_rows().len(), 100);
+    }
+
+    #[test]
+    fn filter_and_search_reset_to_the_first_page() {
+        let mut view_model = paged(250);
+
+        view_model.set_page(2);
+        view_model.set_filter(JobFilter::Triaged);
+        assert_eq!(view_model.page, 0);
+
+        view_model.set_page(2);
+        view_model.set_search("job".into());
+        assert_eq!(view_model.page, 0);
+    }
+
+    #[test]
+    fn a_page_size_change_resets_and_zero_is_ignored() {
+        let mut view_model = paged(250);
+        view_model.set_page(2);
+
+        view_model.set_page_size(PAGE_SIZES[0]);
+        assert_eq!(view_model.page_size, 50);
+        assert_eq!(view_model.page, 0);
+
+        view_model.set_page_size(0);
+        assert_eq!(view_model.page_size, 50, "a zero-size page is meaningless");
+    }
+
+    #[test]
+    fn pagination_applies_after_the_filter() {
+        let mut first = row(1, None);
+        first.preferred = true;
+        let other = row(2, None);
+        let mut second = row(3, None);
+        second.preferred = true;
+        let mut view_model = PipelineViewModel {
+            rows: vec![first, other, second],
+            ..Default::default()
+        };
+        view_model.set_filter(JobFilter::Preferred);
+        view_model.set_page_size(1);
+
+        assert_eq!(view_model.filtered_len(), 2);
+        assert_eq!(view_model.page_count(), 2);
+        assert_eq!(view_model.page_rows()[0].id, 1);
+
+        view_model.set_page(1);
+        assert_eq!(view_model.page_rows()[0].id, 3);
     }
 }

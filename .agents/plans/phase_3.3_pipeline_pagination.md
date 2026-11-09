@@ -1,7 +1,7 @@
 # Phase 3.3: Pipeline Pagination — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.43), §12
-**Status:** In progress — WS1 complete; WS2–WS4 not started
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.44), §12
+**Status:** In progress — WS1–WS2 complete; WS3–WS4 not started
 **Last updated:** 2026-11-08
 **Duration:** 2–3 days
 **Depends on:** Phase 2.9 (filters, search, preferences, queue), Phase 3.2 (`Triaged` filter; triage and description batches iterate the loaded rows)
@@ -16,6 +16,7 @@
 | v0.1 | Initial plan. Lifts the 500-row Pipeline load window, paginates the rendered list in the view model, keeps every existing filter/search/preference behaviour by loading all rows, and moves the page position into `PipelineViewModel`. One index-only migration. No new dependency, no AI work. |
 | v0.2 | **Decision note added.** Database-level pagination and SQL-level filtering were evaluated. Option A (in-memory pagination) is chosen now; Option C (SQL pagination with precomputed preference flags) is recorded as the future scale path; Option B (naive SQL `LIKE` predicates) is rejected because it silently changes what `Preferred` means. The decision, the trigger, and Option C's work are in the new section “Database-level pagination (decision note)”. |
 | v0.3 | **WS1 implemented.** `job_descriptions::list_all` returns every row newest-first with `id DESC` as the tie-break; `list_recent` keeps its limit and takes the same order. Migration **0009** adds `ix_job_descriptions_fetched_at (fetched_at DESC, id DESC)`. `start_pipeline_load` uses `list_all`, `PIPELINE_LIMIT` is removed, and the live assertion becomes `rows.len() == stored.len()`. The load logs `pipeline load` with `jobs`, `bytes` (the sum of `raw_text` lengths, O(1) per row), and `elapsed_ms` — the Q-53 measurement. **Deviations:** the log records bytes rather than chars, because counting every character would scan the payload and distort the duration it measures; `crates/app/docs/patterns.md` is updated now rather than in WS4 because WS1 removes the constant it referenced. Three tests in `crates/core/tests/pipeline_load.rs`: more than 500 rows, equal-timestamp ordering, and the 0009 upgrade with the index present. WS2 (view-model pagination) is next. |
+| v0.4 | **WS2 implemented.** `PipelineViewModel` gains `page`, `page_size` (`DEFAULT_PAGE_SIZE = 100`, `PAGE_SIZES = [50, 100, 250]`) and the pure page math: `filtered_len`, `page_count`, `effective_page`, `page_bounds`, `page_rows`, `set_filter`, `set_search`, `set_page`, `set_page_size`, and `clamp_page`. Filters and search reset to page 1; a page-size change resets; a reload keeps the page and clamps. `set_preferences`, `set_queue`, and `set_triage` also clamp, because each can shrink the filtered set (an exclusion, a dismissal, a skip). `PipelineAction::{SetPage, SetPageSize}` and their app handlers exist; the screen resets the list scroll on a page change and still renders the full list until WS3. Ten unit tests cover the boundaries, the reset table, the clamp cases, and pagination composing with a filter. **Deviation:** the app also calls `clamp_page` after a delete and after a status change (`Mark not a match`, evaluation), not only after `replace_jobs`, because those actions can remove a row from a status filter. WS3 (the footer controls) is next. |
 
 ---
 

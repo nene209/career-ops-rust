@@ -100,6 +100,10 @@ pub enum PipelineAction {
     Reload,
     SetFilter(JobFilter),
     SetSearch(String),
+    /// Move to a page (0-based). The app clamps it to the last page.
+    SetPage(usize),
+    /// Change the page size and return to the first page.
+    SetPageSize(usize),
     /// Re-fetch one posting's description in place.
     RefreshJob(i64),
     /// Mark the job's application as not worth pursuing.
@@ -226,14 +230,18 @@ pub fn show(
     }
 
     // A filter or a query applies to the list. Return to it so the change is
-    // visible instead of leaving the detail panel on screen.
-    if matches!(
-        &action,
-        Some(PipelineAction::SetFilter(_) | PipelineAction::SetSearch(_))
-    ) {
-        view.selected = None;
-        view.show_raw = false;
-        view.list_scroll = 0.0;
+    // visible instead of leaving the detail panel on screen. A page change
+    // only resets the scroll: the user is already on the list.
+    match &action {
+        Some(PipelineAction::SetFilter(_) | PipelineAction::SetSearch(_)) => {
+            view.selected = None;
+            view.show_raw = false;
+            view.list_scroll = 0.0;
+        }
+        Some(PipelineAction::SetPage(_) | PipelineAction::SetPageSize(_)) => {
+            view.list_scroll = 0.0;
+        }
+        _ => {}
     }
 
     if let Some(error) = state.error {

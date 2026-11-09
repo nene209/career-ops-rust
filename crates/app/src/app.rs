@@ -692,8 +692,10 @@ impl CareerOpsApp {
         match action {
             PipelineAction::AddJob => self.portals_view.open_manual(),
             PipelineAction::Reload => self.start_pipeline_load(),
-            PipelineAction::SetFilter(filter) => self.pipeline.filter = filter,
-            PipelineAction::SetSearch(query) => self.pipeline.search = query,
+            PipelineAction::SetFilter(filter) => self.pipeline.set_filter(filter),
+            PipelineAction::SetSearch(query) => self.pipeline.set_search(query),
+            PipelineAction::SetPage(page) => self.pipeline.set_page(page),
+            PipelineAction::SetPageSize(size) => self.pipeline.set_page_size(size),
             PipelineAction::RefreshJob(job_id) => self.start_job_refresh(job_id),
             PipelineAction::MarkNotAMatch(job_id) => self.start_not_a_match(job_id),
             PipelineAction::MarkForDetails(job_id) => {
@@ -2279,6 +2281,8 @@ impl CareerOpsApp {
                                 // this row now needs the typed gate.
                                 row.has_user_state = true;
                             }
+                            // The row may have left a status filter.
+                            self.pipeline.clamp_page();
                         }
                         self.pipeline_message = Some("Marked as not a match.".into());
                         self.pipeline_error = None;
@@ -2548,6 +2552,7 @@ impl CareerOpsApp {
                     Ok(()) => {
                         if let Some(id) = job_id {
                             self.pipeline.rows.retain(|row| row.id != id);
+                            self.pipeline.clamp_page();
                             if self.pipeline_view.selected == Some(id) {
                                 self.pipeline_view.selected = None;
                             }
@@ -2704,6 +2709,9 @@ impl CareerOpsApp {
                                     row.status = Some(StatusLabel::Ready);
                                 }
                             }
+                            // The row may have left a status filter (ready or
+                            // not a match) after the queue write.
+                            self.pipeline.clamp_page();
                             self.pipeline_detail_for = None;
                             if selected {
                                 self.start_pipeline_detail_load();
