@@ -64,10 +64,12 @@ egui::ScrollArea::vertical().show(ui, |ui| {
 });
 ```
 
-**Swap point:** when the Pipeline list grows past a few hundred rows, replace
-the loop with `egui_extras::TableBuilder`, which virtualizes rows. Do not
-prematurely use it in Phase 2.1. The Pipeline loads at most `PIPELINE_LIMIT`
-(500) rows, so raise that bound only together with the swap.
+**Swap point:** when the list grows past a few hundred rows, two options keep the
+per-frame cost bounded: paginate the rendered set (Phase 3.3's choice for the
+Pipeline) or virtualize the rows with `egui_extras::TableBuilder` /
+`ScrollArea::show_rows`. Pagination needs no extra dependency and gives a
+visible position; virtualization suits one long list. Do not render thousands
+of rows in a plain loop.
 
 Empty lists render `components::EmptyState`, not a blank panel. `EmptyState`
 optionally takes an action label and returns `true` in the frame it is clicked.
@@ -209,11 +211,13 @@ can prove: whether `jsonld` extraction matches the markup a given board emits.
 
 ## Pipeline screen (WS4)
 
-One task (`AsyncTask<PipelineLoad>`) reads `job_descriptions::list_recent(&pool,
-PIPELINE_LIMIT)` and `applications::list(&pool)` and joins them by job id before
-the view model is built. The screen is read-only apart from the filter: it
-returns `PipelineAction::{AddJob, Reload, SetFilter}` and the app owns every
-side effect.
+One task (`AsyncTask<PipelineLoad>`) reads `job_descriptions::list_all(&pool)`
+(every row, newest first with an `id DESC` tie-break) and
+`applications::list(&pool)` and joins them by job id before the view model is
+built. Phase 3.3 paginates the rendered list in the view model; the query has no
+`LIMIT`. The screen is read-only apart from the filter: it returns
+`PipelineAction::{AddJob, Reload, SetFilter}` (and the Phase 3.3 page actions)
+and the app owns every side effect.
 
 - The filter is a view preference. `PipelineViewModel::replace_jobs` keeps it
   across reloads; `from_jobs` resets it to `All` only for a fresh page.

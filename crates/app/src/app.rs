@@ -135,12 +135,6 @@ struct PromptWriteOutcome {
     kind: PromptWriteKind,
 }
 
-/// How many recent jobs the Pipeline loads at once.
-///
-/// Phase 2.1 renders the list in a plain `ScrollArea`; a bounded page keeps the
-/// per-frame cost predictable until `TableBuilder` replaces it (`docs/patterns.md`).
-const PIPELINE_LIMIT: i64 = 500;
-
 /// What the active screen asked the app to do.
 ///
 /// The shell renders exactly one screen, so this union lets `ui()` route the
@@ -2034,9 +2028,10 @@ impl CareerOpsApp {
         };
 
         let task = self.spawn(async move {
-            // Two reads joined in memory. The Pipeline shows one status per job,
-            // because a job description has at most one application.
-            let jobs = job_repo::list_recent(&pool, PIPELINE_LIMIT).await?;
+            let started = std::time::Instant::now();
+            // Every job, not a bounded page: pagination happens in the view
+            // model over the complete set (Phase 3.3).
+            let jobs = job_repo::list_all(&pool).await?;
             let applications = application_repo::list(&pool).await?;
             // The score is an application column, not a job one: a second map
             // keeps the two loads independent and the row construction unchanged.
@@ -2059,6 +2054,15 @@ impl CareerOpsApp {
             // Loaded with the rows so the badges and the header summary agree:
             // a separate load could badge a page with the previous preferences.
             let preferences = profile_repo::preferences(&pool).await?;
+            // Payload size and duration are the measurement behind Q-53: the
+            // move to database-level pagination is a measured trigger, not a
+            // guess. Bytes, not chars, because the length is O(1) per row.
+            tracing::info!(
+                jobs = jobs.len(),
+                bytes = jobs.iter().map(|job| job.raw_text.len()).sum::<usize>(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "pipeline load"
+            );
             Ok((jobs, statuses, touched, scores, preferences))
         });
 
@@ -8381,7 +8385,7 @@ mod tests {
             eprintln!("live fetch: {} -> {jobs} jobs", portal.name);
         }
 
-        // Then the Pipeline page: the most recent `PIPELINE_LIMIT` jobs.
+        // Then the Pipeline: every stored job (Phase 3.3 removed the page cap).
         app.handle_pipeline_action(PipelineAction::Reload);
         wait_until(&mut app, &ctx, |app| {
             app.pipeline_loaded && app.pipeline_task.is_none()
@@ -8396,8 +8400,8 @@ mod tests {
         }
         assert_eq!(
             app.pipeline.rows.len(),
-            stored.len().min(PIPELINE_LIMIT as usize),
-            "the Pipeline page should hold min(stored, {PIPELINE_LIMIT}) jobs"
+            stored.len(),
+            "the Pipeline holds every stored job, not a bounded page"
         );
 
         // When the config asks for detail enrichment, at least one stored

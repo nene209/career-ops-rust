@@ -114,9 +114,23 @@ pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<JobDescription>> {
     Ok(row)
 }
 
+/// Every job, newest first.
+///
+/// `id DESC` is the tie-break: a fetch inserts many rows in the same second, and
+/// without it two loads could order them differently. The Pipeline paginates
+/// this list in memory, so the query deliberately has no `LIMIT` (Phase 3.3).
+pub async fn list_all(pool: &SqlitePool) -> Result<Vec<JobDescription>> {
+    let rows = sqlx::query_as::<_, JobDescription>(
+        "SELECT * FROM job_descriptions ORDER BY fetched_at DESC, id DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 pub async fn list_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<JobDescription>> {
     let rows = sqlx::query_as::<_, JobDescription>(
-        "SELECT * FROM job_descriptions ORDER BY fetched_at DESC LIMIT ?",
+        "SELECT * FROM job_descriptions ORDER BY fetched_at DESC, id DESC LIMIT ?",
     )
     .bind(limit)
     .fetch_all(pool)
