@@ -13,6 +13,7 @@ use career_ops_core::triage::{TriageChoice, TriageEstimate};
 
 use crate::view_models::pipeline::{
     EvaluationRow, JobFilter, JobRow, PipelineDetail, PipelineViewModel, StatusLabel, TierLabel,
+    PAGE_SIZES,
 };
 
 use super::components::{labelled_input, EmptyState, LoadingSpinner, StatusBadge};
@@ -388,9 +389,9 @@ fn header(
         if view_model.search.trim().is_empty() {
             ui.label(RichText::new(format!("{total} jobs")).weak());
         } else {
-            // The count follows the visible list, so a search that intersects a
+            // The count follows the visible set, so a search that intersects a
             // filter reads as what the user is actually looking at.
-            let shown = view_model.apply_filter().count();
+            let shown = view_model.filtered_len();
             ui.label(RichText::new(format!("{shown} of {total} jobs match")).weak());
         }
     });
@@ -446,9 +447,9 @@ fn list(
         return;
     }
 
-    let rows: Vec<&JobRow> = view_model.apply_filter().collect();
+    let total = view_model.filtered_len();
 
-    if rows.is_empty() {
+    if total == 0 {
         if view_model.rows.is_empty() {
             if EmptyState::new(
                 "|||",
@@ -482,14 +483,74 @@ fn list(
         return;
     }
 
+    // The footer owns the bottom strip, so the page controls never scroll away.
+    // It is shown for a single page too: the range and the page-size choice are
+    // still information the user needs.
+    egui::Panel::bottom("pipeline_pagination")
+        .show(ui, |ui| pagination_bar(ui, view_model, action));
+
     let output = egui::ScrollArea::vertical()
         .vertical_scroll_offset(view.list_scroll)
         .show(ui, |ui| {
-            for row in rows {
+            for row in view_model.page_rows() {
                 row_ui(ui, row, view);
             }
         });
     view.list_scroll = output.state.clamped_offset().y;
+}
+
+/// The page controls under the list.
+///
+/// The view model owns the page; this bar only reads it and emits the intent.
+/// `First`/`Previous` are disabled on page 1 and `Next`/`Last` on the last page,
+/// so a click can never be a no-op that still looks live.
+fn pagination_bar(
+    ui: &mut Ui,
+    view_model: &PipelineViewModel,
+    action: &mut Option<PipelineAction>,
+) {
+    let page = view_model.effective_page();
+    let pages = view_model.page_count();
+    let (start, end) = view_model.page_bounds();
+    let total = view_model.filtered_len();
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        if ui.add_enabled(page > 0, Button::new("First")).clicked() {
+            *action = Some(PipelineAction::SetPage(0));
+        }
+        if ui.add_enabled(page > 0, Button::new("Previous")).clicked() {
+            *action = Some(PipelineAction::SetPage(page - 1));
+        }
+
+        ui.label(RichText::new(format!("{start}–{end} of {total}")).weak());
+        ui.label(RichText::new(format!("Page {} of {pages}", page + 1)).weak());
+
+        if ui
+            .add_enabled(page + 1 < pages, Button::new("Next"))
+            .clicked()
+        {
+            *action = Some(PipelineAction::SetPage(page + 1));
+        }
+        if ui
+            .add_enabled(page + 1 < pages, Button::new("Last"))
+            .clicked()
+        {
+            *action = Some(PipelineAction::SetPage(pages - 1));
+        }
+
+        ui.separator();
+        ui.label(RichText::new("Rows per page:").weak().small());
+        for size in PAGE_SIZES {
+            if ui
+                .selectable_label(view_model.page_size == size, size.to_string())
+                .clicked()
+                && view_model.page_size != size
+            {
+                *action = Some(PipelineAction::SetPageSize(size));
+            }
+        }
+    });
 }
 
 fn row_ui(ui: &mut Ui, row: &JobRow, view: &mut PipelineView) {

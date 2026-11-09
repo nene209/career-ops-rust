@@ -7639,6 +7639,70 @@ mod tests {
             .is_none());
     }
 
+    /// The Pipeline pages a vault larger than one page (Phase 3.3 WS3).
+    #[test]
+    fn the_pipeline_paginates_a_large_vault() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+        let pool = app.pool().expect("pool");
+
+        for index in 0..250 {
+            app.runtime()
+                .block_on(job_repo::upsert(
+                    &pool,
+                    job_repo::NewJobDescription {
+                        title: format!("Engineer {index}"),
+                        company: "Acme".into(),
+                        source_url: format!("https://example.com/jobs/page/{index}"),
+                        raw_text: format!("Body {index}."),
+                        fetch_tier: FetchTier::Tier1bHtml,
+                        external_id: None,
+                    },
+                ))
+                .expect("store");
+        }
+
+        app.handle_pipeline_action(PipelineAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.pipeline_loaded && app.pipeline_task.is_none()
+        });
+
+        assert_eq!(
+            app.pipeline.rows.len(),
+            250,
+            "the load has no page cap and truncates nothing"
+        );
+        assert_eq!(app.pipeline.page_size, 100);
+        assert_eq!(app.pipeline.page_count(), 3);
+        assert_eq!(app.pipeline.page_rows().len(), 100);
+        assert_eq!(app.pipeline.page_bounds(), (1, 100));
+
+        app.handle_pipeline_action(PipelineAction::SetPage(2));
+        assert_eq!(app.pipeline.page, 2);
+        assert_eq!(app.pipeline.page_rows().len(), 50);
+        assert_eq!(app.pipeline.page_bounds(), (201, 250));
+
+        app.handle_pipeline_action(PipelineAction::SetPageSize(50));
+        assert_eq!(app.pipeline.page, 0, "a size change starts at the top");
+        assert_eq!(app.pipeline.page_size, 50);
+        assert_eq!(app.pipeline.page_count(), 5);
+
+        app.handle_pipeline_action(PipelineAction::SetPage(3));
+        app.handle_pipeline_action(PipelineAction::SetFilter(JobFilter::All));
+        assert_eq!(app.pipeline.page, 0, "a filter starts at the top");
+
+        app.handle_pipeline_action(PipelineAction::SetPage(3));
+        app.handle_pipeline_action(PipelineAction::SetSearch("engineer 1".into()));
+        assert_eq!(app.pipeline.page, 0, "a search starts at the top");
+        assert!(
+            app.pipeline.filtered_len() < 250,
+            "the search really narrowed the set"
+        );
+    }
+
     /// Every stop reason has to read differently, or a partial walk looks like a
     /// completed one.
     #[test]

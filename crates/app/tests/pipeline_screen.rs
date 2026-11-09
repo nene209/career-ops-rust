@@ -1640,3 +1640,179 @@ fn the_override_hint_is_dismissible() {
     assert!(harness.state().view.triage_banner_dismissed);
     assert!(harness.query_by_label(hint).is_none());
 }
+
+// ----------------------------------------------------------------------
+// WS3: pagination controls
+// ----------------------------------------------------------------------
+
+fn paged_rows(count: i64) -> Vec<JobRow> {
+    (1..=count)
+        .map(|id| row(id, &format!("Job {id}"), None, TierLabel::Ats))
+        .collect()
+}
+
+#[test]
+fn the_footer_reports_the_range_and_only_the_page_is_rendered() {
+    let view_model = view_model(paged_rows(250), JobFilter::All, "");
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("1–100 of 250");
+    let _ = harness.get_by_label("Page 1 of 3");
+    let _ = harness.get_by_label("Job 1 — Acme");
+    let _ = harness.get_by_label("Job 100 — Acme");
+    assert!(
+        harness.query_by_label("Job 101 — Acme").is_none(),
+        "the next page must not be rendered"
+    );
+}
+
+#[test]
+fn a_single_page_still_shows_the_footer() {
+    let view_model = view_model(paged_rows(3), JobFilter::All, "");
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("1–3 of 3");
+    let _ = harness.get_by_label("Page 1 of 1");
+    for label in ["First", "Previous", "Next", "Last"] {
+        assert!(
+            harness
+                .get_by_role_and_label(Role::Button, label)
+                .accesskit_node()
+                .is_disabled(),
+            "{label} has nowhere to go"
+        );
+    }
+}
+
+#[test]
+fn the_page_controls_are_disabled_at_the_ends() {
+    // Page 1: only forward.
+    let first_page = view_model(paged_rows(250), JobFilter::All, "");
+    let mut harness = test_harness(&first_page, PipelineView::default(), idle_state());
+    harness.run();
+    for label in ["First", "Previous"] {
+        assert!(
+            harness
+                .get_by_role_and_label(Role::Button, label)
+                .accesskit_node()
+                .is_disabled(),
+            "{label} must be disabled on the first page"
+        );
+    }
+    for label in ["Next", "Last"] {
+        assert!(
+            !harness
+                .get_by_role_and_label(Role::Button, label)
+                .accesskit_node()
+                .is_disabled(),
+            "{label} must be enabled on the first page"
+        );
+    }
+
+    // Last page: only back.
+    let mut last_page = view_model(paged_rows(250), JobFilter::All, "");
+    last_page.page = 2;
+    let mut harness = test_harness(&last_page, PipelineView::default(), idle_state());
+    harness.run();
+    for label in ["First", "Previous"] {
+        assert!(
+            !harness
+                .get_by_role_and_label(Role::Button, label)
+                .accesskit_node()
+                .is_disabled(),
+            "{label} must be enabled on the last page"
+        );
+    }
+    for label in ["Next", "Last"] {
+        assert!(
+            harness
+                .get_by_role_and_label(Role::Button, label)
+                .accesskit_node()
+                .is_disabled(),
+            "{label} must be disabled on the last page"
+        );
+    }
+}
+
+#[test]
+fn next_and_last_emit_the_page_action() {
+    let view_model = view_model(paged_rows(250), JobFilter::All, "");
+
+    {
+        let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "Next").click();
+        harness.run();
+        assert_eq!(
+            harness.state().actions.last(),
+            Some(&PipelineAction::SetPage(1))
+        );
+    }
+
+    {
+        let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "Last").click();
+        harness.run();
+        assert_eq!(
+            harness.state().actions.last(),
+            Some(&PipelineAction::SetPage(2))
+        );
+    }
+}
+
+#[test]
+fn a_page_size_chip_emits_the_size() {
+    let view_model = view_model(paged_rows(250), JobFilter::All, "");
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    harness.get_by_label("50").click();
+    harness.run();
+
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PipelineAction::SetPageSize(50))
+    );
+}
+
+#[test]
+fn an_empty_result_hides_the_footer_and_keeps_the_empty_state() {
+    let view_model = view_model(paged_rows(3), JobFilter::Rejected, "");
+    let mut harness = test_harness(&view_model, PipelineView::default(), idle_state());
+    harness.run();
+
+    let _ = harness.get_by_label("No jobs match this filter");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "First")
+            .is_none(),
+        "there is nothing to page through"
+    );
+    assert!(harness.query_by_label("Rows per page:").is_none());
+}
+
+#[test]
+fn a_detail_round_trip_does_not_reset_the_page() {
+    let mut view_model = view_model(paged_rows(250), JobFilter::All, "");
+    view_model.page = 1;
+    let mut harness = test_harness(&view_model, selected(150), idle_state());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Back to list")
+        .click();
+    harness.run();
+
+    assert_eq!(harness.state().view.selected, None);
+    assert!(
+        !harness
+            .state()
+            .actions
+            .iter()
+            .any(|action| matches!(action, PipelineAction::SetPage(_))),
+        "Back to list must not move the page"
+    );
+}
