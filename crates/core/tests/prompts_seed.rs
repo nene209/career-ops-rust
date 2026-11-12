@@ -85,7 +85,7 @@ async fn changed_content_creates_new_version_and_preserves_old() {
     let out = seed_or_update(&db.pool, v1).await.expect("seed v1");
     assert!(matches!(out[0].1, SeedOutcome::Inserted { version: 1 }));
 
-    let v1_row = prompts::active_system(&db.pool, "test-prompt")
+    let v1_row = prompts::newest_system(&db.pool, "test-prompt")
         .await
         .unwrap()
         .expect("v1 active");
@@ -119,7 +119,7 @@ async fn changed_content_creates_new_version_and_preserves_old() {
     assert_eq!(all[1], (2, "version two content".to_string()));
 
     // The new version supersedes the old one.
-    let v2_row = prompts::active_system(&db.pool, "test-prompt")
+    let v2_row = prompts::newest_system(&db.pool, "test-prompt")
         .await
         .unwrap()
         .expect("v2 active");
@@ -199,7 +199,7 @@ async fn category_change_is_recorded_on_new_version() {
         SeedOutcome::Unchanged { version: 1 }
     ));
 
-    let active = prompts::active_system(&db.pool, "mover")
+    let active = prompts::newest_system(&db.pool, "mover")
         .await
         .unwrap()
         .expect("active");

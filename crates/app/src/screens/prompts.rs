@@ -184,7 +184,7 @@ fn thread_row(
             RichText::new(format!(
                 "{} · v{} · {version_label} · {}",
                 row.owner_label(),
-                row.latest_version,
+                row.current_version,
                 row.updated_at
             ))
             .weak()

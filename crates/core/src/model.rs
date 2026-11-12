@@ -286,6 +286,12 @@ pub struct Prompt {
     pub version: i64,
     pub content_hash: String,
     pub supersedes_id: Option<i64>,
+    /// The version this thread's `active_for_use` returns. Exactly one row per
+    /// `(name, is_system)` is current, enforced by the 0010 partial index.
+    pub is_current: bool,
+    /// Hidden from the picker but still resolvable by `get_by_hash`, because a
+    /// stored report, letter, or triage row references its content hash.
+    pub retired_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

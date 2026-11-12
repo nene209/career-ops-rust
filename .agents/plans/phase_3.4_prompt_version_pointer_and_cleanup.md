@@ -1,7 +1,7 @@
 # Phase 3.4: Prompt Version Pointer and Cleanup — Detailed Execution Plan
 
 **Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.48), §12
-**Status:** Planned — not started
+**Status:** In progress — WS1 complete; WS2–WS5 remain
 **Last updated:** 2026-11-09
 **Duration:** 2–3 days
 **Depends on:** Phase 3 (prompt versioning and the Prompts screen), Phase 3.2 (`triage_prompt_hash` on `job_descriptions`), Phase 3.3 (none functionally; sequencing only)
@@ -14,6 +14,7 @@
 | Version | Change |
 | :--- | :--- |
 | v0.1 | Initial plan. Replaces "revert appends a copy" with a **current-version pointer** (`is_current` plus a partial unique index), so reverting moves the pointer and never duplicates a content hash. Adds **delete** for unreferenced versions and **retire/restore** for referenced ones, extending the usage check to triage. Defines the deferred cross-entity **Danger Zone** for irreversible deletes. One migration (**0010**), no new dependency, no AI change. |
+| v0.2 | **WS1 implemented.** Migration **0010** adds `is_current`/`retired_at`, backfills the newest version per thread, and creates `ux_prompts_current_per_thread` (partial unique). `Prompt` carries both fields. `repo::prompts` gains `current`, `newest_system` (renamed from `active_system`), `set_current`, `references`/`PromptReferences`, `delete_version`/`DeleteOutcome`, `retire_version`, and `restore_version`; `usage` now includes triage; `list_threads` selects the current row and counts non-retired versions. `create_version` and `insert_system_prompt` clear the pointer and insert the new current row in one transaction. **Deviations:** deleting the current version is refused when only retired siblings remain (the thread would have rows but no current; the user must restore one first), and the `PromptThread` rename propagated mechanically to the app view model and screen so the workspace stays green — the current-vs-newest editor semantics remain WS3. The migration test builds a 0009 schema by hand; the 20 repository tests cover activation, delete/splice/promote, retire/restore, triage references, system refusals, and the sibling-hash rule. WS2 (resolution/seeding tests and caller updates) is next; `prompts_seed` already uses `newest_system`. |
 
 ---
 

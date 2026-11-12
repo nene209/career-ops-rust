@@ -25,7 +25,7 @@ async fn threads_group_owners_and_count_versions() {
         .find(|thread| thread.name == "evaluate")
         .expect("evaluate is seeded");
     assert!(evaluate.is_system);
-    assert_eq!(evaluate.latest_version, 1);
+    assert_eq!(evaluate.current_version, 1);
     assert_eq!(evaluate.version_count, 1);
 
     // A user copy starts its own sequence.
@@ -46,9 +46,9 @@ async fn threads_group_owners_and_count_versions() {
         .find(|thread| thread.name == "evaluate" && !thread.is_system)
         .expect("user thread");
 
-    assert_eq!(system.latest_version, 1);
+    assert_eq!(system.current_version, 1);
     assert_eq!(system.version_count, 1, "the user's writes do not touch it");
-    assert_eq!(user.latest_version, 2);
+    assert_eq!(user.current_version, 2);
     assert_eq!(user.version_count, 2);
 
     // System before user, so the two owners read together.

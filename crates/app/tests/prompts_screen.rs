@@ -218,8 +218,8 @@ fn thread(name: &str, is_system: bool, version: i64) -> PromptThread {
         name: name.into(),
         category: "evaluate".into(),
         is_system,
-        latest_id: version,
-        latest_version: version,
+        current_id: version,
+        current_version: version,
         version_count: version,
         updated_at: fixed_time(),
     }
@@ -230,8 +230,8 @@ fn thread_with_category(name: &str, category: &str, is_system: bool, version: i6
         name: name.into(),
         category: category.into(),
         is_system,
-        latest_id: version,
-        latest_version: version,
+        current_id: version,
+        current_version: version,
         version_count: version,
         updated_at: fixed_time(),
     }
@@ -275,6 +275,8 @@ fn prompts_for(contents: &[&str]) -> Vec<Prompt> {
                 format!("hash-{}0123456789", index + 1)
             },
             supersedes_id: None,
+            is_current: index == 0,
+            retired_at: None,
             created_at: fixed_time(),
             updated_at: fixed_time(),
         })

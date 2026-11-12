@@ -15,7 +15,7 @@
 //!   evaluation reports that reference the old content hash remain
 //!   reproducible.
 //! - User prompts (`is_system = false`) are never touched by seeding, even
-//!   if they share a name with a system prompt. See `active_system` in
+//!   if they share a name with a system prompt. See `newest_system` in
 //!   `repo::prompts`.
 //!
 //! ## Keeping the seed list in sync
@@ -245,7 +245,7 @@ pub async fn seed_or_update(
 async fn seed_one(pool: &SqlitePool, seed: &SeedPrompt) -> Result<SeedOutcome> {
     let hash = content_hash(seed.content);
 
-    match prompts::active_system(pool, seed.name).await? {
+    match prompts::newest_system(pool, seed.name).await? {
         None => {
             let prompt = prompts::insert_system_prompt(
                 pool,
