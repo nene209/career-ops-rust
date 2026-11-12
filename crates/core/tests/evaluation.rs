@@ -29,6 +29,7 @@ use career_ops_core::repo::evaluation_reports::{self, NewEvaluationReport};
 use career_ops_core::repo::job_descriptions as job_repo;
 use career_ops_core::repo::job_descriptions::NewJobDescription;
 use career_ops_core::repo::profile::{self, ProfileDetails};
+use career_ops_core::repo::prompts;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::ConnectOptions;
 
@@ -958,6 +959,61 @@ async fn a_hostile_posting_is_fenced_as_untrusted_data() {
     assert!(
         prompt.contains("untrusted external text"),
         "the prompt states the data/instruction rule"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn an_activated_prompt_version_is_the_one_a_run_records() {
+    let db = common::TestDb::new_raw().await;
+    seed_profile_and_prompts(&db).await;
+
+    let v1 = prompts::create_version(
+        &db.pool,
+        "evaluate",
+        "evaluate",
+        "USER V1\n{{cv_summary}}\n{{job_description}}",
+        false,
+    )
+    .await
+    .expect("v1");
+    prompts::create_version(
+        &db.pool,
+        "evaluate",
+        "evaluate",
+        "USER V2\n{{cv_summary}}\n{{job_description}}",
+        false,
+    )
+    .await
+    .expect("v2");
+    prompts::set_current(&db.pool, v1.id)
+        .await
+        .expect("activate v1");
+
+    let job = store_job(&db, "Engineer", &long_text()).await;
+    let backend = FakeBackend::with_json(json_reply(0.8, "match", "strong"));
+    let result = run_evaluation(
+        &db.pool,
+        &EvaluationRequest::new(job.id),
+        &backend,
+        None,
+        None,
+    )
+    .await
+    .expect("evaluate");
+
+    assert_eq!(
+        result.prompt_version, 1,
+        "the activated version is the one recorded"
+    );
+    assert_eq!(result.prompt_hash, v1.content_hash);
+
+    let prompt = &backend.prompts()[0];
+    assert!(prompt.contains("USER V1"));
+    assert!(
+        !prompt.contains("USER V2"),
+        "the newer version was not sent"
     );
 
     db.close().await;

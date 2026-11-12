@@ -8,7 +8,7 @@
 mod common;
 
 use career_ops_core::model::FetchTier;
-use career_ops_core::prompts_seed::{self, SeedOutcome};
+use career_ops_core::prompts_seed::{self, SeedOutcome, SeedPrompt};
 use career_ops_core::repo::applications;
 use career_ops_core::repo::content_hash;
 use career_ops_core::repo::cover_letters::{self, NewCoverLetter};
@@ -267,6 +267,148 @@ async fn resolution_falls_back_to_the_system_prompt() {
         .await
         .expect("resolve")
         .is_none());
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn an_older_user_current_wins_over_a_newer_system_version() {
+    let db = common::TestDb::new_raw().await;
+    seed_all(&db.pool).await;
+
+    let user_v1 = prompts::create_version(&db.pool, "evaluate", "evaluate", "user one", false)
+        .await
+        .expect("user v1");
+    prompts::create_version(&db.pool, "evaluate", "evaluate", "user two", false)
+        .await
+        .expect("user v2");
+    prompts::set_current(&db.pool, user_v1.id)
+        .await
+        .expect("activate user v1");
+
+    // A later release seeds system version 2. It is newer than the user's
+    // current version, but resolution is owner-scoped and pointer-based.
+    let system_v2 = prompts::insert_system_prompt(
+        &db.pool,
+        "evaluate",
+        "evaluate",
+        "system two",
+        &content_hash("system two"),
+        2,
+    )
+    .await
+    .expect("system v2");
+
+    let resolved = prompts::active_for_use(&db.pool, "evaluate")
+        .await
+        .expect("resolve")
+        .expect("a prompt");
+    assert_eq!(resolved.id, user_v1.id);
+    assert!(!resolved.is_system);
+    assert_eq!(resolved.version, 1);
+
+    let system_current = prompts::current(&db.pool, "evaluate", true)
+        .await
+        .expect("query")
+        .expect("system current");
+    assert_eq!(system_current.id, system_v2.id);
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn seeding_a_changed_system_prompt_does_not_move_a_user_pointer() {
+    let db = common::TestDb::new_raw().await;
+    let v1 = [SeedPrompt {
+        name: "probe",
+        category: "evaluate",
+        content: "system one",
+    }];
+    prompts_seed::seed_or_update(&db.pool, &v1)
+        .await
+        .expect("seed v1");
+    let user = prompts::create_version(&db.pool, "probe", "evaluate", "user one", false)
+        .await
+        .expect("user copy");
+
+    let v2 = [SeedPrompt {
+        name: "probe",
+        category: "evaluate",
+        content: "system two",
+    }];
+    prompts_seed::seed_or_update(&db.pool, &v2)
+        .await
+        .expect("seed v2");
+
+    let system_current = prompts::current(&db.pool, "probe", true)
+        .await
+        .expect("query")
+        .expect("system current");
+    assert_eq!(system_current.version, 2);
+
+    let user_current = prompts::current(&db.pool, "probe", false)
+        .await
+        .expect("query")
+        .expect("user current");
+    assert_eq!(
+        user_current.id, user.id,
+        "seeding never moves a user's pointer"
+    );
+
+    let resolved = prompts::active_for_use(&db.pool, "probe")
+        .await
+        .expect("resolve")
+        .expect("user copy");
+    assert_eq!(resolved.id, user.id);
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn seeding_a_changed_system_prompt_advances_only_the_system_pointer() {
+    let db = common::TestDb::new_raw().await;
+    let v1 = [SeedPrompt {
+        name: "probe",
+        category: "evaluate",
+        content: "system one",
+    }];
+    prompts_seed::seed_or_update(&db.pool, &v1)
+        .await
+        .expect("seed v1");
+    let first = prompts::active_for_use(&db.pool, "probe")
+        .await
+        .expect("resolve")
+        .expect("system v1");
+    assert_eq!(first.version, 1);
+
+    let v2 = [SeedPrompt {
+        name: "probe",
+        category: "evaluate",
+        content: "system two",
+    }];
+    prompts_seed::seed_or_update(&db.pool, &v2)
+        .await
+        .expect("seed v2");
+
+    let second = prompts::active_for_use(&db.pool, "probe")
+        .await
+        .expect("resolve")
+        .expect("system v2");
+    assert_eq!(second.version, 2);
+    assert!(second.is_system);
+
+    let versions = prompts::list_versions(&db.pool, "probe", true)
+        .await
+        .expect("versions");
+    assert_eq!(
+        versions.iter().filter(|version| version.is_current).count(),
+        1
+    );
+    let v1_row = versions
+        .iter()
+        .find(|version| version.version == 1)
+        .expect("v1");
+    assert!(!v1_row.is_current);
 
     db.close().await;
 }
