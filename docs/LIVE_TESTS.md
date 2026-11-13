@@ -1,6 +1,6 @@
 # Live (Network) Tests
 
-**Last reviewed:** 2026-11-12
+**Last reviewed:** 2026-11-13
 **Why this file exists:** the default test suite must be offline, deterministic,
 and fast. A few tests cannot be any of those things because their subject is the
 outside world: a job board changed its JSON, a detail page is no longer served,
@@ -52,6 +52,7 @@ Add a row here in the same change that adds or removes a live test.
 | `obscura_returns_post_js_dom` | `crates/core/tests/obscura_spike.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; binary availability (`vendor/obscura` or `OBSCURA_BIN`) | `https://github.com/nene209/career-ops-rust` | The sidecar starts, CDP drives a page, post-JS DOM exists, and killing the sidecar is detectable. | **Candidate to make local.** Serve a page with inline JavaScript from a temp dir instead of GitHub; it proves the same thing without an external dependency. Do that if this spike is ever promoted beyond a Phase 2 gate. |
 | `obscura_print_to_pdf_if_supported` | `crates/core/tests/obscura_spike.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; binary availability (the check was added in Phase 3.5 WS0) | The sidecar | Records whether `printToPDF` works (the Phase 2 assumption is that it does not). | **Keep live but weak.** The availability check now runs first, so a machine without the binary skips instead of failing. |
 | `deepseek_accepts_the_configured_key` | `crates/core/tests/llm_live.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; returns early without `DEEPSEEK_API_KEY` | `https://api.deepseek.com/user/balance` | The key is accepted and the provider is reachable. `verify()` asks for the balance, so a pass spends no tokens and produces no completion. | **Keep live.** It is the only check that a key and the endpoint still agree; Phase 3's structured-output calls will be cassette-backed. |
+| `custom_endpoint_answers_a_prompt` | `crates/core/tests/custom_live.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; returns early unless `CAREER_OPS_LOCAL_LLM_URL` and `CAREER_OPS_LOCAL_LLM_MODEL` are set (`CAREER_OPS_LOCAL_LLM_KEY` optional) | A user-run Ollama, `llama-server`, vLLM, or gateway | The configured endpoint answers a plain chat completion with non-empty text, reports usage (or is noted as not reporting it), and is never priced. `/models` is attempted and reported but not required. | **Keep live.** The request shape is pinned offline by `custom_endpoint.rs` against a fake server; this is the only proof a real engine answers that shape. |
 | `deepseek_scores_the_fixtures_in_their_bands` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; returns early without `DEEPSEEK_API_KEY` | The curated Phase 3 fixtures (strong, weak, borderline) | The real model still lands each fixture in its documented score band, and the report stores. Also the cassette recorder when `CAREER_OPS_RECORD_CASSETTES=1`. | **Keep live.** The offline suite replays cassettes (`evaluation_fixtures.rs`); only the live run proves the model's judgment and keeps the recordings honest. |
 | `deepseek_writes_a_usable_cover_letter` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; returns early without `DEEPSEEK_API_KEY` | The strong fixture + a reference letter | The letter avoids the prompt's banned phrases and em dashes, and a model judge scores its semantic similarity against the reference at 0.7 or above. | **Keep live.** The banned-phrase check is also offline; the similarity judgment needs a model. |
 | `deepseek_proposes_real_boards` | `crates/core/tests/suggest_live.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; returns early without `DEEPSEEK_API_KEY` | DeepSeek, one suggestion call against a throwaway vault | The real model still returns the suggestion contract, and every derived URL sits on the engine's own host, so a reply cannot point the app at an arbitrary site. | **Keep live.** The offline suite uses a scripted backend; only the live run proves the prompt still elicits the contract. |
@@ -63,6 +64,10 @@ tests above, not tests of their own.
 
 ### Live tests that are not in the table
 
+- `crates/core/tests/custom_endpoint.rs` is **offline**: it binds a loopback
+  port and answers `/models` and `/chat/completions` itself. It needs the ability
+  to bind a local port (and `NO_PROXY=127.0.0.1,localhost` if your shell exports
+  a proxy), but never leaves the machine.
 - `crates/core/tests/ats_adapters.rs` is **offline**: it parses saved fixtures
   and asserts the normalization. Its header mentions `reqwest` only to explain
   why the HTTP call is not there.
@@ -105,6 +110,23 @@ The DeepSeek key check is also gated by the key itself:
 CAREER_OPS_LIVE=1 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test llm_live -- --ignored --nocapture
 ```
+
+A local endpoint needs its URL and model; the key is optional, as in the app:
+
+```bash
+CAREER_OPS_LIVE=1 \
+    CAREER_OPS_LOCAL_LLM_URL=http://localhost:11434/v1 \
+    CAREER_OPS_LOCAL_LLM_MODEL=llama3.2 \
+    cargo test -p career-ops-core --test custom_live -- --ignored --nocapture
+```
+
+The **offline** half of the custom provider lives in
+`crates/core/tests/custom_endpoint.rs`: it binds a loopback port and answers
+`/models` and `/chat/completions` itself, so the route, the optional
+`Authorization` header, and the `response_format` gate are checked without a
+network or a real engine. If your shell exports `HTTP_PROXY`/`ALL_PROXY`, run it
+with `NO_PROXY=127.0.0.1,localhost` — `reqwest` honours the proxy variables for
+loopback addresses too, and the requests would bypass the fake server.
 
 The Phase 3 fixture checks spend tokens and run on demand. Add
 `CAREER_OPS_RECORD_CASSETTES=1` to rewrite the offline cassettes (review the

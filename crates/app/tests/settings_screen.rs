@@ -326,6 +326,154 @@ fn a_hosted_provider_still_needs_a_key_before_testing() {
         .is_disabled());
 }
 
+fn custom_view() -> SettingsViewModel {
+    let mut view = SettingsViewModel::default();
+    view.set_llm(
+        LlmConfig {
+            provider: LlmProvider::Custom,
+            model: "llama3.2".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            ..LlmConfig::default()
+        },
+        false,
+    );
+    view
+}
+
+#[test]
+fn the_endpoint_fields_belong_to_the_custom_provider_only() {
+    let mut custom = harness(custom_view(), SettingsRenderState::default());
+    custom.run();
+    for label in ["Base URL", "Use JSON mode", "Context window (tokens)"] {
+        let _ = custom.get_by_label(label);
+    }
+
+    let mut hosted = harness(SettingsViewModel::default(), SettingsRenderState::default());
+    hosted.run();
+    for label in ["Base URL", "Use JSON mode", "Context window (tokens)"] {
+        assert!(
+            hosted.query_by_label(label).is_none(),
+            "{label} is not a DeepSeek setting"
+        );
+    }
+}
+
+#[test]
+fn turning_json_mode_off_is_what_the_form_reports() {
+    let mut harness = harness(custom_view(), SettingsRenderState::default());
+    harness.run();
+
+    let checkbox = harness.get_by_label("Use JSON mode");
+    checkbox.click();
+    harness.run();
+
+    assert!(!harness.state().view_model.llm.json_mode);
+    assert!(harness.state().view_model.is_llm_dirty());
+    assert!(!harness
+        .get_by_role_and_label(Role::Button, "Save AI settings")
+        .accesskit_node()
+        .is_disabled());
+}
+
+#[test]
+fn a_typed_context_window_reaches_the_saved_configuration() {
+    let mut harness = harness(custom_view(), SettingsRenderState::default());
+    harness.run();
+
+    type_into(&mut harness, "Context window (tokens)", "8192");
+    harness
+        .get_by_role_and_label(Role::Button, "Save AI settings")
+        .click();
+    harness.run();
+
+    match harness.state().actions.as_slice() {
+        [SettingsAction::SaveLlm(config)] => {
+            assert_eq!(config.custom_context_window, Some(8_192));
+            assert_eq!(config.base_url, "http://localhost:11434/v1");
+            assert_eq!(config.model, "llama3.2");
+        }
+        other => panic!("unexpected actions: {other:?}"),
+    }
+}
+
+#[test]
+fn a_plain_http_url_away_from_this_machine_is_warned_about_and_still_savable() {
+    let mut view = SettingsViewModel::default();
+    view.set_llm(
+        LlmConfig {
+            provider: LlmProvider::Custom,
+            model: "llama3.2".into(),
+            base_url: "http://192.168.1.50:8080/v1".into(),
+            ..LlmConfig::default()
+        },
+        false,
+    );
+    let mut harness = harness(view, SettingsRenderState::default());
+    harness.run();
+
+    let warning = harness.get_by_label("Plain http to 192.168.1.50 sends your CV and any API key across the network in clear text. Use https, or an address that stays on this machine.");
+    let _ = warning;
+    // A warning is not a refusal: the endpoint can still be tested.
+    assert!(!harness
+        .get_by_role_and_label(Role::Button, "Test connection")
+        .accesskit_node()
+        .is_disabled());
+}
+
+#[test]
+fn an_unusable_base_url_is_explained_beside_the_endpoint() {
+    let mut view = SettingsViewModel::default();
+    view.set_llm(
+        LlmConfig {
+            provider: LlmProvider::Custom,
+            model: "llama3.2".into(),
+            base_url: "ftp://localhost/v1".into(),
+            ..LlmConfig::default()
+        },
+        false,
+    );
+    let mut harness = harness(view, SettingsRenderState::default());
+    harness.run();
+
+    let _ = harness.get_by_label("the base URL must start with http:// or https://");
+    assert!(harness
+        .get_by_role_and_label(Role::Button, "Test connection")
+        .accesskit_node()
+        .is_disabled());
+}
+
+#[test]
+fn switching_providers_keeps_the_endpoint_and_replaces_the_model() {
+    let mut harness = harness(custom_view(), SettingsRenderState::default());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "DeepSeek")
+        .click();
+    harness.run();
+
+    let switched = &harness.state().view_model;
+    assert_eq!(switched.llm.provider, LlmProvider::DeepSeek);
+    assert_eq!(switched.llm.model, "deepseek-flash");
+    assert_eq!(
+        switched.llm.base_url, "http://localhost:11434/v1",
+        "the endpoint is kept for when the user switches back"
+    );
+
+    harness
+        .get_by_role_and_label(Role::Button, "Local / custom")
+        .click();
+    harness.run();
+
+    let back = &harness.state().view_model;
+    assert_eq!(back.llm.provider, LlmProvider::Custom);
+    assert_eq!(
+        back.llm.model, "",
+        "DeepSeek's model would not be served by the endpoint"
+    );
+    assert_eq!(back.llm.base_url, "http://localhost:11434/v1");
+}
+
 #[test]
 fn a_model_change_enables_saving_and_emits_the_config() {
     let mut view = SettingsViewModel::default();

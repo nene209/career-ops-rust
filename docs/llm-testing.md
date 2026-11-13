@@ -82,7 +82,31 @@ or the prompt no longer contains the fixture's distinctive phrase.
   similarity score against `REFERENCE_LETTER` (threshold 0.7). It prints the
   score so drift is visible.
 
-`docs/LIVE_TESTS.md` indexes both with the repository's single gate convention.
+`docs/LIVE_TESTS.md` indexes those with the repository's single gate convention.
+
+## Local and custom endpoints
+
+Any OpenAI-compatible endpoint is a supported backend (Phase 3.5): Ollama,
+`llama-server`, vLLM, LM Studio, or a gateway. Two things are worth knowing when
+testing one.
+
+- **The request shape is not the OpenAI default.** The client forces
+  `Route::Chat` (`/chat/completions`) because the `OPENAI` dialect otherwise
+  defaults to the Responses API, which local servers do not implement. It also
+  omits `Authorization` when the key is empty (`Auth::OptionalBearer`). Both are
+  pinned offline by `crates/core/tests/custom_endpoint.rs`, which runs a fake
+  server on a loopback port.
+- **JSON mode is a setting, not a capability.** With it on, the request carries
+  `response_format: json_object`; with it off (`StructuredOutput::PromptOnly`),
+  the prompt asks for JSON and the reply is parsed and repaired once, exactly as
+  a DeepSeek reply is. A local model that rejects `response_format` is therefore
+  usable, not refused.
+
+A local call is never priced: the catalog reference is scoped to
+`custom/<model>`, so the usage ledger stores `NULL` and **Usage** shows a dash.
+The live check is `custom_endpoint_answers_a_prompt` in `custom_live.rs`; it
+needs `CAREER_OPS_LOCAL_LLM_URL` and `CAREER_OPS_LOCAL_LLM_MODEL`, and the key is
+optional.
 
 ## Why not `rig::evals`?
 

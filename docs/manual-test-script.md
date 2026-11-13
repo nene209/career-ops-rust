@@ -1,7 +1,7 @@
 # Manual Test Script
 
 **Owner:** whoever is about to declare a UI phase done, or is about to start Phase 3.
-**Last updated:** 2026-11-12
+**Last updated:** 2026-11-13
 **Applies to:** the `career-ops` binary built from this workspace.
 
 Automated tests cover the state machine, the view models, and the screens with
@@ -287,6 +287,31 @@ A triage batch covers at most 50 postings per click; the button's count is every
 new row, so a large backlog takes more than one click. A row the batch has
 already sorted is no longer `new` and is left out of the next run.
 
+## 6g. Local / custom provider
+
+Any OpenAI-compatible endpoint works: Ollama, `llama-server`, vLLM, LM Studio,
+or a gateway. Nothing leaves your network, and an API key is optional. Start the
+server first — for Ollama, `ollama serve` and then `ollama pull llama3.2`; for a
+llama.cpp build, `llama-server -m model.gguf --port 8080`. 🌐 marks a step that
+talks to the endpoint over the network (a loopback listener still counts).
+
+| # | Step | Expected |
+| :-- | :--- | :--- |
+| 6g.1 | In **Settings → AI evaluation**, select **Local / custom**. | **Base URL**, **Use JSON mode** (ticked), and **Context window (tokens)** appear. The data-sharing note names the endpoint, the key field reads **API key (optional)**, and the line below it reads "No key stored (optional).". **Test connection** stays disabled while the URL is empty, and its tooltip says the base URL is missing. |
+| 6g.2 | Enter `http://localhost:11434/v1` (Ollama) or `http://localhost:8080/v1` (`llama-server`), then the model name (`llama3.2`), and click **Save AI settings**. | "AI settings saved." The readiness line above stops complaining, and **Test connection** is enabled without a key. |
+| 6g.3 | Click **Test connection**. 🌐 | "Connection to Local / custom succeeded." A server without `/models` fails here with the provider's answer; that is not fatal — §6g.5 still works. Nothing is spent either way. |
+| 6g.4 | Enter `http://192.168.1.50:8080/v1` as the base URL, then `ftp://localhost/v1`. | A LAN address over plain http shows the clear-text warning and **Test connection** stays enabled. The `ftp` URL shows "the base URL must start with http:// or https://" and disables the button. Restore the loopback URL afterwards. |
+| 6g.5 | Open a Pipeline row with a stored description and click **Evaluate**. 🌐 | Streamed report text appears as usual, and the report stores with the local model name. No API key was ever entered. |
+| 6g.6 | Open **Usage** and click **Reload**. | A row for **Local / custom** / the model with its reported or estimated counters and a `—` cost: a self-hosted call is never priced. |
+| 6g.7 | Back in **Settings**, untick **Use JSON mode**, save, and evaluate again. 🌐 | The call still produces a stored report — the request asks for JSON in the prompt and the reply is validated locally. A model that rejects `response_format` now stops failing. |
+| 6g.8 | Enter `8192` in **Context window (tokens)** and save; then enter `8k`. | `8192` saves and the pre-flight token check uses it. `8k` is refused with "the context window must be at least 1024 tokens", and the form stays dirty. Clear the field to disable the check. |
+| 6g.9 | Select **DeepSeek**, then **Local / custom** again. | The base URL, JSON-mode setting, and context window survive the round trip. The model is replaced by `deepseek-flash` on the way to DeepSeek and cleared on the way back, because that name would not be served by the endpoint. |
+
+A custom endpoint is never priced, so **Usage** shows `—` rather than a guessed
+cost. The live check for the transport is
+`custom_endpoint_answers_a_prompt` (§8); the request shape (path, auth header,
+`response_format`) is pinned offline by `crates/core/tests/custom_endpoint.rs`.
+
 ## 7. Idle behaviour
 
 | # | Step | Expected |
@@ -514,6 +539,34 @@ the rendered DOM.
 This check covers the fetch, storage, portal health, and Pipeline contents. The
 UI feedback while a fetch is in flight (spinner, per-portal progress, cancel
 button) is still section 4's job.
+
+### Local / custom endpoint
+
+The local provider's transport is checked by one ignored test. It needs a
+running endpoint; the model is required because there is no safe default:
+
+```bash
+CAREER_OPS_LIVE=1 \
+  CAREER_OPS_LOCAL_LLM_URL=http://localhost:11434/v1 \
+  CAREER_OPS_LOCAL_LLM_MODEL=llama3.2 \
+  cargo test -p career-ops-core --test custom_live -- --ignored --nocapture
+```
+
+It prints the reply and the reported counters, treats a missing `/models` route
+as information rather than a failure, and asserts that an empty reply is not a
+pass and that the call is never priced. `CAREER_OPS_LOCAL_LLM_KEY` is optional.
+
+Before that, run the offline half — no network, no engine, but it binds a
+loopback port and answers `/models` and `/chat/completions` itself:
+
+```bash
+cargo test -p career-ops-core --test custom_endpoint
+```
+
+Six tests there pin the chat path (not `/responses`), the absent `Authorization`
+header for an empty key, `Bearer` when a key is stored, `response_format` only in
+JSON mode, a 401, and a refused connection. If your shell exports a proxy, add
+`NO_PROXY=127.0.0.1,localhost`.
 
 ## 9. Logs and diagnostics
 

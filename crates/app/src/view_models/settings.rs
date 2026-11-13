@@ -55,6 +55,14 @@ pub struct LlmForm {
     pub model: String,
     pub api_key: String,
     pub has_api_key: bool,
+    /// The custom endpoint's base URL, as typed. Kept for every provider so
+    /// switching to DeepSeek and back does not lose it.
+    pub base_url: String,
+    /// Whether a custom endpoint is asked for `response_format`.
+    pub json_mode: bool,
+    /// The context window in tokens, as typed. Empty means "unknown", which
+    /// disables the pre-flight token check.
+    pub context_window: String,
 }
 
 impl Default for LlmForm {
@@ -65,7 +73,23 @@ impl Default for LlmForm {
             model: config.model,
             api_key: String::new(),
             has_api_key: false,
+            base_url: config.base_url,
+            json_mode: config.json_mode,
+            context_window: String::new(),
         }
+    }
+}
+
+impl LlmForm {
+    fn adopt(&mut self, config: &LlmConfig) {
+        self.provider = config.provider;
+        self.model = config.model.clone();
+        self.base_url = config.base_url.clone();
+        self.json_mode = config.json_mode;
+        self.context_window = config
+            .custom_context_window
+            .map(|window| window.to_string())
+            .unwrap_or_default();
     }
 }
 
@@ -114,32 +138,34 @@ impl SettingsViewModel {
 
     /// Adopt the stored LLM configuration and whether a key is present.
     pub fn set_llm(&mut self, saved: LlmConfig, has_api_key: bool) {
-        self.llm.provider = saved.provider;
-        self.llm.model = saved.model.clone();
+        self.llm.adopt(&saved);
         self.llm.api_key.clear();
         self.llm.has_api_key = has_api_key;
         self.saved_llm = saved;
     }
 
-    /// `true` when the provider or model differs from what is stored.
+    /// `true` when the form describes a different configuration than storage.
     pub fn is_llm_dirty(&self) -> bool {
         self.llm_config() != self.saved_llm
     }
 
     /// The configuration the form describes, with the stored temperature and
-    /// budgets preserved and the model sanitized.
+    /// budgets preserved, the model and URL sanitized, and the context window
+    /// parsed.
     pub fn llm_config(&self) -> LlmConfig {
         LlmConfig {
             provider: self.llm.provider,
             model: self.llm.model.trim().to_string(),
+            base_url: self.llm.base_url.trim().to_string(),
+            json_mode: self.llm.json_mode,
+            custom_context_window: parse_context_window(&self.llm.context_window),
             ..self.saved_llm.clone()
         }
     }
 
     /// Adopt the value that was just stored.
     pub fn mark_llm_saved(&mut self, saved: LlmConfig) {
-        self.llm.provider = saved.provider;
-        self.llm.model = saved.model.clone();
+        self.llm.adopt(&saved);
         self.saved_llm = saved;
     }
 
@@ -177,6 +203,20 @@ fn split_list(raw: &str) -> Vec<String> {
 fn blank_to_none(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// The typed context window.
+///
+/// Empty is `None`: the user does not know the window, so the pre-flight check
+/// is skipped rather than guessed. Anything that is not a number becomes `0`,
+/// which `validate_custom` refuses with a message about this field — silently
+/// reading it as "unknown" would ignore what the user typed.
+fn parse_context_window(raw: &str) -> Option<usize> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.parse::<usize>().unwrap_or(0))
 }
 
 #[cfg(test)]
@@ -286,6 +326,64 @@ mod tests {
         assert_eq!(form.temperature, 0.9);
         assert_eq!(form.max_tokens, Some(1_024));
         assert_eq!(form.max_job_chars, 7_000);
+    }
+
+    #[test]
+    fn a_stored_custom_endpoint_fills_the_form_and_round_trips() {
+        let stored = LlmConfig {
+            provider: LlmProvider::Custom,
+            model: "qwen2.5:7b".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            json_mode: false,
+            custom_context_window: Some(32_768),
+            ..LlmConfig::default()
+        };
+        let mut view = SettingsViewModel::default();
+        view.set_llm(stored.clone(), false);
+
+        assert_eq!(view.llm.base_url, "http://localhost:11434/v1");
+        assert!(!view.llm.json_mode);
+        assert_eq!(view.llm.context_window, "32768");
+        assert!(!view.is_llm_dirty(), "an unchanged form is not a change");
+        assert_eq!(view.llm_config(), stored);
+    }
+
+    #[test]
+    fn the_context_window_is_optional_and_refuses_what_is_not_a_number() {
+        let mut view = SettingsViewModel::default();
+        view.set_llm(LlmConfig::default(), false);
+
+        view.llm.context_window = "   ".into();
+        assert_eq!(view.llm_config().custom_context_window, None, "blank");
+
+        view.llm.context_window = "8192".into();
+        assert_eq!(view.llm_config().custom_context_window, Some(8_192));
+
+        // A typo must not silently disable the pre-flight check.
+        view.llm.context_window = "8k".into();
+        assert_eq!(view.llm_config().custom_context_window, Some(0));
+    }
+
+    #[test]
+    fn toggling_json_mode_and_changing_the_endpoint_make_the_form_dirty() {
+        let custom = LlmConfig {
+            provider: LlmProvider::Custom,
+            model: "llama3.2".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            ..LlmConfig::default()
+        };
+        let mut view = SettingsViewModel::default();
+        view.set_llm(custom, false);
+        assert!(!view.is_llm_dirty());
+
+        view.llm.json_mode = false;
+        assert!(view.is_llm_dirty());
+        assert!(!view.llm_config().json_mode);
+
+        view.llm.json_mode = true;
+        view.llm.base_url = "http://127.0.0.1:8080/v1".into();
+        assert!(view.is_llm_dirty());
+        assert_eq!(view.llm_config().base_url, "http://127.0.0.1:8080/v1");
     }
 
     #[test]

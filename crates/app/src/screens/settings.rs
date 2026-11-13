@@ -170,7 +170,7 @@ pub fn show(
     action
 }
 
-/// The provider, the model, and the API key.
+/// The provider, the endpoint, the model, and the API key.
 ///
 /// Everything here has a separate save from the preferences: the two live in
 /// different places (`profile` and `settings`), and the key lives in the OS
@@ -181,15 +181,39 @@ fn ai_section(
     state: SettingsRenderState<'_>,
     action: &mut Option<SettingsAction>,
 ) {
+    let custom = view_model.llm.provider == LlmProvider::Custom;
+    let config = view_model.llm_config();
+
     ui.label(RichText::new("AI evaluation").strong());
-    ui.label(
-        RichText::new(
-            "Evaluations send your CV summary and the selected job's description to the \
-             provider below. Nothing leaves this machine until you run one. DeepSeek is \
-             hosted in the PRC; the API key is stored in the OS keychain, never the database.",
-        )
-        .weak(),
-    );
+    if custom {
+        // The data-sharing note names the endpoint, because "the provider" is
+        // whatever the user typed: it may be this machine or a host on their
+        // network, and the difference matters.
+        let destination = config.base_url.trim();
+        let destination = if destination.is_empty() {
+            "the endpoint below"
+        } else {
+            destination
+        };
+        ui.label(
+            RichText::new(format!(
+                "Evaluations send your CV summary and the selected job's description to \
+                 {destination}. Nothing leaves this machine until you run one. An API key is \
+                 optional and stored in the OS keychain, never the database."
+            ))
+            .weak(),
+        );
+    } else {
+        ui.label(
+            RichText::new(
+                "Evaluations send your CV summary and the selected job's description to the \
+                 provider below. Nothing leaves this machine until you run one. DeepSeek is \
+                 hosted in the PRC; the API key is stored in the OS keychain, never the \
+                 database.",
+            )
+            .weak(),
+        );
+    }
     if let Some(status) = state.llm_status {
         ui.label(RichText::new(status).weak().small());
     }
@@ -216,6 +240,22 @@ fn ai_section(
         }
     });
 
+    if custom {
+        labelled_input(ui, "Base URL", &mut view_model.llm.base_url, false);
+        ui.label(
+            RichText::new(
+                "For example http://localhost:11434/v1 (Ollama) or \
+                 http://localhost:8080/v1 (llama-server). Include the /v1 suffix.",
+            )
+            .weak()
+            .small(),
+        );
+        if let Some(warning) = config.custom_warning() {
+            ui.label(RichText::new(warning).color(ui.visuals().warn_fg_color));
+        }
+        ui.add_space(6.0);
+    }
+
     labelled_input(ui, "Model", &mut view_model.llm.model, false);
     ui.label(
         RichText::new(match view_model.llm.provider {
@@ -228,6 +268,43 @@ fn ai_section(
         .small(),
     );
     ui.add_space(6.0);
+
+    ui.add_space(6.0);
+    if custom {
+        ui.checkbox(&mut view_model.llm.json_mode, "Use JSON mode");
+        ui.label(
+            RichText::new(
+                "Some local models reject `response_format`. Turning this off asks for JSON in \
+                 the prompt instead; the reply is still validated here.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.add_space(6.0);
+
+        labelled_input(
+            ui,
+            "Context window (tokens)",
+            &mut view_model.llm.context_window,
+            false,
+        );
+        ui.label(
+            RichText::new(
+                "Optional. Leave it blank if you do not know it: the pre-flight token check is \
+                 then skipped and the server's own limit still applies.",
+            )
+            .weak()
+            .small(),
+        );
+        // Only once something has been typed: a freshly switched provider is
+        // an empty form, not a mistake to shout about.
+        let touched =
+            !view_model.llm.base_url.trim().is_empty() || !view_model.llm.model.trim().is_empty();
+        if let (true, Err(problem)) = (touched, config.validate_custom()) {
+            ui.label(RichText::new(problem.to_string()).color(ui.visuals().error_fg_color));
+        }
+        ui.add_space(6.0);
+    }
 
     let key_required = view_model.llm.provider.requires_api_key();
     labelled_input(
@@ -270,7 +347,6 @@ fn ai_section(
     });
 
     ui.add_space(6.0);
-    let config = view_model.llm_config();
     ui.horizontal(|ui| {
         if ui
             .add_enabled(
