@@ -1573,12 +1573,11 @@ impl CareerOpsApp {
             }
 
             let config = LlmConfig::load(&pool).await.map_err(SuggestError::from)?;
-            let Some(key) = llm::keys::get_api_key(config.provider).map_err(SuggestError::from)?
-            else {
-                return Err(SuggestError::from(llm::LlmError::MissingApiKey {
-                    provider: config.provider,
-                }));
-            };
+            // An empty key is fine for a provider that does not need one;
+            // `build_client` decides, so every call site agrees.
+            let key = llm::keys::get_api_key(config.provider)
+                .map_err(SuggestError::from)?
+                .unwrap_or_default();
             let client = config.build_client(&key).map_err(SuggestError::from)?;
             suggest::suggest_portals(&pool, &cancel, &client).await
         });
@@ -2677,11 +2676,9 @@ impl CareerOpsApp {
             }
 
             let config = LlmConfig::load(&pool).await?;
-            let Some(key) = llm::keys::get_api_key(config.provider)? else {
-                return Err(CoreError::from(llm::LlmError::MissingApiKey {
-                    provider: config.provider,
-                }));
-            };
+            // An empty key is fine for a provider that does not need one;
+            // `build_client` decides, so every call site agrees.
+            let key = llm::keys::get_api_key(config.provider)?.unwrap_or_default();
             let client = config.build_client(&key)?;
             evaluation::run_evaluation(&pool, &request, &client, Some(fetch), Some(&deltas_tx))
                 .await
@@ -2849,11 +2846,9 @@ impl CareerOpsApp {
             }
 
             let config = LlmConfig::load(&pool).await?;
-            let Some(key) = llm::keys::get_api_key(config.provider)? else {
-                return Err(CoreError::from(llm::LlmError::MissingApiKey {
-                    provider: config.provider,
-                }));
-            };
+            // An empty key is fine for a provider that does not need one;
+            // `build_client` decides, so every call site agrees.
+            let key = llm::keys::get_api_key(config.provider)?.unwrap_or_default();
             let client = config.build_client(&key)?;
             cover_letter::run_cover_letter(&pool, &request, &client).await
         });
@@ -3022,12 +3017,11 @@ impl CareerOpsApp {
             }
 
             let config = LlmConfig::load(&pool).await.map_err(TriageError::from)?;
-            let Some(key) = llm::keys::get_api_key(config.provider).map_err(TriageError::from)?
-            else {
-                return Err(TriageError::from(llm::LlmError::MissingApiKey {
-                    provider: config.provider,
-                }));
-            };
+            // An empty key is fine for a provider that does not need one;
+            // `build_client` decides, so every call site agrees.
+            let key = llm::keys::get_api_key(config.provider)
+                .map_err(TriageError::from)?
+                .unwrap_or_default();
             let client = config.build_client(&key).map_err(TriageError::from)?;
             triage::run_triage(&pool, &request, &client).await
         });
@@ -3456,11 +3450,9 @@ impl CareerOpsApp {
         self.settings_message = None;
         self.llm_testing = Some(provider);
         self.llm_test_task = Some(self.spawn(async move {
-            let Some(key) = llm::keys::get_api_key(provider)? else {
-                return Err(career_ops_core::CoreError::from(
-                    llm::LlmError::MissingApiKey { provider },
-                ));
-            };
+            // A local endpoint usually has no key; `build_client` refuses an
+            // empty one only where the provider requires it.
+            let key = llm::keys::get_api_key(provider)?.unwrap_or_default();
             config.build_client(&key)?.verify().await?;
             Ok(())
         }));
@@ -3571,7 +3563,7 @@ impl CareerOpsApp {
     /// Adopt a configuration the user just saved and re-derive its capabilities.
     fn adopt_llm_status(&mut self, config: LlmConfig, has_api_key: bool) {
         self.llm_status = Some(LlmStatus {
-            capabilities: llm::capabilities(config.provider, &config.model),
+            capabilities: config.capabilities(),
             config,
             has_api_key,
         });

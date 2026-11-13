@@ -18,9 +18,7 @@ use crate::acquisition::manual;
 use crate::acquisition::router::FetchSource;
 use crate::error::{CoreError, Result};
 use crate::llm::usage::{elapsed_ms, Call, Task};
-use crate::llm::{
-    capabilities, CancelToken, Completion, CompletionBackend, DeltaSink, LlmConfig, LlmError,
-};
+use crate::llm::{CancelToken, Completion, CompletionBackend, DeltaSink, LlmConfig, LlmError};
 use crate::model::{ApplicationStatus, QueueState};
 use crate::prompt_render::{estimated_tokens, render, take_chars, untrusted_block, Variables};
 use crate::repo::evaluation_reports::{self, NewEvaluationReport};
@@ -119,16 +117,13 @@ pub async fn run_evaluation(
         config.model = model.to_string();
     }
 
-    if !capabilities(config.provider, &config.model)
-        .structured_output
-        .is_usable()
-    {
+    if !config.capabilities().structured_output.is_usable() {
         return Err(CoreError::Message(format!(
             "{} cannot return structured output; choose another model in Settings.",
             config.model
         )));
     }
-    let context_window = capabilities(config.provider, &config.model).context_window;
+    let context_window = config.capabilities().context_window;
 
     // A thin row is a card teaser: evaluating it would spend tokens to score a
     // headline. Fetching first is the only way the answer means anything.

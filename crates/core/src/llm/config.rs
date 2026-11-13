@@ -76,7 +76,7 @@ impl LlmProvider {
     /// provider. The others are listed in Settings as unavailable rather than
     /// hidden, so the gap is visible instead of surprising.
     pub fn is_supported(self) -> bool {
-        matches!(self, Self::DeepSeek)
+        matches!(self, Self::DeepSeek | Self::Custom)
     }
 
     /// Whether the provider refuses to work without a key.
@@ -449,14 +449,15 @@ mod tests {
     }
 
     #[test]
-    fn only_deepseek_is_configurable_today() {
+    fn only_deepseek_and_a_custom_endpoint_are_configurable_today() {
         assert!(LlmProvider::DeepSeek.is_supported());
         assert!(LlmProvider::DeepSeek.default_model().is_some());
+        assert!(LlmProvider::Custom.is_supported());
+        assert!(LlmProvider::Custom.default_model().is_none());
         for provider in [
             LlmProvider::OpenAI,
             LlmProvider::Anthropic,
             LlmProvider::Gemini,
-            LlmProvider::Custom,
         ] {
             assert!(!provider.is_supported(), "{provider:?}");
             assert!(provider.default_model().is_none(), "{provider:?}");

@@ -23,7 +23,7 @@ use url::Url;
 use crate::acquisition::known_sites;
 use crate::error::CoreError;
 use crate::llm::usage::{catalog_cost, elapsed_ms, Call, Task};
-use crate::llm::{capabilities, CancelToken, CompletionBackend, LlmConfig, LlmError};
+use crate::llm::{CancelToken, CompletionBackend, LlmConfig, LlmError};
 use crate::prompt_render::{estimated_tokens, take_chars, MAX_CV_CHARS};
 use crate::repo::llm_usage;
 use crate::repo::{profile, prompts};
@@ -192,10 +192,7 @@ struct Prepared {
 
 async fn prepare(pool: &SqlitePool) -> Result<Prepared, SuggestError> {
     let config = LlmConfig::load(pool).await?;
-    if !capabilities(config.provider, &config.model)
-        .structured_output
-        .is_usable()
-    {
+    if !config.capabilities().structured_output.is_usable() {
         return Err(SuggestError::Core(CoreError::Message(format!(
             "{} cannot return structured output; choose another model in Settings.",
             config.model
@@ -227,7 +224,7 @@ async fn prepare(pool: &SqlitePool) -> Result<Prepared, SuggestError> {
 
     let input_chars = assembled.chars().count();
     let input_tokens = estimated_tokens(input_chars);
-    if let Some(window) = capabilities(config.provider, &config.model).context_window {
+    if let Some(window) = config.capabilities().context_window {
         if input_tokens > window {
             return Err(SuggestError::Llm(LlmError::ContextLengthExceeded {
                 input_chars: Some(input_chars),

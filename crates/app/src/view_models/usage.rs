@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 
+use career_ops_core::llm::LlmProvider;
 use career_ops_core::repo::llm_usage::{ProviderModelTotals, RecentCall, TaskTotals};
 
 /// The period the screen asks for.
@@ -191,12 +192,18 @@ pub struct UsageViewModel {
 
 impl UsageViewModel {
     /// Build the screen's data from the three repository reads.
+    ///
+    /// The stored provider id is shown as its label, so a row reads "Local /
+    /// custom" rather than "custom". An id this build does not know is shown
+    /// verbatim: a row in the ledger should never become unreadable.
     pub fn from_rows(
         range: Range,
-        by_provider_model: Vec<ProviderModelTotals>,
+        providers: Vec<ProviderModelTotals>,
         by_task: Vec<TaskTotals>,
         recent: Vec<RecentCall>,
     ) -> Self {
+        let by_provider_model: Vec<ProviderModelTotals> =
+            providers.into_iter().map(named_provider).collect();
         let totals = UsageTotals::from_groups(&by_provider_model);
         Self {
             range,
@@ -210,6 +217,17 @@ impl UsageViewModel {
     pub fn is_empty(&self) -> bool {
         self.totals.calls == 0
     }
+}
+
+/// A group's provider id as the screen spells it.
+///
+/// The ledgers store the id (`custom`), not the label (`Local / custom`), so
+/// renaming a label never rewrites history. An unknown id is left as it is.
+fn named_provider(mut group: ProviderModelTotals) -> ProviderModelTotals {
+    if let Some(label) = LlmProvider::parse(&group.provider).map(|provider| provider.label()) {
+        group.provider = label.to_string();
+    }
+    group
 }
 
 /// Group digits in threes: `118204` becomes `118,204`.
@@ -368,6 +386,26 @@ mod tests {
 
         let none = UsageTotals::from_groups(&[]);
         assert_eq!(none.provenance(), "No calls in this period.");
+    }
+
+    #[test]
+    fn the_screen_names_the_stored_provider_id() {
+        let mut local = group(None, 1, 1, 0);
+        local.provider = "custom".into();
+        local.model = "llama3.2".into();
+        let unknown = ProviderModelTotals {
+            provider: "a_later_provider".into(),
+            ..group(None, 1, 0, 1)
+        };
+
+        let view =
+            UsageViewModel::from_rows(Range::All, vec![local, unknown], Vec::new(), Vec::new());
+
+        assert_eq!(view.by_provider_model[0].provider, "Local / custom");
+        assert_eq!(
+            view.by_provider_model[1].provider, "a_later_provider",
+            "an id this build does not know is shown as stored"
+        );
     }
 
     #[test]

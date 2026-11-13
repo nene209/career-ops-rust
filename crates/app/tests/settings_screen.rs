@@ -231,10 +231,15 @@ fn providers_this_build_cannot_reach_are_disabled() {
     let mut harness = harness(SettingsViewModel::default(), SettingsRenderState::default());
     harness.run();
 
-    assert!(!harness
-        .get_by_role_and_label(Role::Button, "DeepSeek")
-        .accesskit_node()
-        .is_disabled());
+    for label in ["DeepSeek", "Local / custom"] {
+        assert!(
+            !harness
+                .get_by_role_and_label(Role::Button, label)
+                .accesskit_node()
+                .is_disabled(),
+            "{label} is constructible"
+        );
+    }
     for label in ["OpenAI", "Anthropic", "Gemini"] {
         assert!(
             harness
@@ -244,6 +249,81 @@ fn providers_this_build_cannot_reach_are_disabled() {
             "{label} is not constructible yet"
         );
     }
+}
+
+#[test]
+fn a_custom_endpoint_needs_no_key_and_can_be_tested_without_one() {
+    let mut view = SettingsViewModel::default();
+    view.set_llm(
+        LlmConfig {
+            provider: LlmProvider::Custom,
+            model: "llama3.2".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            ..LlmConfig::default()
+        },
+        false,
+    );
+    let mut harness = harness(view, SettingsRenderState::default());
+    harness.run();
+
+    // The key is optional, and the test button does not wait for one.
+    let _ = harness.get_by_label("API key (optional)");
+    let _ = harness.get_by_label("No key stored (optional).");
+    assert!(!harness
+        .get_by_role_and_label(Role::Button, "Test connection")
+        .accesskit_node()
+        .is_disabled());
+
+    harness
+        .get_by_role_and_label(Role::Button, "Test connection")
+        .click();
+    harness.run();
+
+    match harness.state().actions.as_slice() {
+        [SettingsAction::TestConnection(config)] => {
+            assert_eq!(config.provider, LlmProvider::Custom);
+            assert_eq!(config.base_url, "http://localhost:11434/v1");
+        }
+        other => panic!("unexpected actions: {other:?}"),
+    }
+}
+
+#[test]
+fn a_custom_endpoint_without_a_url_cannot_be_tested() {
+    let mut view = SettingsViewModel::default();
+    view.set_llm(
+        LlmConfig {
+            provider: LlmProvider::Custom,
+            model: "llama3.2".into(),
+            ..LlmConfig::default()
+        },
+        false,
+    );
+    let mut harness = harness(view, SettingsRenderState::default());
+    harness.run();
+
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Button, "Test connection")
+            .accesskit_node()
+            .is_disabled(),
+        "a missing base URL is a settings problem, not a connection problem"
+    );
+}
+
+#[test]
+fn a_hosted_provider_still_needs_a_key_before_testing() {
+    let mut view = SettingsViewModel::default();
+    view.set_llm(LlmConfig::default(), false);
+    let mut harness = harness(view, SettingsRenderState::default());
+    harness.run();
+
+    let _ = harness.get_by_label("API key");
+    let _ = harness.get_by_label("No key stored.");
+    assert!(harness
+        .get_by_role_and_label(Role::Button, "Test connection")
+        .accesskit_node()
+        .is_disabled());
 }
 
 #[test]

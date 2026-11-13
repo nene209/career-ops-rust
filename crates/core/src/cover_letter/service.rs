@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use crate::error::{CoreError, Result};
 use crate::llm::usage::{elapsed_ms, Call, Task};
-use crate::llm::{capabilities, CancelToken, CompletionBackend, LlmConfig, LlmError};
+use crate::llm::{CancelToken, CompletionBackend, LlmConfig, LlmError};
 use crate::prompt_render::{
     estimated_tokens, render, take_chars, untrusted_block, Variables, MAX_CV_CHARS,
 };
@@ -129,7 +129,7 @@ pub async fn run_cover_letter(
     })?;
 
     let input_chars = assembled.chars().count();
-    if let Some(window) = capabilities(config.provider, &config.model).context_window {
+    if let Some(window) = config.capabilities().context_window {
         let estimate = estimated_tokens(input_chars);
         if estimate > window {
             return Err(CoreError::from(LlmError::ContextLengthExceeded {

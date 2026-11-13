@@ -13,7 +13,7 @@ use sqlx::SqlitePool;
 use zeroize::Zeroizing;
 
 use super::backend::Completion;
-use super::capabilities::{capabilities, ModelCapabilities, StructuredOutput};
+use super::capabilities::{ModelCapabilities, StructuredOutput};
 use super::config::{LlmConfig, LlmProvider};
 use super::error::LlmError;
 use super::keys;
@@ -39,29 +39,57 @@ pub struct LlmClient {
 impl LlmConfig {
     /// Build a client for this configuration.
     ///
-    /// A missing or blank key is [`LlmError::MissingApiKey`] rather than an
+    /// A missing key is [`LlmError::MissingApiKey`] rather than an
     /// authentication failure later: the difference is between "configure
-    /// this" and "something is wrong".
+    /// this" and "something is wrong". A custom endpoint is the exception —
+    /// a local server usually has no credential, so an empty key is expected
+    /// there.
+    ///
+    /// The client is built from the sanitized form, so a value typed into the
+    /// form and not yet saved cannot reach the wire unnormalized.
     pub fn build_client(&self, api_key: &Zeroizing<String>) -> Result<LlmClient, LlmError> {
-        if api_key.trim().is_empty() {
+        let config = self.clone().sanitized();
+        let api_key = api_key.trim();
+
+        if api_key.is_empty() && config.provider.requires_api_key() {
             return Err(LlmError::MissingApiKey {
-                provider: self.provider,
+                provider: config.provider,
             });
         }
 
-        if !self.provider.is_supported() {
+        if !config.provider.is_supported() {
             return Err(LlmError::UnsupportedProvider {
-                provider: self.provider,
+                provider: config.provider,
             });
         }
+
+        // A custom endpoint's URL is a user input, and an absent or invalid
+        // one must not fall back to a provider's default host: that would
+        // send the CV somewhere the user did not choose.
+        config
+            .validate_custom()
+            .map_err(|problem| LlmError::InvalidConfiguration(problem.to_string()))?;
 
         // Construction is offline: `rig` builds the transport lazily, so this
         // does not touch the network.
-        let client = match self.provider {
+        let client = match config.provider {
             LlmProvider::DeepSeek => rig::providers::openai::OpenAIConfig::with_key(
                 &rig::providers::openai::wire::DEEPSEEK,
-                api_key.as_str(),
+                api_key,
             )
+            .client(),
+            LlmProvider::Custom => rig::providers::openai::OpenAIConfig::with_key(
+                &rig::providers::openai::wire::OPENAI,
+                api_key,
+            )
+            .with_base_url(config.base_url.clone())
+            // An empty key means "no Authorization header" rather than an
+            // empty bearer token, which a local server may reject outright.
+            .with_auth(rig::providers::openai::wire::Auth::OptionalBearer)
+            // The OPENAI dialect defaults to the Responses API, which local
+            // servers do not implement; every OpenAI-compatible server has
+            // `/chat/completions`.
+            .with_route(rig::providers::openai::wire::Route::Chat)
             .client(),
             other => {
                 return Err(LlmError::UnsupportedProvider { provider: other });
@@ -69,12 +97,12 @@ impl LlmConfig {
         };
 
         Ok(LlmClient {
-            provider: self.provider,
-            model: self.model.clone(),
+            provider: config.provider,
+            model: config.model.clone(),
             client,
-            temperature: self.temperature,
-            max_tokens: self.max_tokens,
-            structured_output: capabilities(self.provider, &self.model).structured_output,
+            temperature: config.temperature,
+            max_tokens: config.max_tokens,
+            structured_output: config.capabilities().structured_output,
         })
     }
 }
@@ -127,10 +155,12 @@ impl LlmClient {
         if let Some(max_tokens) = self.max_tokens {
             request.max_tokens = Some(u64::from(max_tokens));
         }
-        if json_mode && self.structured_output.is_usable() {
+        if json_mode && self.structured_output.sends_json_object() {
             // DeepSeek's dialect accepts `json_object` through additional
             // params rather than a `json_schema` response format; the same
-            // shape works on the other OpenAI-compatible providers.
+            // shape works on the other OpenAI-compatible providers. A
+            // prompt-only endpoint is asked in the prompt instead, because
+            // sending this is exactly what some local servers reject.
             request.additional_params = Some(serde_json::json!({
                 "response_format": { "type": "json_object" }
             }));
@@ -227,7 +257,10 @@ impl LlmStatus {
         if !provider.is_supported() {
             return Some(format!("{} is not supported yet.", provider.label()));
         }
-        if !self.has_api_key {
+        if let Err(problem) = self.config.validate_custom() {
+            return Some(problem.to_string());
+        }
+        if provider.requires_api_key() && !self.has_api_key {
             return Some(format!("Add a {} API key in Settings.", provider.label()));
         }
         if !self.capabilities.structured_output.is_usable() {
@@ -246,7 +279,7 @@ impl LlmStatus {
 /// it is safe every time the Pipeline renders.
 pub async fn status(pool: &SqlitePool) -> crate::Result<LlmStatus> {
     let config = LlmConfig::load(pool).await?;
-    let capabilities = capabilities(config.provider, &config.model);
+    let capabilities = config.capabilities();
     // A keychain that cannot be read is reported as "no key": making Settings
     // unopenable over it would hide the preferences form too, and the actual
     // error surfaces when the user saves a key or tests the connection.
@@ -310,7 +343,7 @@ mod tests {
     #[test]
     fn readiness_names_the_first_thing_to_fix() {
         let config = deepseek();
-        let found = capabilities(config.provider, &config.model);
+        let found = config.capabilities();
 
         let blocked = LlmStatus {
             config: config.clone(),
@@ -338,7 +371,7 @@ mod tests {
             model: "deepseek-reasoner".into(),
             ..LlmConfig::default()
         };
-        let found = capabilities(config.provider, &config.model);
+        let found = config.capabilities();
 
         let status = LlmStatus {
             config,
@@ -349,5 +382,120 @@ mod tests {
         assert!(status
             .blocked_reason()
             .is_some_and(|reason| reason.contains("structured output")));
+    }
+
+    fn local(base_url: &str) -> LlmConfig {
+        LlmConfig {
+            provider: LlmProvider::Custom,
+            model: "llama3.2".into(),
+            base_url: base_url.into(),
+            ..LlmConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_keyless_custom_endpoint_builds_a_client_offline() {
+        let client = local("http://localhost:11434/v1")
+            .build_client(&Zeroizing::new(String::new()))
+            .expect("a local server needs no key");
+
+        assert_eq!(client.provider(), LlmProvider::Custom);
+        assert_eq!(client.model(), "llama3.2");
+        assert_eq!(
+            client.structured_output,
+            StructuredOutput::JsonObject,
+            "JSON mode is on by default"
+        );
+    }
+
+    #[test]
+    fn a_custom_endpoint_without_a_url_is_refused_before_a_call() {
+        // The dangerous failure is falling back to a default host, which would
+        // send the CV somewhere the user did not name.
+        let error = local("")
+            .build_client(&Zeroizing::new(String::new()))
+            .expect_err("no endpoint");
+
+        assert!(
+            matches!(&error, LlmError::InvalidConfiguration(detail) if detail.contains("base URL")),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn a_missing_key_still_blocks_a_hosted_provider() {
+        let config = deepseek();
+        let status = LlmStatus {
+            capabilities: config.capabilities(),
+            config,
+            has_api_key: false,
+        };
+
+        assert!(status
+            .blocked_reason()
+            .is_some_and(|reason| reason.contains("API key")));
+    }
+
+    #[test]
+    fn a_configured_custom_endpoint_is_ready_without_a_key() {
+        let config = local("http://localhost:11434/v1");
+        let status = LlmStatus {
+            capabilities: config.capabilities(),
+            config,
+            has_api_key: false,
+        };
+
+        assert!(status.ready(), "{:?}", status.blocked_reason());
+    }
+
+    #[test]
+    fn an_unconfigured_custom_endpoint_says_what_is_missing() {
+        for (config, expected) in [
+            (local(""), "base URL"),
+            (
+                LlmConfig {
+                    base_url: "http://localhost:11434/v1".into(),
+                    model: "  ".into(),
+                    ..local("http://localhost:11434/v1")
+                },
+                "model name",
+            ),
+            (
+                LlmConfig {
+                    custom_context_window: Some(512),
+                    ..local("http://localhost:11434/v1")
+                },
+                "context window",
+            ),
+        ] {
+            let status = LlmStatus {
+                capabilities: config.capabilities(),
+                config,
+                has_api_key: false,
+            };
+            let reason = status.blocked_reason().expect("blocked");
+            assert!(reason.contains(expected), "{reason:?} misses {expected:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_only_mode_builds_a_client_and_stays_ready() {
+        let config = LlmConfig {
+            json_mode: false,
+            ..local("http://localhost:11434/v1")
+        };
+
+        let client = config
+            .build_client(&Zeroizing::new(String::new()))
+            .expect("prompt-only is still usable");
+        assert_eq!(client.structured_output, StructuredOutput::PromptOnly);
+
+        let status = LlmStatus {
+            capabilities: config.capabilities(),
+            config,
+            has_api_key: false,
+        };
+        assert!(status.ready());
     }
 }

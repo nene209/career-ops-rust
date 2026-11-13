@@ -118,7 +118,8 @@ fn the_provider_model_grid_shows_its_row() {
     let mut harness = harness(view_model());
     harness.run_steps(2);
 
-    harness.get_by_label("deepseek");
+    // The ledger stores the provider id; the screen shows its label.
+    harness.get_by_label("DeepSeek");
     harness.get_by_label("1,234");
     harness.get_by_label("567");
     harness.get_by_label("1,801");

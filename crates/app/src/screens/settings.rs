@@ -218,13 +218,28 @@ fn ai_section(
 
     labelled_input(ui, "Model", &mut view_model.llm.model, false);
     ui.label(
-        RichText::new("The model name the provider serves, for example deepseek-flash.")
-            .weak()
-            .small(),
+        RichText::new(match view_model.llm.provider {
+            LlmProvider::Custom => {
+                "The model name the endpoint serves, for example llama3.2 or qwen2.5:7b."
+            }
+            _ => "The model name the provider serves, for example deepseek-flash.",
+        })
+        .weak()
+        .small(),
     );
     ui.add_space(6.0);
 
-    labelled_input(ui, "API key", &mut view_model.llm.api_key, true);
+    let key_required = view_model.llm.provider.requires_api_key();
+    labelled_input(
+        ui,
+        if key_required {
+            "API key"
+        } else {
+            "API key (optional)"
+        },
+        &mut view_model.llm.api_key,
+        true,
+    );
     ui.horizontal(|ui| {
         let can_save = !view_model.llm.api_key.trim().is_empty() && !state.ai_busy;
         if ui
@@ -247,12 +262,15 @@ fn ai_section(
             {
                 *action = Some(SettingsAction::DeleteApiKey(view_model.llm.provider));
             }
-        } else {
+        } else if key_required {
             ui.label(RichText::new("No key stored.").weak());
+        } else {
+            ui.label(RichText::new("No key stored (optional).").weak());
         }
     });
 
     ui.add_space(6.0);
+    let config = view_model.llm_config();
     ui.horizontal(|ui| {
         if ui
             .add_enabled(
@@ -264,14 +282,24 @@ fn ai_section(
             *action = Some(SettingsAction::SaveLlm(view_model.llm_config()));
         }
 
-        if ui
-            .add_enabled(
-                view_model.llm.has_api_key && !state.ai_busy,
-                Button::new("Test connection"),
-            )
-            .on_hover_text("Ask DeepSeek to confirm the key; no tokens are spent")
-            .clicked()
-        {
+        // Testing spends no tokens, so a keyless local endpoint can be tried
+        // before anything is saved. A custom endpoint that would fail its own
+        // validation is left disabled and says why.
+        let problem = config.validate_custom().err();
+        let can_test =
+            !state.ai_busy && problem.is_none() && (view_model.llm.has_api_key || !key_required);
+        let test = ui.add_enabled(can_test, Button::new("Test connection"));
+        let test = match problem {
+            Some(problem) => test.on_disabled_hover_text(problem.to_string()),
+            None if key_required => {
+                test.on_hover_text("Ask DeepSeek to confirm the key; no tokens are spent")
+            }
+            None => test.on_hover_text(
+                "Ask the endpoint for its model list; no tokens are spent. Some local \
+                 servers do not implement it.",
+            ),
+        };
+        if test.clicked() {
             *action = Some(SettingsAction::TestConnection(view_model.llm_config()));
         }
 

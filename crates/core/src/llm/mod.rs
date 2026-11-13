@@ -37,7 +37,7 @@ pub mod usage;
 
 pub use backend::{Completion, CompletionBackend};
 pub use cancel::CancelToken;
-pub use capabilities::{capabilities, ModelCapabilities, StructuredOutput};
+pub use capabilities::{ModelCapabilities, StructuredOutput};
 pub use client::{status, DeltaSink, LlmClient, LlmStatus};
 pub use config::{ConfigProblem, LlmConfig, LlmProvider, MIN_CUSTOM_CONTEXT_WINDOW};
 pub use error::LlmError;

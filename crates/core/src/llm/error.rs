@@ -18,6 +18,12 @@ pub enum LlmError {
     #[error("{provider} is not supported by this build yet")]
     UnsupportedProvider { provider: LlmProvider },
 
+    /// A setting the provider needs is missing or unusable. The detail is
+    /// written for the field that caused it, because the fix is a form, not a
+    /// retry.
+    #[error("the AI settings are incomplete: {0}")]
+    InvalidConfiguration(String),
+
     #[error("the OS keychain is unavailable: {0}")]
     Keychain(String),
 
@@ -69,6 +75,7 @@ impl LlmError {
         match self {
             Self::MissingApiKey { .. } => "missing_api_key",
             Self::UnsupportedProvider { .. } => "unsupported_provider",
+            Self::InvalidConfiguration(_) => "invalid_config",
             Self::Keychain(_) => "keychain",
             Self::InvalidAuthentication { .. } => "invalid_authentication",
             Self::RateLimited { .. } => "rate_limited",
@@ -107,6 +114,7 @@ impl LlmError {
                 "The API key was rejected. Check it in Settings.".into()
             }
             Self::UnsupportedProvider { .. } => "Choose a supported provider in Settings.".into(),
+            Self::InvalidConfiguration(_) => "Complete the provider settings in Settings.".into(),
             other => other.to_string(),
         }
     }

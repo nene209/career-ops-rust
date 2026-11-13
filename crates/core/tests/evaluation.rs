@@ -18,7 +18,7 @@ use career_ops_core::acquisition::router::FetchSource;
 use career_ops_core::evaluation::{
     run_evaluation, CompletionBackend, EvaluationRequest, Recommendation,
 };
-use career_ops_core::llm::{CancelToken, Completion, DeltaSink, LlmError};
+use career_ops_core::llm::{CancelToken, Completion, DeltaSink, LlmConfig, LlmError, LlmProvider};
 use career_ops_core::model::{
     Application, ApplicationStatus, FetchTier, JobDescription, QueueState,
 };
@@ -724,6 +724,83 @@ async fn a_missing_cv_summary_is_an_actionable_error() {
         "the message must say what to do: {error}"
     );
     assert!(backend.prompts().is_empty(), "no call without a prompt");
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_prompt_only_endpoint_is_not_refused_before_the_call() {
+    let db = common::TestDb::new_raw().await;
+    seed_profile_and_prompts(&db).await;
+    let job = store_job(&db, "Rust Engineer", &long_text()).await;
+
+    // A local endpoint whose owner turned JSON mode off. The provider will not
+    // enforce a JSON reply, but the prompt states the contract and the reply
+    // is validated locally, so refusing here would make the feature unusable.
+    LlmConfig {
+        provider: LlmProvider::Custom,
+        model: "llama3.2".into(),
+        base_url: "http://localhost:11434/v1".into(),
+        json_mode: false,
+        ..LlmConfig::default()
+    }
+    .save(&db.pool)
+    .await
+    .expect("save config");
+
+    let backend = FakeBackend::with_json(json_reply(0.8, "match", "Fine."));
+    let result = run_evaluation(
+        &db.pool,
+        &EvaluationRequest::new(job.id),
+        &backend,
+        None,
+        None,
+    )
+    .await
+    .expect("prompt-only mode is usable");
+
+    assert_eq!(backend.prompts().len(), 1, "exactly one call");
+    assert_eq!(result.match_score, 0.8);
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_custom_endpoint_records_its_provider_and_no_cost() {
+    let db = common::TestDb::new_raw().await;
+    seed_profile_and_prompts(&db).await;
+    let job = store_job(&db, "Rust Engineer", &long_text()).await;
+
+    LlmConfig {
+        provider: LlmProvider::Custom,
+        model: "llama3.2".into(),
+        base_url: "http://localhost:11434/v1".into(),
+        ..LlmConfig::default()
+    }
+    .save(&db.pool)
+    .await
+    .expect("save config");
+
+    // The fake backend reports counters but no price; a self-hosted model has
+    // no list price, so the ledger must record the usage and no cost.
+    let backend = FakeBackend::with_json(json_reply(0.8, "match", "Fine."));
+    run_evaluation(
+        &db.pool,
+        &EvaluationRequest::new(job.id),
+        &backend,
+        None,
+        None,
+    )
+    .await
+    .expect("evaluate");
+
+    let rows = career_ops_core::repo::llm_usage::recent(&db.pool, None, 10)
+        .await
+        .expect("usage rows");
+    let row = rows.first().expect("one usage row");
+    assert_eq!(row.provider, "custom");
+    assert_eq!(row.model, "llama3.2");
+    assert_eq!(row.cost_usd, None, "never a zero for an unpriced model");
 
     db.close().await;
 }

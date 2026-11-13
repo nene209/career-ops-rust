@@ -368,6 +368,29 @@ mod tests {
     }
 
     #[test]
+    fn a_custom_call_keeps_its_counters_and_stores_no_cost() {
+        // A local model has no list price anywhere, so the ledger must say
+        // "unknown", never zero.
+        let found = Usage::from_rig(LlmProvider::Custom, "llama3.2", &reported(100, 50));
+
+        assert!(found.reported);
+        assert_eq!(found.input_tokens, Some(100));
+        assert_eq!(found.output_tokens, Some(50));
+        assert_eq!(found.cost_usd, None);
+        assert_eq!(found.cost_complete, None);
+    }
+
+    #[test]
+    fn the_catalog_never_prices_a_custom_model() {
+        // Even when the user names a model the catalog knows for another
+        // provider, the reference is scoped to `custom`.
+        assert_eq!(
+            catalog_cost(LlmProvider::Custom, "deepseek-flash", 1_000, 1_000),
+            None
+        );
+    }
+
+    #[test]
     fn an_unreported_usage_is_unknown() {
         let found = Usage::from_rig(
             LlmProvider::DeepSeek,
