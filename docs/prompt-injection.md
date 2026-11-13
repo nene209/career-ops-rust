@@ -81,6 +81,14 @@ report, and that write follows the validated structured output.
 - The compact prompts carry the untrusted-data rule and stay under their size
   ceilings (`tests/prompts_repo.rs`).
 
+## Redaction is not injection defense
+
+The two features touch the same prompt and solve different problems. Injection
+defense keeps a **posting** from acting like an instruction; redaction keeps the
+**candidate's** details out of the prompt. Neither substitutes for the other: a
+redacted CV is still sent to the model, and a fenced posting is still read by it.
+`docs/privacy.md` covers what is replaced and restored.
+
 ## Residual risk
 
 - **Persuasion.** A model can be convinced to lower or raise a score by a

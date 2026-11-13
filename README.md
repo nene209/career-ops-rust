@@ -296,6 +296,8 @@ docs/
                               written, superseding specific sections
   known-sites.md              The embedded known-site registry: entries,
                               what "verified" means, and how to add a site
+  privacy.md                  What is redacted before a provider call, what is
+                              not, and how the reply is restored
 ```
 
 ---

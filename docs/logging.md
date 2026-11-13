@@ -93,6 +93,7 @@ horizontal scrollbar is the reading surface.
 | `fetch-all chunk` (one per walk chunk) | info | `portal`, `first_page`, `pages`, `deepest`, `jobs`, `stop` |
 | `eightfold position skipped` | warn | `index`, `positions`, the parse error |
 | `eightfold page kept without…` | warn | `positions`, `skipped` |
+| `redaction before the evaluation call` / `… cover-letter call` (only when something was replaced) | info | `job`, `redacted`, `names`, `emails`, `phones`, `locations`, `restored`, `unrestored` |
 | `sidecar stderr` | debug | `line` |
 | Panic (`logging::panic`) | error | payload and source location, written to the file |
 
@@ -109,6 +110,9 @@ and the plan that added logging states it as a design decision:
 
 - **Never** log passphrases, key material, CV or profile text, prompts and
   completions, job description bodies, or HTTP response bodies.
+- The `redaction` line is the shape that rule takes when a feature needs to say
+  what it did to the CV: **counts only**. See `docs/privacy.md` for what is
+  replaced and when.
 - **Always fine**: URLs, external ids, counts, byte sizes, statuses, tiers, stop
   reasons, error strings.
 - Anything body-adjacent goes through `career_ops_core::logging::truncate_for_log`
