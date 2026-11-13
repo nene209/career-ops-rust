@@ -1,7 +1,7 @@
 # Phase 3.5: Local / Custom LLM Provider — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.54), §12
-**Status:** In progress — WS0 complete; WS1 next
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.55), §12
+**Status:** In progress — WS0–WS1 complete; WS2 next
 **Last updated:** 2026-11-12
 **Duration:** 3–4 days (including WS0)
 **Depends on:** Phase 3 (`core::llm` facade, evaluation/letter calls), Phase 3.1 (usage ledger and Settings), Phase 3.2 (triage/suggest call the same facade)
@@ -15,6 +15,7 @@
 | :--- | :--- |
 | v0.1 | Initial plan. Adds a **Local / custom** provider for OpenAI-compatible endpoints: base URL, optional API key, model, JSON-mode toggle, and an optional context window. No migration and no new dependency — `rig` 0.46 already ships the dialect and base-URL/auth controls. WS0 replaces the per-test live flags with one `CAREER_OPS_LIVE=1` gate. |
 | v0.2 | WS0 implemented. `live_enabled()` and `require_live()` live in `career_ops_test_support` with a unit test for the accepted values; the gate is environment-only, so the offline suite is untouched. `ats_live` and `obscura_spike` are now `#[ignore]`d (the obscura PDF test also gained the availability check it was missing, so `--skip obscura` is redundancy, not safety). The `live-ats` workflow moves to `CAREER_OPS_LIVE=1` **and** `--ignored`; without the latter the job would have run zero tests. `docs/known-sites.md` and manual script §8 join `docs/LIVE_TESTS.md` on the single flag. |
+| v0.3 | WS1 implemented. `LlmProvider::Custom` (stored `custom`, labelled **Local / custom**) joins `ALL`, still has no default model, and is the only provider whose key is optional (`requires_api_key()`). `LlmConfig` gains `base_url`, `json_mode` (default on) and `custom_context_window` behind three new `settings` keys, so a stored config round-trips with no migration and a pre-3.5 vault reads the defaults. `sanitized()` trims the base URL and drops trailing slashes without mangling `http://`, and never invents a custom model. `validate_custom()` returns a field-named `ConfigProblem` (missing/invalid URL, non-`http(s)` scheme, embedded credentials, missing model, context window under 1,024) and `custom_warning()` explains plain `http` to a non-loopback host **without refusing it** — design decision 7 says both “http only for loopback” and “warn for other plain-http hosts”, and a warning is the only reading that leaves a home-lab server usable. `switched_to(provider)` moves the model-reset rule out of the Settings screen into core (same behavior today) so a model is never carried to a provider that cannot serve it. **Custom is not constructible yet:** `is_supported()` stays DeepSeek-only and `capabilities()` answers `Unsupported` until WS2 replaces the provider/model pair with `LlmConfig::capabilities()`. 14 unit tests and 2 integration tests cover the round trip, the optional key, every URL case, the context-window bound, the warning, and the switch. |
 
 ---
 

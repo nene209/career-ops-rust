@@ -12,9 +12,10 @@
 //!
 //! ## What lives where
 //!
-//! - [`config::LlmProvider`]: the four provider ids and their stored form.
-//!   Only DeepSeek is constructible today; the others parse so a stored choice
-//!   survives a build that cannot use it.
+//! - [`config::LlmProvider`]: the provider ids and their stored form. Only
+//!   DeepSeek is constructible so far; a custom OpenAI-compatible endpoint
+//!   joins it later in Phase 3.5. The rest parse so a stored choice survives a
+//!   build that cannot use it.
 //! - [`config`]: `settings` keys, defaults, and the load/save pair.
 //! - [`capabilities`]: what a model can do, consulted before a call.
 //! - [`client`]: builds the `rig` client, verifies a key, and reports status.
@@ -38,7 +39,7 @@ pub use backend::{Completion, CompletionBackend};
 pub use cancel::CancelToken;
 pub use capabilities::{capabilities, ModelCapabilities, StructuredOutput};
 pub use client::{status, DeltaSink, LlmClient, LlmStatus};
-pub use config::{LlmConfig, LlmProvider};
+pub use config::{ConfigProblem, LlmConfig, LlmProvider, MIN_CUSTOM_CONTEXT_WINDOW};
 pub use error::LlmError;
 pub use retry::{with_retry, RetryPolicy};
 pub use usage::{Call, Outcome, Source, Task, Usage};

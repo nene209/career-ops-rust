@@ -76,6 +76,10 @@ pub fn capabilities(provider: LlmProvider, model: &str) -> ModelCapabilities {
         LlmProvider::OpenAI | LlmProvider::Anthropic | LlmProvider::Gemini => {
             ModelCapabilities::UNSUPPORTED
         }
+        // A custom endpoint's shape comes from its own settings (JSON mode and
+        // context window), which a provider/model pair cannot express. Phase
+        // 3.5 WS2 replaces this call with `LlmConfig::capabilities`.
+        LlmProvider::Custom => ModelCapabilities::UNSUPPORTED,
     }
 }
 
@@ -156,6 +160,7 @@ mod tests {
             LlmProvider::OpenAI,
             LlmProvider::Anthropic,
             LlmProvider::Gemini,
+            LlmProvider::Custom,
         ] {
             let found = capabilities(provider, "anything");
             assert_eq!(found, ModelCapabilities::UNSUPPORTED, "{provider:?}");

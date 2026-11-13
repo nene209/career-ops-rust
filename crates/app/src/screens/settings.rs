@@ -206,11 +206,12 @@ fn ai_section(
                 )
                 .on_disabled_hover_text("Not supported by this build yet");
             if response.clicked() && !selected {
-                view_model.llm.provider = provider;
-                // A model name belongs to one provider; keeping DeepSeek's
-                // when the provider changes would send a request that cannot
-                // work.
-                view_model.llm.model = provider.default_model().unwrap_or_default().to_string();
+                // A model name belongs to one provider, so a switch replaces
+                // it; the rest of the configuration, including a custom
+                // endpoint, is kept (see `LlmConfig::switched_to`).
+                let switched = view_model.llm_config().switched_to(provider);
+                view_model.llm.provider = switched.provider;
+                view_model.llm.model = switched.model;
             }
         }
     });

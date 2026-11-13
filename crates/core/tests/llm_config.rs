@@ -20,17 +20,55 @@ async fn the_llm_config_round_trips_through_settings() {
     );
 
     let saved = LlmConfig {
-        provider: LlmProvider::DeepSeek,
-        model: "deepseek-v4-pro".into(),
+        provider: LlmProvider::Custom,
+        model: "qwen2.5:7b".into(),
         temperature: 0.7,
         max_tokens: Some(2_048),
         max_job_chars: 9_000,
         thin_description_chars: 500,
+        base_url: "http://localhost:11434/v1/".into(),
+        json_mode: false,
+        custom_context_window: Some(32_768),
     };
     let stored = saved.save(&db.pool).await.unwrap();
-    assert_eq!(stored, saved);
+    assert_eq!(
+        stored.base_url, "http://localhost:11434/v1",
+        "a trailing slash is dropped on save"
+    );
+    assert!(!stored.json_mode, "the toggle is stored, not ignored");
+    assert_eq!(stored.custom_context_window, Some(32_768));
 
-    assert_eq!(LlmConfig::load(&db.pool).await.unwrap(), saved);
+    // Every field, including the custom endpoint's, survives a reload.
+    assert_eq!(LlmConfig::load(&db.pool).await.unwrap(), stored);
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_configuration_saved_before_custom_existed_still_loads() {
+    let db = common::TestDb::new_raw().await;
+
+    // The settings of a vault written by a build that had only DeepSeek.
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('llm.provider', '\"deepseek\"')")
+        .execute(&db.pool)
+        .await
+        .expect("insert provider");
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('llm.model', '\"deepseek-flash\"')")
+        .execute(&db.pool)
+        .await
+        .expect("insert model");
+
+    let config = LlmConfig::load(&db.pool).await.unwrap();
+    assert_eq!(config.provider, LlmProvider::DeepSeek);
+    assert_eq!(config.model, "deepseek-flash");
+    assert_eq!(config.base_url, "", "a new key with no stored value");
+    assert!(config.json_mode, "the default is on");
+    assert_eq!(config.custom_context_window, None);
+    assert_eq!(
+        config.validate_custom(),
+        Ok(()),
+        "nothing to check for a hosted provider"
+    );
 
     db.close().await;
 }
