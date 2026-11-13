@@ -230,6 +230,29 @@ and the app owns every side effect.
 - The detail view reads `source_url` and `raw_text` from the row, not from a
   second query.
 
+## Prompt versioning (Phase 3.4)
+
+A prompt thread is `(name, is_system)`. Version rows are immutable; the
+**current** version is a pointer (`prompts.is_current`, exactly one per thread,
+enforced by a partial unique index). Saving or duplicating inserts the next
+version and activates it in one transaction; **Make current** flips the pointer
+and writes no row, so a revert never duplicates a content hash. `active_for_use`
+reads the user's current row first, then the system's; `newest_system` is only for
+seeding and version numbering.
+
+`PromptDetail::current()` is the editor, diff, and save baseline; `newest()` is
+only for list ordering. The detail's category comes from the current row, so an
+older version's variable set is validated correctly.
+
+Cleanup follows provenance. `usage()` and `references()` count evaluation
+reports, cover letters, and triage rows by `content_hash`. An unreferenced
+version may be hard-deleted; the transaction repoints its `supersedes_id`
+children to the deleted row's parent before the delete (foreign keys are on). A
+referenced version is retired (`retired_at`) and `get_by_hash` still resolves it.
+**Show retired** reveals those rows; **Restore** clears the flag without changing
+the pointer. The repository refuses a delete that would leave a thread with rows
+and no current version, and never deletes or retires a system row.
+
 ## Logs drawer
 
 The Logs screen and the drawer are two mounts of one view

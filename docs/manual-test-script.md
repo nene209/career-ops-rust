@@ -1,7 +1,7 @@
 # Manual Test Script
 
 **Owner:** whoever is about to declare a UI phase done, or is about to start Phase 3.
-**Last updated:** 2026-11-09
+**Last updated:** 2026-11-12
 **Applies to:** the `career-ops` binary built from this workspace.
 
 Automated tests cover the state machine, the view models, and the screens with
@@ -207,20 +207,21 @@ refusal.
 
 ## 6c. Prompts
 
-A prompt is a thread per `(name, owner)`; the user's copy wins and the shipped
-row stays as reference. Version history is append-only, so a report always
-points at the text that produced it.
+A prompt is a thread per `(name, owner)`; the user's copy wins and the shipped row stays as reference. Version content is immutable. A thread has one **current** version: saving appends a new one, while **Make current** moves the pointer without adding a row. An unreferenced version can be deleted; a used one can be retired so its text stays available to the reports that used it.
 
 | # | Step | Expected |
 | :-- | :--- | :--- |
-| 6c.1 | Select **Prompts**. | The left pane lists the seeded prompts grouped by category (`shared`, `evaluate`, `scan`, `render`, `cover_letter`, `triage`, `suggest`, `utility`), each with its owner, latest version, version count, and date. The row the app will use is marked `(in use)`. Nothing is selected yet. |
+| 6c.1 | Select **Prompts**. | The left pane lists the seeded prompts grouped by category (`shared`, `evaluate`, `scan`, `render`, `cover_letter`, `triage`, `suggest`, `utility`), each with its owner, current version, active version count, and date. The row the app will use is marked `(in use)`. Nothing is selected yet. |
 | 6c.2 | Select **evaluate** under System. | The right pane names the category and says **System · read-only**. The content is shown in a monospace frame with no editor, and the only action is **Duplicate as my copy**. |
 | 6c.3 | Click **Duplicate as my copy**. | The header reports "Created your copy of `evaluate` at version 1…", the user row appears marked `(in use)`, the system row loses the marker and stays listed, and the detail switches to the new copy with an editor. |
 | 6c.4 | Change a sentence in **Prompt content** and click **Save new version**. | "Saved `evaluate` as version 2." appears, the version list gains v2, and the editor reloads with the saved text. **Save new version** is disabled until the text changes again. |
-| 6c.5 | Click **v1** in the version list, then tick **Compare with current**. | The content shows v1 read-only with **Back to latest** and **Revert to this version**. The diff marks the earlier line as removed and the current line as added. **Used by** lists nothing for a version that has never been sent. |
-| 6c.6 | Click **Revert to this version**. | "Saved `evaluate` as version 3 from the earlier text." appears; v3 is the old content as a new row, and v2 and v1 are still listed. |
+| 6c.5 | Click **v1** in the version list, then tick **Compare with current**. | The header reads **Viewing v1** with **Back to current** and **Make current**. The diff marks the earlier line as removed and the current line as added. **Used by** lists nothing for a version that has never been sent. |
+| 6c.6 | Click **Make current**. | "Now using `evaluate` v1." appears; the **current** marker moves to v1 and v2 is still listed. **No version is added** (the count stays 2), and the pane returns to the editor showing v1's text. |
 | 6c.7 | Replace the content with `{{not_a_variable}}` and click **Save new version**. | The save is refused with a message naming the unknown variable and the eight that exist; no version is added. |
 | 6c.8 | Select **pdf** (category `render`) and duplicate it. | The editor accepts `{{PHOTO}}`: reference categories are not rendered by the app, and the pane says so instead of listing variables. |
+| 6c.9 | Select **evaluate** again. Save a new version (v3), then open the current v3 and click **Delete…**. | The dialog says v3 has not been used and "v2 becomes current." **Delete permanently** removes v3; the count drops to 2 and v2 is marked current. The header reports "Deleted `evaluate` v3. v2 is now current." |
+| 6c.10 | After §6d has produced at least one evaluation with the current `evaluate` prompt, return here. Make v1 current, run one evaluation (§6d.3), then open v1 and click **Retire…**. | The dialog names "used N time(s)" and offers **Retire**. Retiring hides v1 and promotes the newest remaining active version (v2). The header reports "Retired `evaluate` v1. Its text stays available to the runs that used it." |
+| 6c.11 | Tick **Show retired (1)** and select **v1 (retired)**. | v1 is marked retired; **Used by** still lists the evaluation that recorded v1's hash. **Restore** makes v1 selectable again without making it current, and the header reports "Restored `evaluate` v1." |
 
 ## 6d. Evaluation and cover letters
 

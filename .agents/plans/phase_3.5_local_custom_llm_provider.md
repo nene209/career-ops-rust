@@ -1,6 +1,6 @@
 # Phase 3.5: Local / Custom LLM Provider — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.48), §12
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.53), §12
 **Status:** Planned — not started
 **Last updated:** 2026-11-09
 **Duration:** 3–4 days (including WS0)
