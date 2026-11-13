@@ -22,6 +22,7 @@ use career_ops_core::llm::{CancelToken, Completion, DeltaSink, LlmConfig, LlmErr
 use career_ops_core::model::{
     Application, ApplicationStatus, FetchTier, JobDescription, QueueState,
 };
+use career_ops_core::privacy::PrivacyConfig;
 use career_ops_core::prompt_render::{UNTRUSTED_BEGIN, UNTRUSTED_END};
 use career_ops_core::prompts_seed::seed_or_update_system_prompts;
 use career_ops_core::repo::applications;
@@ -458,15 +459,20 @@ async fn an_evaluation_stores_provenance_and_moves_discovered_to_ready() {
         .expect("row");
     assert_eq!(stored_job.queue_state, QueueState::Evaluated.as_str());
 
-    // The prompt sent to the model is the rendered one, with no placeholders
-    // and no markup from the stored row.
+    // The prompt sent to the model is the rendered one, with no unsubstituted
+    // `{{…}}` variables and no markup from the stored row. The candidate's name
+    // is replaced before the call: redaction is on by default (Phase 3.6).
     let prompts = backend.prompts();
     assert_eq!(prompts.len(), 1, "a usable reply needs no repair call");
     assert!(!prompts[0].contains("{{"), "every variable was substituted");
     assert!(!prompts[0].contains("<p>"), "normalization ran first");
     assert!(
-        prompts[0].contains("Ada Lovelace"),
-        "the CV summary is present"
+        prompts[0].contains("⟦NAME⟧"),
+        "the CV summary is present, with the name redacted"
+    );
+    assert!(
+        !prompts[0].contains("Ada Lovelace"),
+        "the provider never sees the real name"
     );
 
     db.close().await;
@@ -696,6 +702,149 @@ async fn a_match_report_on_a_submitted_application_leaves_its_status_alone() {
         .expect("row");
     assert_eq!(after.status, ApplicationStatus::Applied.as_str());
     assert_eq!(after.evaluation_report_id, Some(result.report_id));
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn the_provider_never_sees_the_candidates_details() {
+    let db = common::TestDb::new_raw().await;
+    seed_private_profile(&db).await;
+    let job = store_job(&db, "Rust Engineer", &long_text()).await;
+
+    let backend = FakeBackend::with_json(json_reply(0.8, "match", "Fine."));
+    run_evaluation(
+        &db.pool,
+        &EvaluationRequest::new(job.id),
+        &backend,
+        None,
+        None,
+    )
+    .await
+    .expect("evaluate");
+
+    let prompt = &backend.prompts()[0];
+    for secret in [
+        "Ada Lovelace",
+        "ada@example.com",
+        "+44 20 0000 0000",
+        "123 Main St",
+    ] {
+        assert!(
+            !prompt.contains(secret),
+            "the prompt must not carry {secret:?}"
+        );
+    }
+    for token in ["⟦NAME⟧", "⟦EMAIL⟧", "⟦PHONE⟧", "⟦LOCATION⟧"] {
+        assert!(prompt.contains(token), "{token} is missing from the prompt");
+    }
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_reply_that_uses_the_tokens_is_stored_restored() {
+    let db = common::TestDb::new_raw().await;
+    seed_private_profile(&db).await;
+    let job = store_job(&db, "Rust Engineer", &long_text()).await;
+
+    // The model echoes the placeholders it was given; the stored report and the
+    // returned text carry the real values, because restoration runs after the
+    // JSON is parsed.
+    let backend = FakeBackend::with_json(json_reply_about("⟦NAME_1⟧ writes to ⟦EMAIL⟧."));
+    let result = run_evaluation(
+        &db.pool,
+        &EvaluationRequest::new(job.id),
+        &backend,
+        None,
+        None,
+    )
+    .await
+    .expect("evaluate");
+
+    assert!(
+        result.content.contains("Contact ada@example.com."),
+        "the returned report is restored: {}",
+        result.content
+    );
+    assert!(!result.content.contains('⟦'), "{}", result.content);
+
+    let stored = evaluation_reports::get(&db.pool, result.report_id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert!(
+        stored.content.contains("Contact ada@example.com."),
+        "the stored report is restored: {}",
+        stored.content
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn turning_redaction_off_sends_the_raw_summary() {
+    let db = common::TestDb::new_raw().await;
+    seed_private_profile(&db).await;
+    let job = store_job(&db, "Rust Engineer", &long_text()).await;
+    PrivacyConfig { redact_cv: false }
+        .save(&db.pool)
+        .await
+        .expect("save the toggle");
+
+    let backend = FakeBackend::with_json(json_reply(0.8, "match", "Fine."));
+    run_evaluation(
+        &db.pool,
+        &EvaluationRequest::new(job.id),
+        &backend,
+        None,
+        None,
+    )
+    .await
+    .expect("evaluate");
+
+    let prompt = &backend.prompts()[0];
+    assert!(!prompt.contains("⟦"), "the toggle off sends no tokens");
+    assert!(
+        prompt.contains("ada@example.com"),
+        "the raw summary is sent"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_mangled_token_is_stored_as_it_arrived() {
+    let db = common::TestDb::new_raw().await;
+    seed_private_profile(&db).await;
+    let job = store_job(&db, "Rust Engineer", &long_text()).await;
+
+    // An unbalanced placeholder is not ours to guess at. It is stored as it
+    // arrived (and counted as unrestored) while a well-formed token beside it
+    // still restores.
+    let backend = FakeBackend::with_json(json_reply_with_report(
+        "## Report\\nBroken ⟦NAME marker; contact ⟦EMAIL⟧.",
+    ));
+    let result = run_evaluation(
+        &db.pool,
+        &EvaluationRequest::new(job.id),
+        &backend,
+        None,
+        None,
+    )
+    .await
+    .expect("evaluate");
+
+    assert!(
+        result.content.contains("Broken ⟦NAME marker"),
+        "the broken token is left alone: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("contact ada@example.com."),
+        "the token beside it still restores: {}",
+        result.content
+    );
 
     db.close().await;
 }
@@ -1168,6 +1317,30 @@ fn json_reply(score: f32, recommendation: &str, rationale: &str) -> String {
     )
 }
 
+/// A reply whose prose quotes the placeholders the prompt carried.
+fn json_reply_about(rationale: &str) -> String {
+    format!(
+        r###"{{"match_score": 0.8,
+            "recommendation": "match",
+            "strengths": ["⟦NAME_1⟧ ships infrastructure"],
+            "gaps": ["no ⟦EMAIL⟧ on file"],
+            "rationale": "{rationale}",
+            "full_report_markdown": "## Report\nContact ⟦EMAIL⟧."}}"###
+    )
+}
+
+/// A reply with exactly the report body the test needs.
+fn json_reply_with_report(report: &str) -> String {
+    format!(
+        r###"{{"match_score": 0.8,
+            "recommendation": "match",
+            "strengths": ["a"],
+            "gaps": ["b"],
+            "rationale": "Fine.",
+            "full_report_markdown": "{report}"}}"###
+    )
+}
+
 fn long_text() -> String {
     let mut text = String::from("<p>We are hiring a Rust engineer.</p>");
     while text.chars().count() < 2_400 {
@@ -1194,6 +1367,25 @@ async fn seed_profile_and_prompts(db: &common::TestDb) {
             email: "ada@example.com".into(),
             phone: None,
             location: Some("London".into()),
+            summary: Some("Mathematician and first programmer.".into()),
+        },
+    )
+    .await
+    .expect("profile");
+    seed_or_update_system_prompts(&db.pool)
+        .await
+        .expect("seed prompts");
+}
+
+/// A profile that carries every kind of redactable value.
+async fn seed_private_profile(db: &common::TestDb) {
+    profile::update_details(
+        &db.pool,
+        &ProfileDetails {
+            name: "Ada Lovelace".into(),
+            email: "ada@example.com".into(),
+            phone: Some("+44 20 0000 0000".into()),
+            location: Some("123 Main St, Springfield".into()),
             summary: Some("Mathematician and first programmer.".into()),
         },
     )

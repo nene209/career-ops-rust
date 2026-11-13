@@ -16,6 +16,7 @@ use career_ops_core::llm::{CancelToken, Completion, CompletionBackend, DeltaSink
 use career_ops_core::model::{
     Application, ApplicationStatus, FetchTier, JobDescription, QueueState,
 };
+use career_ops_core::privacy::PrivacyConfig;
 use career_ops_core::prompt_render::UNTRUSTED_BEGIN;
 use career_ops_core::prompts_seed::seed_or_update_system_prompts;
 use career_ops_core::repo::applications;
@@ -23,6 +24,80 @@ use career_ops_core::repo::cover_letters::{self, NewCoverLetter};
 use career_ops_core::repo::job_descriptions as job_repo;
 use career_ops_core::repo::job_descriptions::NewJobDescription;
 use career_ops_core::repo::profile::{self, ProfileDetails};
+
+#[tokio::test]
+async fn the_prompt_hides_the_contact_line_and_the_letter_is_restored() {
+    let db = common::TestDb::new_raw().await;
+    seed_profile_and_prompts(&db).await;
+    // A body that mentions the first name, so its indexed token is emitted and
+    // the letter can use it: the restorer only knows tokens the summary showed.
+    profile::update_details(
+        &db.pool,
+        &ProfileDetails {
+            name: "Ada Lovelace".into(),
+            email: "ada@example.com".into(),
+            phone: None,
+            location: Some("London".into()),
+            summary: Some("Ada wrote the first program.".into()),
+        },
+    )
+    .await
+    .expect("profile");
+    let job = store_job(&db, "Rust Engineer", &job_text()).await;
+
+    let backend = FakeBackend::with_letter(
+        "Dear ⟦NAME⟧,\n\nI build offline-first desktop software.\n\nSincerely,\n⟦NAME_1⟧",
+    );
+    let result = run_cover_letter(&db.pool, &CoverLetterRequest::new(job.id), &backend)
+        .await
+        .expect("write");
+
+    let prompt = &backend.prompts()[0];
+    assert!(!prompt.contains("Ada Lovelace"));
+    assert!(!prompt.contains("ada@example.com"));
+    assert!(prompt.contains("⟦NAME⟧") && prompt.contains("⟦EMAIL⟧"));
+    assert!(
+        prompt.contains("⟦NAME_1⟧"),
+        "the body mentions the first name"
+    );
+
+    let expected =
+        "Dear Ada Lovelace,\n\nI build offline-first desktop software.\n\nSincerely,\nAda";
+    assert_eq!(result.content, expected, "the signature uses the real name");
+
+    let stored = cover_letters::get(&db.pool, result.cover_letter_id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(stored.content, expected, "the stored letter is restored");
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn turning_redaction_off_sends_the_raw_summary() {
+    let db = common::TestDb::new_raw().await;
+    seed_profile_and_prompts(&db).await;
+    let job = store_job(&db, "Rust Engineer", &job_text()).await;
+    PrivacyConfig { redact_cv: false }
+        .save(&db.pool)
+        .await
+        .expect("save the toggle");
+
+    let backend = FakeBackend::with_letter(LETTER);
+    run_cover_letter(&db.pool, &CoverLetterRequest::new(job.id), &backend)
+        .await
+        .expect("write");
+
+    let prompt = &backend.prompts()[0];
+    assert!(!prompt.contains('⟦'), "the toggle off sends no tokens");
+    assert!(
+        prompt.contains("ada@example.com"),
+        "the raw contact line is sent"
+    );
+
+    db.close().await;
+}
 
 #[tokio::test]
 async fn a_cover_letter_is_stored_with_provenance() {

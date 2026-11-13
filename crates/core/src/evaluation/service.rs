@@ -20,6 +20,7 @@ use crate::error::{CoreError, Result};
 use crate::llm::usage::{elapsed_ms, Call, Task};
 use crate::llm::{CancelToken, Completion, CompletionBackend, DeltaSink, LlmConfig, LlmError};
 use crate::model::{ApplicationStatus, QueueState};
+use crate::privacy::{self, RedactedCv};
 use crate::prompt_render::{estimated_tokens, render, take_chars, untrusted_block, Variables};
 use crate::repo::evaluation_reports::{self, NewEvaluationReport};
 use crate::repo::llm_usage::{self, NewLlmUsage};
@@ -152,6 +153,10 @@ pub async fn run_evaluation(
         CoreError::Message("Add your CV in CV / Profile before evaluating.".into())
     })?;
     let cv_summary = take_chars(&cv_summary, MAX_CV_CHARS);
+    // The provider sees placeholders; the real values are put back after the
+    // reply is parsed, because a name with a quote in it would break the JSON
+    // if it were substituted first.
+    let redaction = privacy::redact_cv(pool, &cv_summary).await?;
 
     let prompt = prompts::active_for_use(pool, &request.prompt_name)
         .await?
@@ -165,7 +170,7 @@ pub async fn run_evaluation(
     let assembled = render(
         &prompt.content,
         &Variables {
-            cv_summary: &cv_summary,
+            cv_summary: &redaction.text,
             job_description: &untrusted,
             company_name: &job.company,
             job_title: &job.title,
@@ -235,6 +240,23 @@ pub async fn run_evaluation(
             return Err(error);
         }
     };
+
+    let mut output = output;
+    let (restored, unrestored) = restore_output(&mut output, &redaction);
+    if !redaction.report.is_empty() {
+        // Counts only: the values never reach the log.
+        tracing::info!(
+            job = job.id,
+            redacted = redaction.report.total(),
+            names = redaction.report.names,
+            emails = redaction.report.emails,
+            phones = redaction.report.phones,
+            locations = redaction.report.locations,
+            restored,
+            unrestored,
+            "redaction before the evaluation call"
+        );
+    }
 
     let mut tx = pool.begin().await?;
     let report_id = evaluation_reports::insert_tx(
@@ -397,6 +419,36 @@ async fn ask(
 
 fn normalized_chars(raw: &str) -> usize {
     text::plain_text(raw, usize::MAX).text.chars().count()
+}
+
+/// Put the candidate's details back into the prose fields.
+///
+/// The structural fields (`match_score`, `recommendation`) are enums and
+/// numbers, so they cannot contain a placeholder. The four prose fields can,
+/// and restoring them after the parse is what keeps a value containing a quote
+/// or a newline from breaking the JSON.
+///
+/// Returns `(restored, unrestored)` for the counts-only log line.
+fn restore_output(output: &mut EvaluationOutput, redacted: &RedactedCv) -> (usize, usize) {
+    let mut restored = 0usize;
+    let mut unrestored = 0usize;
+    let mut restore = |text: &mut String| {
+        let outcome = redacted.restore_with_counts(text);
+        *text = outcome.text;
+        restored += outcome.restored;
+        unrestored += outcome.unrestored;
+    };
+
+    restore(&mut output.rationale);
+    restore(&mut output.full_report_markdown);
+    for strength in output.strengths.iter_mut() {
+        restore(strength);
+    }
+    for gap in output.gaps.iter_mut() {
+        restore(gap);
+    }
+
+    (restored, unrestored)
 }
 
 /// One provider call, timed, with its usage turned into a recordable [`Call`].

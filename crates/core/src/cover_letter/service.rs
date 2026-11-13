@@ -15,6 +15,7 @@ use std::time::Instant;
 use crate::error::{CoreError, Result};
 use crate::llm::usage::{elapsed_ms, Call, Task};
 use crate::llm::{CancelToken, CompletionBackend, LlmConfig, LlmError};
+use crate::privacy;
 use crate::prompt_render::{
     estimated_tokens, render, take_chars, untrusted_block, Variables, MAX_CV_CHARS,
 };
@@ -98,6 +99,9 @@ pub async fn run_cover_letter(
         CoreError::Message("Add your CV in CV / Profile before writing a cover letter.".into())
     })?;
     let cv_summary = take_chars(&cv_summary, MAX_CV_CHARS);
+    // The provider sees placeholders; the letter is restored before it is
+    // stored, so the signature uses the real name.
+    let redaction = privacy::redact_cv(pool, &cv_summary).await?;
 
     let tone = request.tone.as_deref().map(str::trim).unwrap_or("");
 
@@ -113,7 +117,7 @@ pub async fn run_cover_letter(
     let assembled = render(
         &prompt.content,
         &Variables {
-            cv_summary: &cv_summary,
+            cv_summary: &redaction.text,
             job_description: &untrusted,
             company_name: &job.company,
             job_title: &job.title,
@@ -196,12 +200,32 @@ pub async fn run_cover_letter(
         ));
     }
 
+    // The letter is free text, so restoring it is a substitution rather than a
+    // per-field walk. It happens before the store so the saved letter, and the
+    // signature in particular, carries the real name.
+    let restored = redaction.restore_with_counts(content);
+    let content = restored.text;
+    if !redaction.report.is_empty() {
+        // Counts only: the values never reach the log.
+        tracing::info!(
+            job = job.id,
+            redacted = redaction.report.total(),
+            names = redaction.report.names,
+            emails = redaction.report.emails,
+            phones = redaction.report.phones,
+            locations = redaction.report.locations,
+            restored = restored.restored,
+            unrestored = restored.unrestored,
+            "redaction before the cover-letter call"
+        );
+    }
+
     let mut tx = pool.begin().await?;
     let cover_letter_id = cover_letters::insert_tx(
         &mut tx,
         NewCoverLetter {
             application_id: application.id,
-            content,
+            content: &content,
             model_used: &config.model,
             prompt_version: Some(prompt.version),
             prompt_hash: Some(prompt.content_hash.as_str()),
@@ -230,7 +254,7 @@ pub async fn run_cover_letter(
     Ok(CoverLetterResult {
         cover_letter_id,
         application_id: application.id,
-        content: content.to_string(),
+        content,
         prompt_version: prompt.version,
         prompt_hash: prompt.content_hash,
         model_used: config.model,
