@@ -1,6 +1,6 @@
 # Phase 3.6: PII Redaction Before LLM Calls — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.53), §12
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.54), §12
 **Status:** Planned — not started
 **Last updated:** 2026-11-09
 **Duration:** 3–4 days

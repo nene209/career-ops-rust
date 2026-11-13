@@ -8,8 +8,11 @@ use career_ops_core::llm::LlmConfig;
 use zeroize::Zeroizing;
 
 #[tokio::test]
-#[ignore = "hits the network; set DEEPSEEK_API_KEY and run with --ignored"]
+#[ignore = "live; set CAREER_OPS_LIVE=1, DEEPSEEK_API_KEY, and run with --ignored"]
 async fn deepseek_accepts_the_configured_key() {
+    if !career_ops_test_support::require_live("deepseek_accepts_the_configured_key") {
+        return;
+    }
     let key = match std::env::var("DEEPSEEK_API_KEY") {
         Ok(key) if !key.trim().is_empty() => key,
         _ => {

@@ -1,6 +1,6 @@
 # Live (Network) Tests
 
-**Last reviewed:** 2026-11-08
+**Last reviewed:** 2026-11-12
 **Why this file exists:** the default test suite must be offline, deterministic,
 and fast. A few tests cannot be any of those things because their subject is the
 outside world: a job board changed its JSON, a detail page is no longer served,
@@ -14,10 +14,11 @@ Add a row here in the same change that adds or removes a live test.
 
 ## Rules for a live test
 
-1. **It must not run by default.** Use `#[ignore = "hits the network; run with
-   --ignored"]`. If the test is slow or redundant enough that a blanket
-   `--ignored` run should not start it, add a second environment-variable gate
-   (as the registry test does).
+1. **It must not run by default.** Use `#[ignore = "live; set CAREER_OPS_LIVE=1
+   and run with --ignored"]` and call
+   `career_ops_test_support::require_live("test_name")` at the top. `CAREER_OPS_LIVE=1`
+   is the only gate; a test still returns early when its own prerequisite is
+   missing (`DEEPSEEK_API_KEY`, an Obscura binary).
 2. **Assert the external contract, not our logic.** Live assertions are weak by
    design: the board answered, the payload still has the shape the adapter
    expects, a title and id are non-empty, a detail page still yields text.
@@ -44,17 +45,17 @@ Add a row here in the same change that adds or removes a live test.
 
 | Test | File | Gate | Target | What it proves | Should it be mocked? |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `live_fetch_reaches_the_pipeline` | `crates/app/src/app.rs` | `#[ignore]` | `LIVE_PORTAL_URLS` by default (Ashby Linear, Lever Spotify, Greenhouse Figma, SmartRecruiters Ubisoft) or `CAREER_OPS_LIVE_PORTALS` | The full app path: create portals through the service, fetch with the production HTTP client, store, batch progress, health badges, and the Pipeline list holding every stored job (Phase 3.3 removed the page cap). | **Keep live.** It is the only end-to-end check of transport + orchestration. Parsing is already fixture-covered. |
-| `live_fetch_with_pagination_and_details` | `crates/app/src/app.rs` | `#[ignore]` | `CAREER_OPS_LIVE_PAGED_PORTAL` (default Waymo search) | Page 2 is still reachable and fetched by the cursor; a real posting's detail page still yields a description; WAF challenges skip. | **Keep live but weak.** Pagination arithmetic and detail extraction have offline tests. This one proves the live page still has the shape those tests assume. |
-| `live_registry_sites_reach_the_pipeline` | `crates/app/src/app.rs` | `#[ignore]` **and** `CAREER_OPS_LIVE_REGISTRY=1` | Every entry in `acquisition::known_sites`: Waymo, NVIDIA, Figma (Greenhouse), Spotify (Lever), Linear (Ashby), Ubisoft (SmartRecruiters) | Each embedded config still reaches the Pipeline against its live site; a challenged entry is skipped without aborting the others. | **Keep live.** The registry's config plumbing is offline-tested; this is its only proof that the configs still work against the sites. |
-| `greenhouse_live`, `lever_live`, `ashby_live`, `smartrecruiters_live`, `smartrecruiters_detail_live`, `eightfold_live` | `crates/core/tests/ats_live.rs` | `RUN_LIVE_ATS_TESTS=1`; the tests return early without it (they are not `#[ignore]`) | One default board per ATS, overridable per adapter (`LIVE_*_SLUG`, `LIVE_EIGHTFOLD_*`) | The upstream APIs still return the shapes the adapters parse, and the detail endpoints still carry text. | **Keep live.** Fixtures cannot detect an API change. The board-detection helper in the same file is offline and runs by default. |
-| `obscura_returns_post_js_dom` | `crates/core/tests/obscura_spike.rs` | Binary availability (`vendor/obscura` or `OBSCURA_BIN`); returns early otherwise | `https://github.com/nene209/career-ops-rust` | The sidecar starts, CDP drives a page, post-JS DOM exists, and killing the sidecar is detectable. | **Candidate to make local.** Serve a page with inline JavaScript from a temp dir instead of GitHub; it proves the same thing without an external dependency. Do that if this spike is ever promoted beyond a Phase 2 gate. |
-| `obscura_print_to_pdf_if_supported` | `crates/core/tests/obscura_spike.rs` | None — it does **not** call `obscura_available()` | The sidecar | Records whether `printToPDF` works (the Phase 2 assumption is that it does not). | **Fix the gate first.** It spawns the binary unconditionally, which is why the standard validation command skips the whole file with `--skip obscura`. Add the availability check before relying on `cargo test` without that skip. |
-| `deepseek_accepts_the_configured_key` | `crates/core/tests/llm_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | `https://api.deepseek.com/user/balance` | The key is accepted and the provider is reachable. `verify()` asks for the balance, so a pass spends no tokens and produces no completion. | **Keep live.** It is the only check that a key and the endpoint still agree; Phase 3's structured-output calls will be cassette-backed. |
-| `deepseek_scores_the_fixtures_in_their_bands` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | The curated Phase 3 fixtures (strong, weak, borderline) | The real model still lands each fixture in its documented score band, and the report stores. Also the cassette recorder when `CAREER_OPS_RECORD_CASSETTES=1`. | **Keep live.** The offline suite replays cassettes (`evaluation_fixtures.rs`); only the live run proves the model's judgment and keeps the recordings honest. |
-| `deepseek_writes_a_usable_cover_letter` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | The strong fixture + a reference letter | The letter avoids the prompt's banned phrases and em dashes, and a model judge scores its semantic similarity against the reference at 0.7 or above. | **Keep live.** The banned-phrase check is also offline; the similarity judgment needs a model. |
-| `deepseek_proposes_real_boards` | `crates/core/tests/suggest_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | DeepSeek, one suggestion call against a throwaway vault | The real model still returns the suggestion contract, and every derived URL sits on the engine's own host, so a reply cannot point the app at an arbitrary site. | **Keep live.** The offline suite uses a scripted backend; only the live run proves the prompt still elicits the contract. |
-| `deepseek_triages_a_small_batch` | `crates/core/tests/triage_live.rs` | `#[ignore]`; returns early without `DEEPSEEK_API_KEY` | The four postings in `common::phase3::TRIAGE_SAMPLES` | The real model returns one decision per posting with a reason, the choices are valid, the queue and `triage_*` columns follow, and the call writes `task = 'triage'`. Also the cassette recorder when `CAREER_OPS_RECORD_CASSETTES=1`. | **Keep live.** The offline suite replays `tests/cassettes/triage.json`; only the live run proves the prompt still elicits the contract and keeps the recording honest. |
+| `live_fetch_reaches_the_pipeline` | `crates/app/src/app.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1` | `LIVE_PORTAL_URLS` by default (Ashby Linear, Lever Spotify, Greenhouse Figma, SmartRecruiters Ubisoft) or `CAREER_OPS_LIVE_PORTALS` | The full app path: create portals through the service, fetch with the production HTTP client, store, batch progress, health badges, and the Pipeline list holding every stored job (Phase 3.3 removed the page cap). | **Keep live.** It is the only end-to-end check of transport + orchestration. Parsing is already fixture-covered. |
+| `live_fetch_with_pagination_and_details` | `crates/app/src/app.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1` | `CAREER_OPS_LIVE_PAGED_PORTAL` (default Waymo search) | Page 2 is still reachable and fetched by the cursor; a real posting's detail page still yields a description; WAF challenges skip. | **Keep live but weak.** Pagination arithmetic and detail extraction have offline tests. This one proves the live page still has the shape those tests assume. |
+| `live_registry_sites_reach_the_pipeline` | `crates/app/src/app.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1` | Every entry in `acquisition::known_sites`: Waymo, NVIDIA, Figma (Greenhouse), Spotify (Lever), Linear (Ashby), Ubisoft (SmartRecruiters) | Each embedded config still reaches the Pipeline against its live site; a challenged entry is skipped without aborting the others. | **Keep live.** The registry's config plumbing is offline-tested; this is its only proof that the configs still work against the sites. |
+| `greenhouse_live`, `lever_live`, `ashby_live`, `smartrecruiters_live`, `smartrecruiters_detail_live`, `eightfold_live` | `crates/core/tests/ats_live.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1` | One default board per ATS, overridable per adapter (`LIVE_*_SLUG`, `LIVE_EIGHTFOLD_*`) | The upstream APIs still return the shapes the adapters parse, and the detail endpoints still carry text. | **Keep live.** Fixtures cannot detect an API change. The board-detection helper in the same file is offline and runs by default. |
+| `obscura_returns_post_js_dom` | `crates/core/tests/obscura_spike.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; binary availability (`vendor/obscura` or `OBSCURA_BIN`) | `https://github.com/nene209/career-ops-rust` | The sidecar starts, CDP drives a page, post-JS DOM exists, and killing the sidecar is detectable. | **Candidate to make local.** Serve a page with inline JavaScript from a temp dir instead of GitHub; it proves the same thing without an external dependency. Do that if this spike is ever promoted beyond a Phase 2 gate. |
+| `obscura_print_to_pdf_if_supported` | `crates/core/tests/obscura_spike.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; binary availability (the check was added in Phase 3.5 WS0) | The sidecar | Records whether `printToPDF` works (the Phase 2 assumption is that it does not). | **Keep live but weak.** The availability check now runs first, so a machine without the binary skips instead of failing. |
+| `deepseek_accepts_the_configured_key` | `crates/core/tests/llm_live.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; returns early without `DEEPSEEK_API_KEY` | `https://api.deepseek.com/user/balance` | The key is accepted and the provider is reachable. `verify()` asks for the balance, so a pass spends no tokens and produces no completion. | **Keep live.** It is the only check that a key and the endpoint still agree; Phase 3's structured-output calls will be cassette-backed. |
+| `deepseek_scores_the_fixtures_in_their_bands` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; returns early without `DEEPSEEK_API_KEY` | The curated Phase 3 fixtures (strong, weak, borderline) | The real model still lands each fixture in its documented score band, and the report stores. Also the cassette recorder when `CAREER_OPS_RECORD_CASSETTES=1`. | **Keep live.** The offline suite replays cassettes (`evaluation_fixtures.rs`); only the live run proves the model's judgment and keeps the recordings honest. |
+| `deepseek_writes_a_usable_cover_letter` | `crates/core/tests/llm_eval_live.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; returns early without `DEEPSEEK_API_KEY` | The strong fixture + a reference letter | The letter avoids the prompt's banned phrases and em dashes, and a model judge scores its semantic similarity against the reference at 0.7 or above. | **Keep live.** The banned-phrase check is also offline; the similarity judgment needs a model. |
+| `deepseek_proposes_real_boards` | `crates/core/tests/suggest_live.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; returns early without `DEEPSEEK_API_KEY` | DeepSeek, one suggestion call against a throwaway vault | The real model still returns the suggestion contract, and every derived URL sits on the engine's own host, so a reply cannot point the app at an arbitrary site. | **Keep live.** The offline suite uses a scripted backend; only the live run proves the prompt still elicits the contract. |
+| `deepseek_triages_a_small_batch` | `crates/core/tests/triage_live.rs` | `#[ignore]` + `CAREER_OPS_LIVE=1`; returns early without `DEEPSEEK_API_KEY` | The four postings in `common::phase3::TRIAGE_SAMPLES` | The real model returns one decision per posting with a reason, the choices are valid, the queue and `triage_*` columns follow, and the call writes `task = 'triage'`. Also the cassette recorder when `CAREER_OPS_RECORD_CASSETTES=1`. | **Keep live.** The offline suite replays `tests/cassettes/triage.json`; only the live run proves the prompt still elicits the contract and keeps the recording honest. |
 
 `live_probe`, `live_probe_challenged`, `registry_entry`, `live_portal_urls`,
 `live_scraper_config`, and `live_portal_name` in `app.rs` are helpers for the
@@ -73,52 +74,53 @@ tests above, not tests of their own.
 
 ## Running them
 
-The app-level tests need the keychain feature:
+The app-level tests need the keychain feature. `CAREER_OPS_LIVE=1` is the only
+gate; `--ignored` selects the tests, and the flag proves the network is
+intentional:
 
 ```bash
-# Every ignored app live test (skips the registry test on its own second gate).
-cargo test -p career-ops-app --features keychain -- --ignored
+# Every live test whose prerequisite is present.
+CAREER_OPS_LIVE=1 cargo test --workspace --features career-ops-app/keychain -- --ignored
 
 # One test.
-cargo test -p career-ops-app --features keychain -- --ignored \
+CAREER_OPS_LIVE=1 cargo test -p career-ops-app --features keychain -- --ignored \
     live_fetch_reaches_the_pipeline
 
-# A different board or the Waymo pagination run.
-CAREER_OPS_LIVE_PORTALS=https://jobs.lever.co/spotify \
+# Overrides are not gates; they change what the test targets.
+CAREER_OPS_LIVE=1 CAREER_OPS_LIVE_PORTALS=https://jobs.lever.co/spotify \
     cargo test -p career-ops-app --features keychain -- --ignored live_fetch
-CAREER_OPS_LIVE_PAGED_PORTAL=https://careers.withwaymo.com/jobs/search \
+CAREER_OPS_LIVE=1 CAREER_OPS_LIVE_PAGED_PORTAL=https://careers.withwaymo.com/jobs/search \
     cargo test -p career-ops-app --features keychain -- --ignored \
     live_fetch_with_pagination_and_details
 
-# The embedded registry, one entry at a time.
-CAREER_OPS_LIVE_REGISTRY=1 \
+# The embedded registry, one command.
+CAREER_OPS_LIVE=1 \
     cargo test -p career-ops-app --features keychain -- --ignored \
     live_registry_sites_reach_the_pipeline
 ```
 
-The DeepSeek key check is `#[ignore]`d and returns early when the key is not
-set, so `--ignored` can be used for every live test at once:
+The DeepSeek key check is also gated by the key itself:
 
 ```bash
-DEEPSEEK_API_KEY=sk-... \
+CAREER_OPS_LIVE=1 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test llm_live -- --ignored --nocapture
 ```
 
-The Phase 3 fixture checks spend tokens and run on demand. The same command
-with `CAREER_OPS_RECORD_CASSETTES=1` rewrites the offline cassettes (review the
+The Phase 3 fixture checks spend tokens and run on demand. Add
+`CAREER_OPS_RECORD_CASSETTES=1` to rewrite the offline cassettes (review the
 diff before committing; see `docs/llm-testing.md`):
 
 ```bash
 # Score the three fixtures and judge the cover letter.
-DEEPSEEK_API_KEY=sk-... \
+CAREER_OPS_LIVE=1 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test llm_eval_live -- --ignored --nocapture
 
 # One suggestion call, printing the proposals it accepted.
-DEEPSEEK_API_KEY=sk-... \
+CAREER_OPS_LIVE=1 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test suggest_live -- --ignored --nocapture
 
 # One triage batch, printing the four decisions it stored.
-DEEPSEEK_API_KEY=sk-... \
+CAREER_OPS_LIVE=1 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test triage_live -- --ignored --nocapture
 ```
 
@@ -126,15 +128,17 @@ The triage cassette is the one live reply the offline suite replays. Re-record i
 from a passing run (the four sample ids are `1..=4` on a fresh vault):
 
 ```bash
-CAREER_OPS_RECORD_CASSETTES=1 DEEPSEEK_API_KEY=sk-... \
+CAREER_OPS_LIVE=1 CAREER_OPS_RECORD_CASSETTES=1 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test triage_live -- --ignored --nocapture
 ```
 
 Review the diff: the cassette is a fixture, and a changed decision is a changed
 expectation. The suggestion call records no cassette; its assertion is about the
-derived URL, which a replayed reply cannot prove.bash
+derived URL, which a replayed reply cannot prove.
+
+```bash
 # Re-record crates/core/tests/cassettes from a passing run.
-CAREER_OPS_RECORD_CASSETTES=1 DEEPSEEK_API_KEY=sk-... \
+CAREER_OPS_LIVE=1 CAREER_OPS_RECORD_CASSETTES=1 DEEPSEEK_API_KEY=sk-... \
     cargo test -p career-ops-core --test llm_eval_live -- --ignored --nocapture
 ```
 
@@ -147,19 +151,20 @@ A row that says `estimated` means the provider sent no usage block and the
 four-characters-per-token fallback ran. What the ledger stores and what the cost
 means are in `docs/usage.md`.
 
-The ATS adapters are gated by an environment variable rather than `#[ignore]`,
-so they run as normal tests that print "skipping" and return:
+The ATS adapters are `#[ignore]`d like the rest; selecting one by name is the
+usual way to run a single board:
 
 ```bash
-RUN_LIVE_ATS_TESTS=1 \
-    cargo test -p career-ops-core --test ats_live -- --nocapture
+CAREER_OPS_LIVE=1 cargo test -p career-ops-core --test ats_live -- --ignored --nocapture
+CAREER_OPS_LIVE=1 LIVE_GREENHOUSE_SLUG=stripe \
+    cargo test -p career-ops-core --test ats_live -- --ignored --nocapture greenhouse_live
 ```
 
 The Obscura spike needs the browser binary:
 
 ```bash
-OBSCURA_BIN=$PWD/vendor/obscura \
-    cargo test -p career-ops-core --test obscura_spike -- --nocapture
+CAREER_OPS_LIVE=1 OBSCURA_BIN=$PWD/vendor/obscura \
+    cargo test -p career-ops-core --test obscura_spike -- --ignored --nocapture
 ```
 
 ### Registry run notes
@@ -176,11 +181,15 @@ date update.
 
 ### How the normal suite excludes them
 
-`cargo test --workspace --features career-ops-app/keychain --offline -- --skip
-obscura` is the standard validation command. It excludes the app live tests,
-the DeepSeek key and fixture checks, by `#[ignore]`; the ATS tests by their
-environment gate; and the spike by name. Dropping `--skip obscura` on a machine
-with the binary runs the spike too.
+`#[ignore]` excludes every live test from the default run. The standard command
+is unchanged:
+
+```bash
+cargo test --workspace --features career-ops-app/keychain --offline -- --skip obscura
+```
+
+`--skip obscura` is now redundant for safety (the spike is `#[ignore]`d and checks
+the binary), but it stays so the documented command and the habit agree.
 
 ---
 

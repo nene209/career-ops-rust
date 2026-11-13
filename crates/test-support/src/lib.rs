@@ -178,3 +178,43 @@ pub fn reset() {
     *guard = None;
     clear_failure();
 }
+
+/// The single opt-in for a test that reaches the network.
+///
+/// Every live test checks this, even when it is `#[ignore]`d. The ignore
+/// attribute keeps the default suite offline; this flag keeps a broad
+/// `--ignored` run from reaching the network by accident.
+pub fn live_enabled() -> bool {
+    std::env::var("CAREER_OPS_LIVE").is_ok_and(|value| is_live_value(&value))
+}
+
+fn is_live_value(value: &str) -> bool {
+    value.trim() == "1"
+}
+
+/// Print a skip line and return false when the live gate is unset.
+///
+/// Live tests still require their own prerequisite (for example
+/// `DEEPSEEK_API_KEY` or an Obscura binary); this only answers the shared
+/// network question.
+pub fn require_live(test: &str) -> bool {
+    if live_enabled() {
+        return true;
+    }
+    eprintln!("skipping {test}: set CAREER_OPS_LIVE=1 to run live tests");
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_live_value;
+
+    #[test]
+    fn only_one_enables_live_tests() {
+        assert!(is_live_value("1"));
+        assert!(is_live_value(" 1 "));
+        assert!(!is_live_value(""));
+        assert!(!is_live_value("0"));
+        assert!(!is_live_value("true"));
+    }
+}

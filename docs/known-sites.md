@@ -132,7 +132,7 @@ silently change what a live run reports.
 ## Running the check
 
 ```bash
-CAREER_OPS_LIVE_REGISTRY=1 \
+CAREER_OPS_LIVE=1 \
   cargo test -p career-ops-app --features keychain -- --ignored \
   live_registry_sites_reach_the_pipeline
 ```

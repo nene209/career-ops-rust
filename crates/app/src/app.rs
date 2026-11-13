@@ -8707,7 +8707,8 @@ mod tests {
     /// without editing this file:
     ///
     /// ```text
-    /// CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
+    /// CAREER_OPS_LIVE=1 \
+    ///     CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
     ///     cargo test -p career-ops-app --features keychain -- --ignored live_fetch
     /// ```
     ///
@@ -8795,11 +8796,14 @@ mod tests {
     /// Ignored by default. Run it with:
     ///
     /// ```text
-    /// cargo test -p career-ops-app --features keychain -- --ignored live_fetch
+    /// CAREER_OPS_LIVE=1 cargo test -p career-ops-app --features keychain -- --ignored live_fetch
     /// ```
     #[test]
-    #[ignore = "hits the network; run with --ignored"]
+    #[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
     fn live_fetch_reaches_the_pipeline() {
+        if !career_ops_test_support::require_live("live_fetch_reaches_the_pipeline") {
+            return;
+        }
         // Let the app's own subscriber carry the diagnostics; the guard prints
         // them if this test fails.
         let _logs = LogsOnFailure(career_ops_core::logging::handle());
@@ -9238,8 +9242,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "hits the network; run with --ignored"]
+    #[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
     fn live_fetch_with_pagination_and_details() {
+        if !career_ops_test_support::require_live("live_fetch_with_pagination_and_details") {
+            return;
+        }
         // Same guard as the other live test: the captured log is printed only
         // if something fails.
         let _logs = LogsOnFailure(career_ops_core::logging::handle());
@@ -9405,12 +9412,10 @@ mod tests {
     ///
     /// It is a sibling of `live_fetch_reaches_the_pipeline` rather than a mode
     /// inside it because a WAF challenge must skip *one entry*, not abort the
-    /// run, and that test is fail-fast over a single URL list. The environment
-    /// variable is a second gate behind `#[ignore]`, so a broad `--ignored` run
-    /// does not spend minutes on the network by accident.
+    /// run, and that test is fail-fast over a single URL list.
     ///
     /// ```text
-    /// CAREER_OPS_LIVE_REGISTRY=1 \
+    /// CAREER_OPS_LIVE=1 \
     ///     cargo test -p career-ops-app --features keychain -- --ignored \
     ///     live_registry_sites_reach_the_pipeline
     /// ```
@@ -9419,10 +9424,9 @@ mod tests {
     /// `crates/core/src/acquisition/known_sites.rs` and reflect them in
     /// `docs/known-sites.md`. The test never writes either file.
     #[test]
-    #[ignore = "hits the network; run with --ignored and CAREER_OPS_LIVE_REGISTRY=1"]
+    #[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
     fn live_registry_sites_reach_the_pipeline() {
-        if std::env::var("CAREER_OPS_LIVE_REGISTRY").as_deref() != Ok("1") {
-            eprintln!("live registry: skipped, set CAREER_OPS_LIVE_REGISTRY=1 to run");
+        if !career_ops_test_support::require_live("live_registry_sites_reach_the_pipeline") {
             return;
         }
 

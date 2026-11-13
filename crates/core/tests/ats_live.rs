@@ -1,10 +1,10 @@
 //! Live ATS integration tests.
 //!
-//! **These tests hit the network and are skipped by default.** Set
-//! `RUN_LIVE_ATS_TESTS=1` to run them:
+//! **These tests hit the network and are ignored by default.** Set
+//! `CAREER_OPS_LIVE=1` and run with `--ignored`:
 //!
 //! ```text
-//! RUN_LIVE_ATS_TESTS=1 cargo test -p career-ops-core --test ats_live -- --nocapture
+//! CAREER_OPS_LIVE=1 cargo test -p career-ops-core --test ats_live -- --ignored --nocapture
 //! ```
 //!
 //! ## Purpose
@@ -29,7 +29,7 @@
 //! editing this file:
 //!
 //! ```text
-//! LIVE_GREENHOUSE_SLUG=stripe RUN_LIVE_ATS_TESTS=1 cargo test ...
+//! LIVE_GREENHOUSE_SLUG=stripe CAREER_OPS_LIVE=1 cargo test ...
 //! ```
 
 use career_ops_core::acquisition::ats::{
@@ -39,10 +39,6 @@ use career_ops_core::acquisition::ats::{
 use career_ops_core::acquisition::eightfold;
 use career_ops_core::acquisition::http;
 use url::Url;
-
-fn live_enabled() -> bool {
-    std::env::var("RUN_LIVE_ATS_TESTS").is_ok()
-}
 
 fn slug_or(var: &str, default: &str) -> String {
     std::env::var(var).unwrap_or_else(|_| default.to_string())
@@ -138,9 +134,9 @@ fn live_board_urls_match_adapter_detection() {
 // -----------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
 async fn greenhouse_live() {
-    if !live_enabled() {
-        eprintln!("skipping greenhouse_live: RUN_LIVE_ATS_TESTS not set");
+    if !career_ops_test_support::require_live("greenhouse_live") {
         return;
     }
     let slug = slug_or("LIVE_GREENHOUSE_SLUG", "figma");
@@ -148,9 +144,9 @@ async fn greenhouse_live() {
 }
 
 #[tokio::test]
+#[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
 async fn lever_live() {
-    if !live_enabled() {
-        eprintln!("skipping lever_live: RUN_LIVE_ATS_TESTS not set");
+    if !career_ops_test_support::require_live("lever_live") {
         return;
     }
     let slug = slug_or("LIVE_LEVER_SLUG", "spotify");
@@ -158,9 +154,9 @@ async fn lever_live() {
 }
 
 #[tokio::test]
+#[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
 async fn ashby_live() {
-    if !live_enabled() {
-        eprintln!("skipping ashby_live: RUN_LIVE_ATS_TESTS not set");
+    if !career_ops_test_support::require_live("ashby_live") {
         return;
     }
     let slug = slug_or("LIVE_ASHBY_SLUG", "linear");
@@ -168,9 +164,9 @@ async fn ashby_live() {
 }
 
 #[tokio::test]
+#[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
 async fn smartrecruiters_live() {
-    if !live_enabled() {
-        eprintln!("skipping smartrecruiters_live: RUN_LIVE_ATS_TESTS not set");
+    if !career_ops_test_support::require_live("smartrecruiters_live") {
         return;
     }
     // Ubisoft is a large, long-lived SmartRecruiters board. The company's
@@ -185,9 +181,9 @@ async fn smartrecruiters_live() {
 /// posting yields text: a shape change there would leave every row empty while
 /// the list test above stayed green.
 #[tokio::test]
+#[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
 async fn smartrecruiters_detail_live() {
-    if !live_enabled() {
-        eprintln!("skipping smartrecruiters_detail_live: RUN_LIVE_ATS_TESTS not set");
+    if !career_ops_test_support::require_live("smartrecruiters_detail_live") {
         return;
     }
 
@@ -229,9 +225,9 @@ async fn smartrecruiters_detail_live() {
 /// The Eightfold engine end to end: list pages, then the position detail that
 /// supplies the description. NVIDIA is the reference site.
 #[tokio::test]
+#[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
 async fn eightfold_live() {
-    if !live_enabled() {
-        eprintln!("skipping eightfold_live: RUN_LIVE_ATS_TESTS not set");
+    if !career_ops_test_support::require_live("eightfold_live") {
         return;
     }
 

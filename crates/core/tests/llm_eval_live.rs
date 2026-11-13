@@ -85,8 +85,11 @@ impl CompletionBackend for RecordingBackend {
 }
 
 #[tokio::test]
-#[ignore = "hits the network and spends tokens; set DEEPSEEK_API_KEY and run with --ignored"]
+#[ignore = "live; set CAREER_OPS_LIVE=1, DEEPSEEK_API_KEY, and run with --ignored"]
 async fn deepseek_scores_the_fixtures_in_their_bands() {
+    if !career_ops_test_support::require_live("deepseek_scores_the_fixtures_in_their_bands") {
+        return;
+    }
     let Some(key) = api_key() else {
         eprintln!(
             "skipping deepseek_scores_the_fixtures_in_their_bands: DEEPSEEK_API_KEY is not set"
@@ -152,8 +155,11 @@ async fn deepseek_scores_the_fixtures_in_their_bands() {
 }
 
 #[tokio::test]
-#[ignore = "hits the network and spends tokens; set DEEPSEEK_API_KEY and run with --ignored"]
+#[ignore = "live; set CAREER_OPS_LIVE=1, DEEPSEEK_API_KEY, and run with --ignored"]
 async fn deepseek_writes_a_usable_cover_letter() {
+    if !career_ops_test_support::require_live("deepseek_writes_a_usable_cover_letter") {
+        return;
+    }
     let Some(key) = api_key() else {
         eprintln!("skipping deepseek_writes_a_usable_cover_letter: DEEPSEEK_API_KEY is not set");
         return;

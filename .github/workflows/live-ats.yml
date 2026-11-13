@@ -19,5 +19,6 @@ jobs:
 
       - name: Run live ATS tests
         env:
-          RUN_LIVE_ATS_TESTS: "1"
-        run: cargo test -p career-ops-core --test ats_live -- --nocapture
+          # One gate for every live test; `--ignored` selects them.
+          CAREER_OPS_LIVE: "1"
+        run: cargo test -p career-ops-core --test ats_live -- --ignored --nocapture

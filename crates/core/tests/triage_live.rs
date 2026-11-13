@@ -76,8 +76,11 @@ impl CompletionBackend for RecordingBackend {
 }
 
 #[tokio::test]
-#[ignore = "hits the network and spends tokens; set DEEPSEEK_API_KEY and run with --ignored"]
+#[ignore = "live; set CAREER_OPS_LIVE=1, DEEPSEEK_API_KEY, and run with --ignored"]
 async fn deepseek_triages_a_small_batch() {
+    if !career_ops_test_support::require_live("deepseek_triages_a_small_batch") {
+        return;
+    }
     let Some(key) = api_key() else {
         eprintln!("skipping deepseek_triages_a_small_batch: DEEPSEEK_API_KEY is not set");
         return;

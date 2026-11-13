@@ -306,7 +306,7 @@ the app: create portals → `FetchOne` on the first → `FetchAll` (batch, which
 re-fetches the first and therefore also exercises dedup) → storage → Pipeline.
 
 ```bash
-cargo test -p career-ops-app --features keychain -- --ignored live_fetch
+CAREER_OPS_LIVE=1 cargo test -p career-ops-app --features keychain -- --ignored live_fetch
 ```
 
 It creates its own portals in a throwaway vault and never reads or writes your
@@ -332,7 +332,7 @@ per-posting`).
 Override the list (comma-separated) without editing the file:
 
 ```bash
-CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
+CAREER_OPS_LIVE=1 CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
   cargo test -p career-ops-app --features keychain -- --ignored live_fetch
 ```
 
@@ -346,11 +346,11 @@ asserts the Pipeline page bound rather than assuming every row is visible.
 
 The known-site registry has its own live check: it probes, creates, and fetches
 every entry in `crates/core/src/acquisition/known_sites.rs`, then asserts each
-one stored at least one posting with text. It is gated twice, because it is
-slower than the board checks:
+one stored at least one posting with text. It is `#[ignore]`d and gated by
+`CAREER_OPS_LIVE=1`; it is slower than the board checks:
 
 ```bash
-CAREER_OPS_LIVE_REGISTRY=1 \
+CAREER_OPS_LIVE=1 \
   cargo test -p career-ops-app --features keychain -- --ignored \
   live_registry_sites_reach_the_pipeline
 ```
@@ -379,7 +379,7 @@ when the WAF answers `202`**, because a challenge is a site condition rather
 than a code failure:
 
 ```bash
-cargo test -p career-ops-app --features keychain -- --ignored \
+CAREER_OPS_LIVE=1 cargo test -p career-ops-app --features keychain -- --ignored \
   live_fetch_with_pagination_and_details
 ```
 
@@ -406,7 +406,7 @@ stays silent.
 The older generic check still works with the same config:
 
 ```bash
-CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
+CAREER_OPS_LIVE=1 CAREER_OPS_LIVE_PORTALS=https://careers.withwaymo.com/jobs/search \
 CAREER_OPS_LIVE_SCRAPER_CONFIG='{
   "list": "article.job-search-results-card-col",
   "fields": {
@@ -449,7 +449,7 @@ qualifications, additional information, in that order). No selectors are
 involved, and the same `detail.max_jobs` bound applies:
 
 ```bash
-CAREER_OPS_LIVE_PORTALS=https://jobs.smartrecruiters.com/Ubisoft2 \
+CAREER_OPS_LIVE=1 CAREER_OPS_LIVE_PORTALS=https://jobs.smartrecruiters.com/Ubisoft2 \
 CAREER_OPS_LIVE_SCRAPER_CONFIG='{"detail":{"max_jobs":2}}' \
   cargo test -p career-ops-app --features keychain -- --ignored live_fetch
 ```
@@ -470,7 +470,7 @@ NVIDIA's careers page is an Eightfold shell: no job markup, no JSON-LD. It is
 fetched by the `eightfold` provider, not by selectors:
 
 ```bash
-CAREER_OPS_LIVE_PORTALS=https://jobs.nvidia.com/careers \
+CAREER_OPS_LIVE=1 CAREER_OPS_LIVE_PORTALS=https://jobs.nvidia.com/careers \
 CAREER_OPS_LIVE_SCRAPER_CONFIG='{
   "provider": "eightfold",
   "domain": "nvidia.com",

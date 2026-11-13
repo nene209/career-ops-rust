@@ -1,7 +1,8 @@
 //! Week 1 spike: drive the Obscura sidecar over CDP from chromiumoxide.
 //!
 //! Run with:
-//!   OBSCURA_BIN=/path/to/obscura cargo test -p career-ops-core --test obscura_spike -- --nocapture
+//!   CAREER_OPS_LIVE=1 OBSCURA_BIN=/path/to/obscura \
+//!     cargo test -p career-ops-core --test obscura_spike -- --ignored --nocapture
 //!
 //! This test is the Phase 2 gate. It proves four things:
 //!   1. The sidecar can be spawned on an allocated port and is reachable.
@@ -104,7 +105,11 @@ fn obscura_available() -> bool {
 
 /// The core spike: connect, navigate, get post-JS DOM.
 #[tokio::test]
+#[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
 async fn obscura_returns_post_js_dom() {
+    if !career_ops_test_support::require_live("obscura_returns_post_js_dom") {
+        return;
+    }
     if !obscura_available() {
         eprintln!("skipping: obscura binary not found");
         return;
@@ -192,7 +197,16 @@ async fn obscura_returns_post_js_dom() {
 ///
 /// If this test passes, Phase 4 may not need rust-headless-chrome at all.
 #[tokio::test]
+#[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
 async fn obscura_print_to_pdf_if_supported() {
+    if !career_ops_test_support::require_live("obscura_print_to_pdf_if_supported") {
+        return;
+    }
+    if !obscura_available() {
+        eprintln!("skipping: obscura binary not found");
+        return;
+    }
+
     let port = allocate_port();
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut child = spawn_obscura(port, tmp.path()).await;
@@ -246,7 +260,11 @@ async fn obscura_print_to_pdf_if_supported() {
 /// PDFs (verified by `obscura_print_to_pdf_if_supported`), but the
 /// production backend does not expose that capability until Phase 4.
 #[tokio::test]
+#[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
 async fn obscura_backend_print_to_pdf_is_unsupported() {
+    if !career_ops_test_support::require_live("obscura_backend_print_to_pdf_is_unsupported") {
+        return;
+    }
     if !obscura_available() {
         eprintln!("skipping: obscura binary not found");
         return;
@@ -272,7 +290,11 @@ async fn obscura_backend_print_to_pdf_is_unsupported() {
 
 /// F3: stale lock from a previous run is cleaned up before spawning.
 #[tokio::test]
+#[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
 async fn obscura_backend_cleans_stale_lock() {
+    if !career_ops_test_support::require_live("obscura_backend_cleans_stale_lock") {
+        return;
+    }
     if !obscura_available() {
         eprintln!("skipping: obscura binary not found");
         return;
@@ -312,7 +334,11 @@ async fn obscura_backend_cleans_stale_lock() {
 
 /// F3: shutdown sends SIGTERM and the child exits.
 #[tokio::test]
+#[ignore = "live; set CAREER_OPS_LIVE=1 and run with --ignored"]
 async fn obscura_backend_graceful_shutdown() {
+    if !career_ops_test_support::require_live("obscura_backend_graceful_shutdown") {
+        return;
+    }
     if !obscura_available() {
         eprintln!("skipping: obscura binary not found");
         return;

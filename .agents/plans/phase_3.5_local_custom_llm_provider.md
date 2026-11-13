@@ -1,8 +1,8 @@
 # Phase 3.5: Local / Custom LLM Provider — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.53), §12
-**Status:** Planned — not started
-**Last updated:** 2026-11-09
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.54), §12
+**Status:** In progress — WS0 complete; WS1 next
+**Last updated:** 2026-11-12
 **Duration:** 3–4 days (including WS0)
 **Depends on:** Phase 3 (`core::llm` facade, evaluation/letter calls), Phase 3.1 (usage ledger and Settings), Phase 3.2 (triage/suggest call the same facade)
 **Blocks:** nothing. Phase 3.6 (PII redaction) follows it but does not depend on it.
@@ -14,6 +14,7 @@
 | Version | Change |
 | :--- | :--- |
 | v0.1 | Initial plan. Adds a **Local / custom** provider for OpenAI-compatible endpoints: base URL, optional API key, model, JSON-mode toggle, and an optional context window. No migration and no new dependency — `rig` 0.46 already ships the dialect and base-URL/auth controls. WS0 replaces the per-test live flags with one `CAREER_OPS_LIVE=1` gate. |
+| v0.2 | WS0 implemented. `live_enabled()` and `require_live()` live in `career_ops_test_support` with a unit test for the accepted values; the gate is environment-only, so the offline suite is untouched. `ats_live` and `obscura_spike` are now `#[ignore]`d (the obscura PDF test also gained the availability check it was missing, so `--skip obscura` is redundancy, not safety). The `live-ats` workflow moves to `CAREER_OPS_LIVE=1` **and** `--ignored`; without the latter the job would have run zero tests. `docs/known-sites.md` and manual script §8 join `docs/LIVE_TESTS.md` on the single flag. |
 
 ---
 
@@ -261,7 +262,9 @@ stay in the standard validation command).
    `CAREER_OPS_LIVE_REGISTRY` are removed.
 3. `ats_live` and `obscura` tests marked `#[ignore]`; the missing obscura
    availability check added.
-4. `docs/LIVE_TESTS.md` gate column and commands; manual script §8 commands.
+4. `docs/LIVE_TESTS.md` gate column and commands; manual script §8 commands;
+   `docs/known-sites.md` registry command; `.github/workflows/live-ats.yml`
+   (flag renamed and `--ignored` added, or the job runs nothing).
 5. A test that `require_live` returns false when the flag is absent (or a
    documentation-only assertion if env mutation is unsafe in parallel tests).
 
