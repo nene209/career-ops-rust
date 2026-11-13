@@ -1,8 +1,8 @@
 # Phase 3.6: PII Redaction Before LLM Calls — Detailed Execution Plan
 
-**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.57), §12
-**Status:** Planned — not started
-**Last updated:** 2026-11-09
+**Parent plan:** Draft Execution Plan: Career-Ops Rust Desktop Application (v0.58), §12
+**Status:** In progress — WS1 complete; WS2 next
+**Last updated:** 2026-11-13
 **Duration:** 3–4 days
 **Depends on:** Phase 3 (`evaluation` and `cover_letter` services), Phase 2.7 (`render_cv_summary`), Phase 3.5 (the local-provider option, not a technical dependency)
 **Blocks:** nothing.
@@ -14,6 +14,7 @@
 | Version | Change |
 | :--- | :--- |
 | v0.1 | Initial plan. Redacts the candidate's name, email, phone, and address-like location from the CV summary before evaluation and cover-letter calls, then restores the real values in the returned text. On by default, with a Settings preview. Location stays one **City / region** field; a separate address column is deferred. Streaming keeps its placeholders until the final text is restored. No migration; no new dependency. |
+| v0.2 | WS1 implemented. `core::privacy` holds one policy value (`PrivacyConfig`, key `privacy.redact_cv`, default on, malformed reads as on), the identity read from the stored profile, the redactor, and the restorer. Matching is a single left-to-right pass over sorted needles, so a full name beats its parts at the same offset and a token is never re-redacted; name parts and existing tokens are distinct by construction. **Three details the implementation settled that the plan left open:** (1) the stored phone is matched as a literal *and* through a digit-run scan, so a CV that writes the number differently still loses it while `12345` is still matched where it literally appears; (2) the restorer is built from the tokens the summary actually emitted, so `tokens()` is a truthful preview and an unused part does not restore a placeholder that was never shown; (3) a non-ASCII name matches exactly (case-insensitive byte folding would change offsets). The three-character floor and the eight-word stoplist are documented tradeoffs, not accidents. `redact` is pure and DB-free; `redact_cv` adds the stored profile and toggle. 18 unit tests + 4 integration tests (defaults, malformed value, stored-profile path, address-like location). |
 
 ---
 
