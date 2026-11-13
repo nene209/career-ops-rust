@@ -651,7 +651,7 @@ async fn deleting_the_current_version_promotes_the_newest_remaining() {
     assert_eq!(
         outcome,
         DeleteOutcome::Deleted {
-            promoted: Some(v1.id)
+            promoted: Some(v1.version)
         }
     );
 

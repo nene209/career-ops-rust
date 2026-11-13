@@ -121,18 +121,60 @@ type CvProfileLoad = CoreResult<(Profile, Vec<CvEntry>)>;
 /// Every prompt thread, for the Prompt Manager's list.
 type PromptsLoad = CoreResult<Vec<PromptThread>>;
 
-/// Why a prompt was written, so the message says which action happened.
+/// Why a prompt version was created, so the message says which action happened.
 #[derive(Debug, Clone, Copy)]
 enum PromptWriteKind {
     Saved,
     Duplicated,
-    Reverted,
 }
 
-/// A finished prompt write and what caused it.
-struct PromptWriteOutcome {
-    prompt: career_ops_core::model::Prompt,
-    kind: PromptWriteKind,
+/// One Prompt Manager write, run on the async task.
+enum PromptOp {
+    CreateVersion {
+        name: String,
+        category: String,
+        content: String,
+        kind: PromptWriteKind,
+    },
+    Activate {
+        version_id: i64,
+    },
+    Remove {
+        name: String,
+        version: i64,
+        version_id: i64,
+        retire: bool,
+        removes_thread: bool,
+    },
+    Restore {
+        name: String,
+        version: i64,
+        version_id: i64,
+    },
+}
+
+/// A finished prompt operation and what it changed.
+enum PromptOpOutcome {
+    Created {
+        name: String,
+        version: i64,
+        kind: PromptWriteKind,
+    },
+    Activated {
+        name: String,
+        version: i64,
+    },
+    Removed {
+        name: String,
+        version: i64,
+        retired: bool,
+        promoted: Option<i64>,
+        removes_thread: bool,
+    },
+    Restored {
+        name: String,
+        version: i64,
+    },
 }
 
 /// What the active screen asked the app to do.
@@ -344,7 +386,7 @@ pub struct CareerOpsApp {
     /// thread while it runs; its result must not overwrite the new pane.
     prompt_detail_for: Option<PromptSelection>,
     prompt_detail_task: Option<AsyncTask<CoreResult<PromptDetail>>>,
-    prompt_write_task: Option<AsyncTask<CoreResult<PromptWriteOutcome>>>,
+    prompt_write_task: Option<AsyncTask<CoreResult<PromptOpOutcome>>>,
 
     /// The acquisition preferences form and the value storage holds.
     settings: SettingsViewModel,
@@ -3670,7 +3712,11 @@ impl CareerOpsApp {
                 self.prompts_view
                     .show_version(version, self.prompt_detail.as_ref());
             }
-            PromptsAction::RevertToVersion(version_id) => self.revert_prompt(version_id),
+            PromptsAction::SetCurrentVersion(version_id) => self.activate_prompt(version_id),
+            PromptsAction::RemoveVersion { version_id, retire } => {
+                self.remove_prompt_version(version_id, retire)
+            }
+            PromptsAction::RestoreVersion(version_id) => self.restore_prompt_version(version_id),
             PromptsAction::SetCompare(on) => {
                 self.prompts_view
                     .set_compare(on, self.prompt_detail.as_ref());
@@ -3743,10 +3789,6 @@ impl CareerOpsApp {
         self.prompt_detail_task = Some(self.spawn(async move {
             let versions =
                 prompt_repo::list_versions(&pool, &selection.name, selection.is_system).await?;
-            let category = versions
-                .first()
-                .map(|prompt| prompt.category.clone())
-                .unwrap_or_default();
             let mut usage = HashMap::new();
             for version in &versions {
                 usage.insert(
@@ -3756,7 +3798,6 @@ impl CareerOpsApp {
             }
             Ok(PromptDetail::from_versions(
                 &selection.name,
-                &category,
                 selection.is_system,
                 versions,
                 &usage,
@@ -3786,6 +3827,28 @@ impl CareerOpsApp {
                 }
                 match result {
                     Ok(detail) => {
+                        if detail.is_empty() {
+                            // The thread was deleted, or the selection is stale.
+                            // Fall back to the system prompt of the same name.
+                            if !detail.is_system {
+                                if let Some(system) = self.prompts.thread(&detail.name, true) {
+                                    let name = system.name.clone();
+                                    self.prompts_view.selected =
+                                        Some(PromptSelection::new(name, true));
+                                    self.prompts_view.selected_version = None;
+                                    self.prompt_detail = None;
+                                    self.start_prompt_detail_load();
+                                    ctx.request_repaint();
+                                    return;
+                                }
+                            }
+                            self.prompts_view.selected = None;
+                            self.prompt_detail = None;
+                            self.prompts_error = None;
+                            ctx.request_repaint();
+                            return;
+                        }
+
                         let same_selection =
                             self.prompts_view
                                 .selected
@@ -3795,12 +3858,12 @@ impl CareerOpsApp {
                                         && selection.is_system == detail.is_system
                                 });
                         if same_selection {
-                            // The editor follows the stored latest version, but
+                            // The editor follows the stored current version, but
                             // never over anything the user is typing.
                             if !detail.is_system && !self.prompts_view.dirty {
-                                if let Some(latest) = detail.latest() {
+                                if let Some(current) = detail.current() {
                                     if self.prompts_view.selected_version.is_none() {
-                                        self.prompts_view.editor = latest.content.clone();
+                                        self.prompts_view.editor = current.content.clone();
                                     }
                                 }
                             }
@@ -3843,8 +3906,8 @@ impl CareerOpsApp {
         let name = detail.name.clone();
         let category = detail.category.clone();
         let unchanged = detail
-            .latest()
-            .is_some_and(|latest| latest.content == content);
+            .current()
+            .is_some_and(|current| current.content == content);
 
         if content.trim().is_empty() {
             self.prompts_error = Some("The prompt is empty.".into());
@@ -3861,7 +3924,12 @@ impl CareerOpsApp {
             return;
         }
 
-        self.start_prompt_write(name, category, content, PromptWriteKind::Saved);
+        self.start_prompt_op(PromptOp::CreateVersion {
+            name,
+            category,
+            content,
+            kind: PromptWriteKind::Saved,
+        });
     }
 
     /// Create an editable copy of the selected system prompt.
@@ -3874,19 +3942,24 @@ impl CareerOpsApp {
             self.prompts_error = Some("This prompt already has an editable copy.".into());
             return;
         }
-        let Some(latest) = detail.latest() else {
+        let Some(current) = detail.current() else {
             self.prompts_error = Some("This prompt has no versions to copy.".into());
             return;
         };
 
         let name = detail.name.clone();
         let category = detail.category.clone();
-        let content = latest.content.clone();
-        self.start_prompt_write(name, category, content, PromptWriteKind::Duplicated);
+        let content = current.content.clone();
+        self.start_prompt_op(PromptOp::CreateVersion {
+            name,
+            category,
+            content,
+            kind: PromptWriteKind::Duplicated,
+        });
     }
 
-    /// Save a historical version's content as the next version.
-    fn revert_prompt(&mut self, version_id: i64) {
+    /// Make an existing version current without adding a row.
+    fn activate_prompt(&mut self, version_id: i64) {
         let Some(detail) = self.prompt_detail.as_ref() else {
             self.prompts_error = Some("Select a prompt first.".into());
             return;
@@ -3900,20 +3973,70 @@ impl CareerOpsApp {
             self.prompts_error = Some("That version is no longer loaded.".into());
             return;
         };
-
-        let name = detail.name.clone();
-        let category = detail.category.clone();
-        let content = version.content.clone();
-        self.start_prompt_write(name, category, content, PromptWriteKind::Reverted);
+        if version.retired_at.is_some() {
+            self.prompts_error = Some("Restore this version before making it current.".into());
+            return;
+        }
+        if version.is_current {
+            self.prompts_message = Some("That version is already current.".into());
+            return;
+        }
+        self.start_prompt_op(PromptOp::Activate { version_id });
     }
 
-    fn start_prompt_write(
-        &mut self,
-        name: String,
-        category: String,
-        content: String,
-        kind: PromptWriteKind,
-    ) {
+    /// Delete or retire one version.
+    fn remove_prompt_version(&mut self, version_id: i64, retire: bool) {
+        let Some(detail) = self.prompt_detail.as_ref() else {
+            self.prompts_error = Some("Select a prompt first.".into());
+            return;
+        };
+        if detail.is_system {
+            self.prompts_error =
+                Some("System prompts are read-only. Duplicate one to edit your own copy.".into());
+            return;
+        }
+        let Some(version) = detail.version(version_id) else {
+            self.prompts_error = Some("That version is no longer loaded.".into());
+            return;
+        };
+        let removes_thread =
+            version.is_current && !detail.versions.iter().any(|other| other.id != version.id);
+        self.start_prompt_op(PromptOp::Remove {
+            name: detail.name.clone(),
+            version: version.version,
+            version_id,
+            retire,
+            removes_thread,
+        });
+    }
+
+    /// Make a retired version selectable again.
+    fn restore_prompt_version(&mut self, version_id: i64) {
+        let Some(detail) = self.prompt_detail.as_ref() else {
+            self.prompts_error = Some("Select a prompt first.".into());
+            return;
+        };
+        if detail.is_system {
+            self.prompts_error =
+                Some("System prompts are read-only. Duplicate one to edit your own copy.".into());
+            return;
+        }
+        let Some(version) = detail.version(version_id) else {
+            self.prompts_error = Some("That version is no longer loaded.".into());
+            return;
+        };
+        if version.retired_at.is_none() {
+            self.prompts_message = Some("That version is not retired.".into());
+            return;
+        }
+        self.start_prompt_op(PromptOp::Restore {
+            name: detail.name.clone(),
+            version: version.version,
+            version_id,
+        });
+    }
+
+    fn start_prompt_op(&mut self, op: PromptOp) {
         if self.prompt_write_task.is_some() {
             return;
         }
@@ -3925,9 +4048,74 @@ impl CareerOpsApp {
         self.prompts_error = None;
         self.prompts_message = None;
         self.prompt_write_task = Some(self.spawn(async move {
-            let prompt =
-                prompt_repo::create_version(&pool, &name, &category, &content, false).await?;
-            Ok(PromptWriteOutcome { prompt, kind })
+            match op {
+                PromptOp::CreateVersion {
+                    name,
+                    category,
+                    content,
+                    kind,
+                } => {
+                    let prompt =
+                        prompt_repo::create_version(&pool, &name, &category, &content, false)
+                            .await?;
+                    Ok(PromptOpOutcome::Created {
+                        name: prompt.name,
+                        version: prompt.version,
+                        kind,
+                    })
+                }
+                PromptOp::Activate { version_id } => {
+                    let prompt = prompt_repo::set_current(&pool, version_id).await?;
+                    Ok(PromptOpOutcome::Activated {
+                        name: prompt.name,
+                        version: prompt.version,
+                    })
+                }
+                PromptOp::Remove {
+                    name,
+                    version,
+                    version_id,
+                    retire,
+                    removes_thread,
+                } => {
+                    if retire {
+                        prompt_repo::retire_version(&pool, version_id).await?;
+                        Ok(PromptOpOutcome::Removed {
+                            name,
+                            version,
+                            retired: true,
+                            promoted: None,
+                            removes_thread,
+                        })
+                    } else {
+                        match prompt_repo::delete_version(&pool, version_id).await? {
+                            prompt_repo::DeleteOutcome::Deleted { promoted } => {
+                                Ok(PromptOpOutcome::Removed {
+                                    name,
+                                    version,
+                                    retired: false,
+                                    promoted,
+                                    removes_thread,
+                                })
+                            }
+                            prompt_repo::DeleteOutcome::InUse(refs) => {
+                                Err(career_ops_core::CoreError::Message(format!(
+                                    "This version is used by {} run(s); retire it instead.",
+                                    refs.total()
+                                )))
+                            }
+                        }
+                    }
+                }
+                PromptOp::Restore {
+                    name,
+                    version,
+                    version_id,
+                } => {
+                    prompt_repo::restore_version(&pool, version_id).await?;
+                    Ok(PromptOpOutcome::Restored { name, version })
+                }
+            }
         }));
     }
 
@@ -3945,30 +4133,68 @@ impl CareerOpsApp {
                 self.prompt_write_task = None;
                 match result {
                     Ok(outcome) => {
-                        let name = outcome.prompt.name.clone();
-                        let version = outcome.prompt.version;
-                        self.prompts_message = Some(match outcome.kind {
-                            PromptWriteKind::Saved => {
-                                format!("Saved `{name}` as version {version}.")
+                        match outcome {
+                            PromptOpOutcome::Created {
+                                name,
+                                version,
+                                kind,
+                            } => {
+                                self.prompts_message = Some(match kind {
+                                    PromptWriteKind::Saved => {
+                                        format!("Saved `{name}` as version {version}.")
+                                    }
+                                    PromptWriteKind::Duplicated => format!(
+                                        "Created your copy of `{name}` at version {version}. The \
+                                         system prompt is unchanged and stays available."
+                                    ),
+                                });
+                                // Follow the write: the new version is the user
+                                // copy, so select that thread and let the reload
+                                // refresh both panes.
+                                self.prompts_view.selected =
+                                    Some(PromptSelection::new(name, false));
+                                self.prompts_view.selected_version = None;
+                                self.prompts_view.dirty = false;
                             }
-                            PromptWriteKind::Duplicated => format!(
-                                "Created your copy of `{name}` at version {version}. The system \
-                                 prompt is unchanged and stays available."
-                            ),
-                            PromptWriteKind::Reverted => {
-                                format!(
-                                    "Saved `{name}` as version {version} from the earlier text."
-                                )
+                            PromptOpOutcome::Activated { name, version } => {
+                                self.prompts_message =
+                                    Some(format!("Now using `{name}` v{version}."));
+                                self.prompts_view.selected_version = None;
+                                self.prompts_view.dirty = false;
                             }
-                        });
+                            PromptOpOutcome::Removed {
+                                name,
+                                version,
+                                retired,
+                                promoted,
+                                removes_thread,
+                            } => {
+                                self.prompts_message = Some(if retired {
+                                    format!(
+                                        "Retired `{name}` v{version}. Its text stays available \
+                                         to the runs that used it."
+                                    )
+                                } else if let Some(promoted) = promoted {
+                                    format!(
+                                        "Deleted `{name}` v{version}. v{promoted} is now current."
+                                    )
+                                } else if removes_thread {
+                                    format!(
+                                        "Deleted `{name}` v{version}. The system prompt is now \
+                                         active."
+                                    )
+                                } else {
+                                    format!("Deleted `{name}` v{version}.")
+                                });
+                                self.prompts_view.selected_version = None;
+                                self.prompts_view.dirty = false;
+                            }
+                            PromptOpOutcome::Restored { name, version } => {
+                                self.prompts_message =
+                                    Some(format!("Restored `{name}` v{version}."));
+                            }
+                        }
 
-                        // Follow the write: the new version is the user copy, so
-                        // select that thread and let the reload refresh both panes.
-                        self.prompts_view.selected =
-                            Some(PromptSelection::new(outcome.prompt.name.clone(), false));
-                        self.prompts_view.selected_version = None;
-                        self.prompts_view.dirty = false;
-                        self.prompts_view.editor = outcome.prompt.content.clone();
                         self.prompt_detail = None;
                         self.prompts_loaded = false;
                         self.start_prompts_load();
@@ -3979,7 +4205,7 @@ impl CareerOpsApp {
             }
             TaskPoll::Cancelled => {
                 self.prompt_write_task = None;
-                self.prompts_error = Some("The prompt write was interrupted.".into());
+                self.prompts_error = Some("The prompt operation was interrupted.".into());
                 ctx.request_repaint();
             }
         }
@@ -7287,10 +7513,10 @@ mod tests {
     }
 
     /// The whole Prompt Manager flow: duplicate a system prompt, edit the copy,
-    /// and revert to an earlier version. Every write adds a version; nothing is
-    /// overwritten.
+    /// and make an earlier version current. Saving appends; activation moves the
+    /// pointer and adds no row.
     #[test]
-    fn prompt_manager_duplicates_edits_and_reverts() {
+    fn prompt_manager_duplicates_edits_and_activates() {
         let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
         career_ops_test_support::install();
 
@@ -7321,7 +7547,7 @@ mod tests {
         let system_content = app
             .prompt_detail
             .as_ref()
-            .and_then(|detail| detail.latest())
+            .and_then(|detail| detail.current())
             .map(|version| version.content.clone())
             .expect("system content");
 
@@ -7406,11 +7632,175 @@ mod tests {
             "the user copy is used, not the system prompt"
         );
 
-        // Revert the first version's content forward as version 3.
+        // Make the first version current. This moves the pointer; it does not
+        // append a copy.
         let oldest = versions.last().expect("oldest version").id;
         app.handle_prompts_action(PromptsAction::ShowVersion(Some(oldest)));
         assert_eq!(app.prompts_view.selected_version, Some(oldest));
-        app.handle_prompts_action(PromptsAction::RevertToVersion(oldest));
+        app.handle_prompts_action(PromptsAction::SetCurrentVersion(oldest));
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none()
+                && app.prompts_task.is_none()
+                && app.prompt_detail_task.is_none()
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.current().is_some_and(|v| v.version == 1))
+        });
+
+        let versions = app
+            .runtime()
+            .block_on(prompt_repo::list_versions(&pool, "evaluate", false))
+            .expect("versions");
+        assert_eq!(versions.len(), 2, "activation adds no version");
+        assert_eq!(
+            versions[1].content, system_content,
+            "the oldest version keeps its text"
+        );
+        let active = app
+            .runtime()
+            .block_on(prompt_repo::active_for_use(&pool, "evaluate"))
+            .expect("resolve")
+            .expect("prompt");
+        assert_eq!(active.content, system_content);
+        assert_eq!(active.version, 1);
+        assert!(
+            app.prompts_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Now using")),
+            "{:?}",
+            app.prompts_message
+        );
+    }
+
+    /// Deleting the only user copy removes the thread; the app selects the
+    /// system prompt of the same name and the detail follows.
+    #[test]
+    fn deleting_the_only_user_copy_falls_back_to_the_system_thread() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+        let pool = app.pool().expect("pool");
+
+        app.handle_prompts_action(PromptsAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.prompts_loaded && app.prompts_task.is_none()
+        });
+        app.handle_prompts_action(PromptsAction::Select(PromptSelection::new(
+            "evaluate", true,
+        )));
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_detail_task.is_none()
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.is_system)
+        });
+        app.handle_prompts_action(PromptsAction::DuplicateAsUser);
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none()
+                && app.prompts_task.is_none()
+                && app.prompt_detail_task.is_none()
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| !detail.is_system)
+        });
+
+        let only = app
+            .runtime()
+            .block_on(prompt_repo::list_versions(&pool, "evaluate", false))
+            .expect("versions")
+            .into_iter()
+            .next()
+            .expect("the copy's only version");
+
+        app.handle_prompts_action(PromptsAction::RemoveVersion {
+            version_id: only.id,
+            retire: false,
+        });
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none()
+                && app.prompts_task.is_none()
+                && app.prompt_detail_task.is_none()
+                && app
+                    .prompts_view
+                    .selected
+                    .as_ref()
+                    .is_some_and(|selection| selection.name == "evaluate" && selection.is_system)
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.is_system)
+        });
+        assert!(
+            app.prompts_message
+                .as_deref()
+                .is_some_and(|message| message.contains("system prompt is now active")),
+            "{:?}",
+            app.prompts_message
+        );
+        assert!(
+            app.prompts.thread("evaluate", false).is_none(),
+            "the empty user thread is gone"
+        );
+        let active = app
+            .runtime()
+            .block_on(prompt_repo::active_for_use(&pool, "evaluate"))
+            .expect("resolve")
+            .expect("system prompt");
+        assert!(active.is_system);
+    }
+
+    /// Delete, retire, and restore run through the app: messages, promotion,
+    /// and the reload all follow the operation.
+    #[test]
+    fn prompt_manager_deletes_retires_and_restores_versions() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+        let pool = app.pool().expect("pool");
+
+        app.handle_prompts_action(PromptsAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.prompts_loaded && app.prompts_task.is_none()
+        });
+        app.handle_prompts_action(PromptsAction::Select(PromptSelection::new(
+            "evaluate", true,
+        )));
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_detail_task.is_none()
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.is_system)
+        });
+        app.handle_prompts_action(PromptsAction::DuplicateAsUser);
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none()
+                && app.prompts_task.is_none()
+                && app.prompt_detail_task.is_none()
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| !detail.is_system)
+        });
+
+        app.handle_prompts_action(PromptsAction::SaveDraft("user v2".into()));
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none()
+                && app.prompts_task.is_none()
+                && app.prompt_detail_task.is_none()
+                && app
+                    .prompt_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.versions.len() == 2)
+        });
+        app.handle_prompts_action(PromptsAction::SaveDraft("user v3".into()));
         wait_until(&mut app, &ctx, |app| {
             app.prompt_write_task.is_none()
                 && app.prompts_task.is_none()
@@ -7425,17 +7815,99 @@ mod tests {
             .runtime()
             .block_on(prompt_repo::list_versions(&pool, "evaluate", false))
             .expect("versions");
-        assert_eq!(versions.len(), 3);
-        assert_eq!(
-            versions[0].content, system_content,
-            "revert writes the old text as a new version"
-        );
+        let v1 = versions[2].clone();
+        let v2 = versions[1].clone();
+        let v3 = versions[0].clone();
+
+        // A triage row makes v1 referenced, which is what retire is for.
+        app.runtime()
+            .block_on(
+                sqlx::query(
+                    "INSERT INTO job_descriptions
+                     (title, company, source_url, raw_text, fetched_at, fetch_tier,
+                      triage_prompt_hash)
+                     VALUES ('Engineer', 'Acme', 'https://example.com/triage/1', 'body',
+                             '2026-01-01T00:00:00Z', 'tier1b:html', ?)",
+                )
+                .bind(&v1.content_hash)
+                .execute(&pool),
+            )
+            .expect("triage reference");
+
+        app.handle_prompts_action(PromptsAction::RemoveVersion {
+            version_id: v1.id,
+            retire: true,
+        });
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none()
+                && app.prompts_task.is_none()
+                && app.prompt_detail_task.is_none()
+                && app.prompt_detail.as_ref().is_some_and(|detail| {
+                    detail
+                        .version(v1.id)
+                        .is_some_and(|version| version.retired_at.is_some())
+                })
+        });
         assert!(
             app.prompts_message
                 .as_deref()
-                .is_some_and(|message| message.contains("version 3")),
+                .is_some_and(|message| message.contains("Retired")),
             "{:?}",
             app.prompts_message
+        );
+
+        // Deleting the current v3 promotes v2.
+        app.handle_prompts_action(PromptsAction::RemoveVersion {
+            version_id: v3.id,
+            retire: false,
+        });
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none()
+                && app.prompts_task.is_none()
+                && app.prompt_detail_task.is_none()
+                && app.prompt_detail.as_ref().is_some_and(|detail| {
+                    detail.versions.len() == 2
+                        && detail.current().is_some_and(|version| version.id == v2.id)
+                })
+        });
+        assert!(
+            app.prompts_message
+                .as_deref()
+                .is_some_and(|message| message.contains("v2 is now current")),
+            "{:?}",
+            app.prompts_message
+        );
+
+        // Restoring v1 makes it selectable again without moving the pointer.
+        app.handle_prompts_action(PromptsAction::RestoreVersion(v1.id));
+        wait_until(&mut app, &ctx, |app| {
+            app.prompt_write_task.is_none()
+                && app.prompts_task.is_none()
+                && app.prompt_detail_task.is_none()
+                && app.prompt_detail.as_ref().is_some_and(|detail| {
+                    detail
+                        .version(v1.id)
+                        .is_some_and(|version| version.retired_at.is_none())
+                })
+        });
+        assert!(
+            app.prompts_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Restored")),
+            "{:?}",
+            app.prompts_message
+        );
+        let versions = app
+            .runtime()
+            .block_on(prompt_repo::list_versions(&pool, "evaluate", false))
+            .expect("versions");
+        assert_eq!(
+            versions
+                .iter()
+                .find(|version| version.is_current)
+                .map(|version| version.id),
+            Some(v2.id),
+            "restore does not move the pointer"
         );
     }
 

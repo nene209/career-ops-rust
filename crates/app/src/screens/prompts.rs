@@ -5,9 +5,10 @@
 //! only way to change one is to duplicate it, which is what keeps a shipped
 //! update from colliding with a user's edits.
 //!
-//! Version history is immutable. "Revert" is a new version with the old
-//! content, and the editor's save is always a new version, so the list is a
-//! complete record.
+//! Version content is immutable. A thread has one **current** version; making an
+//! older version current moves the pointer and writes no row. Saving appends a
+//! new version. An unreferenced version can be deleted; a referenced one can be
+//! retired, which hides it from the picker while keeping its text resolvable.
 //!
 //! The screen only emits actions; `CareerOpsApp` owns the reads and writes.
 
@@ -27,9 +28,16 @@ pub enum PromptsAction {
     Select(PromptSelection),
     SaveDraft(String),
     DuplicateAsUser,
-    /// Show a historical version; `None` returns to the latest.
+    /// Show a version; `None` returns to the current one.
     ShowVersion(Option<i64>),
-    RevertToVersion(i64),
+    /// Make an existing version current without adding a row.
+    SetCurrentVersion(i64),
+    /// Delete (`retire = false`) or hide (`retire = true`) one version.
+    RemoveVersion {
+        version_id: i64,
+        retire: bool,
+    },
+    RestoreVersion(i64),
     SetCompare(bool),
 }
 
@@ -101,6 +109,8 @@ pub fn show(
                 detail_ui(ui, detail, view, state, &mut action);
             });
     });
+
+    remove_dialog(ui.ctx(), view, &mut action);
 
     action
 }
@@ -263,7 +273,9 @@ fn detail_ui(
         ui.label(
             RichText::new(
                 "Saving creates a new version. Earlier versions are never changed, so a \
-                 report always points at what produced it.",
+                 report always points at what produced it. Making an older version current \
+                 moves the marker without adding a row; a used version can be retired \
+                 instead of deleted so its text stays available to those runs.",
             )
             .weak()
             .small(),
@@ -290,28 +302,84 @@ fn content_ui(
     state: PromptsRenderState<'_>,
     action: &mut Option<PromptsAction>,
 ) {
+    let Some(version) = view.viewed_version(detail) else {
+        return;
+    };
     let showing_history = view.selected_version.is_some();
+    let is_current = version.is_current;
+    let is_retired = version.retired_at.is_some();
+    let read_only = detail.is_system || showing_history || is_retired;
 
-    if let Some(version) = view.viewed_version(detail) {
-        if showing_history {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Viewing v{}", version.version)).strong());
-                if ui.button("Back to latest").clicked() {
-                    *action = Some(PromptsAction::ShowVersion(None));
-                }
-                if !detail.is_system
-                    && ui
-                        .add_enabled(!state.writing, Button::new("Revert to this version"))
-                        .on_hover_text("Save this content as a new version")
-                        .clicked()
-                {
-                    *action = Some(PromptsAction::RevertToVersion(version.id));
-                }
-            });
+    ui.horizontal_wrapped(|ui| {
+        let label = if is_retired {
+            format!(
+                "Retired v{} ({})",
+                version.version,
+                version.retired_at.as_deref().unwrap_or("retired")
+            )
+        } else if is_current {
+            format!("Current version (v{})", version.version)
+        } else {
+            format!("Viewing v{}", version.version)
+        };
+        ui.label(RichText::new(label).strong());
+
+        if showing_history && ui.button("Back to current").clicked() {
+            *action = Some(PromptsAction::ShowVersion(None));
         }
-    }
+        if !detail.is_system {
+            if !is_current
+                && !is_retired
+                && ui
+                    .add_enabled(!state.writing, Button::new("Make current"))
+                    .on_hover_text("Use this version without creating a new one")
+                    .clicked()
+            {
+                *action = Some(PromptsAction::SetCurrentVersion(version.id));
+            }
+            if is_retired
+                && ui
+                    .add_enabled(!state.writing, Button::new("Restore"))
+                    .on_hover_text("Make this version selectable again")
+                    .clicked()
+            {
+                *action = Some(PromptsAction::RestoreVersion(version.id));
+            }
 
-    if detail.is_system || showing_history {
+            let used = version.usage.len();
+            let has_other = detail.versions.iter().any(|other| other.id != version.id);
+            let active_sibling = detail
+                .versions
+                .iter()
+                .any(|other| other.id != version.id && other.retired_at.is_none());
+            // The repository refuses to leave a thread with rows but no current
+            // version; disable the action instead of showing an error.
+            let blocked = is_current && has_other && !active_sibling;
+            let kept_for_history = is_retired && used > 0;
+            let label = if used > 0 && !is_retired {
+                "Retire…"
+            } else {
+                "Delete…"
+            };
+            let enabled = !blocked && !kept_for_history && !state.writing;
+            let hover = if blocked {
+                "Restore another version first"
+            } else if kept_for_history {
+                "Kept for the runs that used it"
+            } else {
+                ""
+            };
+            if ui
+                .add_enabled(enabled, Button::new(label))
+                .on_disabled_hover_text(hover)
+                .clicked()
+            {
+                view.request_remove(detail, version.id);
+            }
+        }
+    });
+
+    if read_only {
         let content = view.viewed_content(detail).unwrap_or_default();
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.add(
@@ -345,22 +413,35 @@ fn content_ui(
 fn versions_ui(
     ui: &mut Ui,
     detail: &PromptDetail,
-    view: &PromptsView,
+    view: &mut PromptsView,
     action: &mut Option<PromptsAction>,
 ) {
     ui.heading(RichText::new("Versions").size(15.0));
-    let latest_id = detail.latest().map(|row| row.id);
+    let current_id = detail.current_id;
     let viewed_id = view.viewed_version(detail).map(|row| row.id);
+    let retired = detail
+        .versions
+        .iter()
+        .filter(|version| version.retired_at.is_some())
+        .count();
+    if retired > 0 {
+        ui.checkbox(&mut view.show_retired, format!("Show retired ({retired})"));
+    }
 
     for version in &detail.versions {
+        if version.retired_at.is_some() && !view.show_retired {
+            continue;
+        }
         let selected = viewed_id == Some(version.id);
         ui.horizontal(|ui| {
-            if ui
-                .selectable_label(selected, format!("v{}", version.version))
-                .clicked()
-            {
+            let label = if version.retired_at.is_some() {
+                RichText::new(format!("v{} (retired)", version.version)).weak()
+            } else {
+                RichText::new(format!("v{}", version.version))
+            };
+            if ui.selectable_label(selected, label).clicked() {
                 *action = Some(PromptsAction::ShowVersion(
-                    if latest_id == Some(version.id) {
+                    if current_id == Some(version.id) {
                         None
                     } else {
                         Some(version.id)
@@ -381,8 +462,10 @@ fn versions_ui(
                 .weak()
                 .small(),
             );
-            if latest_id == Some(version.id) {
+            if version.is_current {
                 ui.label(RichText::new("current").weak().small());
+            } else if version.retired_at.is_some() {
+                ui.label(RichText::new("retired").weak().small());
             }
         });
     }
@@ -395,7 +478,7 @@ fn usage_ui(ui: &mut Ui, detail: &PromptDetail, view: &PromptsView) {
     ui.heading(RichText::new("Used by").size(15.0));
     ui.label(
         RichText::new(format!(
-            "Reports and cover letters that recorded this version (v{}).",
+            "Evaluations, cover letters, and triage runs that recorded this version (v{}).",
             version.version
         ))
         .weak()
@@ -415,6 +498,105 @@ fn usage_ui(ui: &mut Ui, detail: &PromptDetail, view: &PromptsView) {
             ))
             .small(),
         );
+    }
+}
+
+fn remove_dialog(ctx: &egui::Context, view: &mut PromptsView, action: &mut Option<PromptsAction>) {
+    let Some(confirm) = view.remove.clone() else {
+        return;
+    };
+
+    let mut emitted = None;
+    let mut close = false;
+    let mut open = true;
+    let title = if confirm.retired {
+        "Retired prompt version"
+    } else if confirm.retires() {
+        "Retire prompt version"
+    } else {
+        "Delete prompt version"
+    };
+
+    egui::Window::new(title)
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            if confirm.retired {
+                ui.label(format!(
+                    "v{} is retired. Its text is still available to the runs that used it.",
+                    confirm.version
+                ));
+                if confirm.usage_count == 0 {
+                    ui.label("Nothing used it, so it can also be deleted permanently.");
+                }
+            } else if confirm.retires() {
+                ui.label(format!(
+                    "v{} has been used {} time{}. Deleting it would break the link from those \
+                     runs to this text.",
+                    confirm.version,
+                    confirm.usage_count,
+                    if confirm.usage_count == 1 { "" } else { "s" }
+                ));
+                ui.label("Retiring hides it from the picker and keeps the text available.");
+            } else {
+                ui.label(format!(
+                    "v{} has not been used. Deleting it cannot be undone.",
+                    confirm.version
+                ));
+                if confirm.blocked() {
+                    ui.label("Restore another version before deleting the current one.");
+                } else if let Some(promoted) = confirm.promoted {
+                    ui.label(format!("v{promoted} becomes current."));
+                } else if confirm.removes_thread {
+                    ui.label("This removes your copy; the system prompt becomes active.");
+                }
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if confirm.retired {
+                    if ui.button("Restore").clicked() {
+                        emitted = Some(PromptsAction::RestoreVersion(confirm.version_id));
+                        close = true;
+                    }
+                    if confirm.usage_count == 0 && ui.button("Delete permanently").clicked() {
+                        emitted = Some(PromptsAction::RemoveVersion {
+                            version_id: confirm.version_id,
+                            retire: false,
+                        });
+                        close = true;
+                    }
+                } else if confirm.retires() {
+                    if ui.button("Retire").clicked() {
+                        emitted = Some(PromptsAction::RemoveVersion {
+                            version_id: confirm.version_id,
+                            retire: true,
+                        });
+                        close = true;
+                    }
+                } else if !confirm.blocked() && ui.button("Delete permanently").clicked() {
+                    emitted = Some(PromptsAction::RemoveVersion {
+                        version_id: confirm.version_id,
+                        retire: false,
+                    });
+                    close = true;
+                }
+
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+
+    if !open {
+        close = true;
+    }
+    if let Some(action_value) = emitted {
+        *action = Some(action_value);
+    }
+    if close {
+        view.remove = None;
     }
 }
 

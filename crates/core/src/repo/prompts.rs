@@ -351,8 +351,8 @@ pub async fn delete_version(pool: &SqlitePool, version_id: i64) -> Result<Delete
     // The splice must run before the delete: foreign keys are on and
     // `supersedes_id` has no `ON DELETE` action.
     let next = if row.is_current {
-        let next: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM prompts
+        let next: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT id, version FROM prompts
              WHERE name = ? AND is_system = ? AND retired_at IS NULL AND id <> ?
              ORDER BY version DESC LIMIT 1",
         )
@@ -395,7 +395,7 @@ pub async fn delete_version(pool: &SqlitePool, version_id: i64) -> Result<Delete
         .execute(&mut *tx)
         .await?;
 
-    if let Some(id) = next {
+    if let Some((id, _)) = next {
         sqlx::query("UPDATE prompts SET is_current = 1 WHERE id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -403,7 +403,9 @@ pub async fn delete_version(pool: &SqlitePool, version_id: i64) -> Result<Delete
     }
 
     tx.commit().await?;
-    Ok(DeleteOutcome::Deleted { promoted: next })
+    Ok(DeleteOutcome::Deleted {
+        promoted: next.map(|(_, version)| version),
+    })
 }
 
 /// Hide a version from the picker without removing its text.

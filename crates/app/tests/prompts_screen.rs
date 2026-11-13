@@ -75,6 +75,14 @@ fn a_system_prompt_is_read_only_and_offers_a_copy() {
         harness.query_by_label("Prompt content").is_none(),
         "a system prompt has no editor"
     );
+    for label in ["Make current", "Delete…", "Retire…", "Restore"] {
+        assert!(
+            harness
+                .query_by_role_and_label(Role::Button, label)
+                .is_none(),
+            "a system prompt must not offer `{label}`"
+        );
+    }
 
     harness
         .get_by_role_and_label(Role::Button, "Duplicate as my copy")
@@ -203,9 +211,244 @@ fn a_reference_category_explains_that_placeholders_are_free_form() {
     );
 }
 
+#[test]
+fn an_activation_emits_no_write_and_keeps_both_versions() {
+    let view_model = PromptsViewModel::from_threads(vec![thread("evaluate", false, 2)]);
+    let detail = detail(
+        "evaluate",
+        false,
+        &["newer text", "older text"],
+        HashMap::new(),
+    );
+    let older_id = detail.versions[1].id;
+    let mut view = selected("evaluate", false);
+    view.selected_version = Some(older_id);
+
+    let mut harness = harness(TestState {
+        view_model,
+        detail: Some(detail),
+        view,
+        actions: Vec::new(),
+    });
+    harness.run();
+
+    let _ = harness.get_by_label("Viewing v1");
+    assert!(harness.query_by_label("v2").is_some());
+    assert!(harness.query_by_label("v1").is_some());
+    harness
+        .get_by_role_and_label(Role::Button, "Make current")
+        .click();
+    harness.run();
+
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PromptsAction::SetCurrentVersion(older_id))
+    );
+    assert!(
+        !harness
+            .state()
+            .actions
+            .iter()
+            .any(|action| matches!(action, PromptsAction::SaveDraft(_))),
+        "activation must not ask for a new version"
+    );
+}
+
+#[test]
+fn the_current_marker_follows_the_pointer() {
+    let view_model = PromptsViewModel::from_threads(vec![thread("evaluate", false, 2)]);
+    let mut detail = detail(
+        "evaluate",
+        false,
+        &["newer text", "older text"],
+        HashMap::new(),
+    );
+    let older_id = detail.versions[1].id;
+    make_current(&mut detail, older_id);
+
+    let mut harness = harness(TestState {
+        view_model,
+        detail: Some(detail),
+        view: selected("evaluate", false),
+        actions: Vec::new(),
+    });
+    harness.run();
+
+    let _ = harness.get_by_label("Current version (v1)");
+    assert_eq!(harness.get_all_by_label("current").count(), 1);
+}
+
+#[test]
+fn the_delete_dialog_names_the_promoted_version() {
+    let view_model = PromptsViewModel::from_threads(vec![thread("evaluate", false, 2)]);
+    let detail = detail(
+        "evaluate",
+        false,
+        &["newer text", "older text"],
+        HashMap::new(),
+    );
+
+    let mut harness = harness(TestState {
+        view_model,
+        detail: Some(detail),
+        view: selected("evaluate", false),
+        actions: Vec::new(),
+    });
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Delete…")
+        .click();
+    harness.run();
+
+    let _ = harness.get_by_label("v1 becomes current.");
+    let _ = harness.get_by_role_and_label(Role::Button, "Delete permanently");
+    harness
+        .get_by_role_and_label(Role::Button, "Cancel")
+        .click();
+    harness.run();
+    assert!(harness.query_by_label("v1 becomes current.").is_none());
+}
+
+#[test]
+fn the_retire_dialog_names_the_usage_count() {
+    let view_model = PromptsViewModel::from_threads(vec![thread("evaluate", false, 1)]);
+    let mut usage = HashMap::new();
+    usage.insert(
+        1,
+        vec![PromptUsageEntry {
+            kind: PromptUsageKind::Triage,
+            id: 9,
+            generated_at: fixed_time(),
+            model_used: "deepseek-flash".into(),
+            job_title: Some("Engineer".into()),
+            company: Some("Acme".into()),
+        }],
+    );
+    let detail = detail("evaluate", false, &["only text"], usage);
+
+    let mut harness = harness(TestState {
+        view_model,
+        detail: Some(detail),
+        view: selected("evaluate", false),
+        actions: Vec::new(),
+    });
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Retire…")
+        .click();
+    harness.run();
+
+    let _ = harness.get_by_label(
+        "v1 has been used 1 time. Deleting it would break the link from those runs to this text.",
+    );
+    harness
+        .get_by_role_and_label(Role::Button, "Retire")
+        .click();
+    harness.run();
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PromptsAction::RemoveVersion {
+            version_id: 1,
+            retire: true,
+        })
+    );
+}
+
+#[test]
+fn show_retired_reveals_a_retired_version_and_restore_emits() {
+    let view_model = PromptsViewModel::from_threads(vec![thread("evaluate", false, 2)]);
+    let mut detail = detail(
+        "evaluate",
+        false,
+        &["newer text", "older text"],
+        HashMap::new(),
+    );
+    let older_id = detail.versions[1].id;
+    detail.versions[1].retired_at = Some("2026-01-02 03:04".into());
+
+    let mut harness = harness(TestState {
+        view_model,
+        detail: Some(detail),
+        view: selected("evaluate", false),
+        actions: Vec::new(),
+    });
+    harness.run();
+
+    assert!(
+        harness.query_by_label("v1 (retired)").is_none(),
+        "retired rows are hidden by default"
+    );
+    harness.get_by_label("Show retired (1)").click();
+    harness.run();
+
+    let _ = harness.get_by_label("v1 (retired)");
+    harness.get_by_label("v1 (retired)").click();
+    harness.run();
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PromptsAction::ShowVersion(Some(older_id)))
+    );
+
+    // The app applies the emitted selection; mirror that here so the header
+    // and its Restore action render.
+    harness.state_mut().view.selected_version = Some(older_id);
+    harness.run();
+
+    let _ = harness.get_by_label("Retired v1 (2026-01-02 03:04)");
+    harness
+        .get_by_role_and_label(Role::Button, "Restore")
+        .click();
+    harness.run();
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PromptsAction::RestoreVersion(older_id))
+    );
+}
+
+#[test]
+fn a_historical_view_returns_to_the_current_version() {
+    let view_model = PromptsViewModel::from_threads(vec![thread("evaluate", false, 2)]);
+    let detail = detail(
+        "evaluate",
+        false,
+        &["newer text", "older text"],
+        HashMap::new(),
+    );
+    let older_id = detail.versions[1].id;
+    let mut view = selected("evaluate", false);
+    view.selected_version = Some(older_id);
+
+    let mut harness = harness(TestState {
+        view_model,
+        detail: Some(detail),
+        view,
+        actions: Vec::new(),
+    });
+    harness.run();
+
+    let _ = harness.get_by_label("Viewing v1");
+    harness
+        .get_by_role_and_label(Role::Button, "Back to current")
+        .click();
+    harness.run();
+    assert_eq!(
+        harness.state().actions.last(),
+        Some(&PromptsAction::ShowVersion(None))
+    );
+}
+
 // ----------------------------------------------------------------------
 // Fixtures
 // ----------------------------------------------------------------------
+
+fn make_current(detail: &mut PromptDetail, version_id: i64) {
+    for version in &mut detail.versions {
+        version.is_current = version.id == version_id;
+    }
+    detail.current_id = Some(version_id);
+}
 
 fn fixed_time() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:00Z")
@@ -243,7 +486,7 @@ fn detail(
     contents: &[&str],
     usage: HashMap<i64, Vec<PromptUsageEntry>>,
 ) -> PromptDetail {
-    PromptDetail::from_versions(name, "evaluate", is_system, prompts_for(contents), &usage)
+    PromptDetail::from_versions(name, is_system, prompts_for("evaluate", contents), &usage)
 }
 
 fn detail_category(
@@ -253,17 +496,17 @@ fn detail_category(
     contents: &[&str],
     usage: HashMap<i64, Vec<PromptUsageEntry>>,
 ) -> PromptDetail {
-    PromptDetail::from_versions(name, category, is_system, prompts_for(contents), &usage)
+    PromptDetail::from_versions(name, is_system, prompts_for(category, contents), &usage)
 }
 
-fn prompts_for(contents: &[&str]) -> Vec<Prompt> {
+fn prompts_for(category: &str, contents: &[&str]) -> Vec<Prompt> {
     contents
         .iter()
         .enumerate()
         .map(|(index, content)| Prompt {
             id: (index + 1) as i64,
             name: "evaluate".into(),
-            category: "evaluate".into(),
+            category: category.into(),
             content: (*content).into(),
             is_system: false,
             version: (contents.len() - index) as i64,
