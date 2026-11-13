@@ -14,6 +14,7 @@
 
 use egui::{Button, RichText, Ui};
 
+use career_ops_core::privacy::address_like;
 use career_ops_core::repo::profile::ProfileDetails;
 
 use crate::view_models::cv_profile::{
@@ -171,9 +172,35 @@ fn identity_form(
                 ui.end_row();
                 labelled_input(ui, "Phone", &mut view_model.form.phone, false);
                 ui.end_row();
-                labelled_input(ui, "Location", &mut view_model.form.location, false);
+                labelled_input(
+                    ui,
+                    "Location (city / region)",
+                    &mut view_model.form.location,
+                    false,
+                );
                 ui.end_row();
             });
+
+        // One field, one meaning: a city is context the model can use, a street
+        // address is personal data that is redacted before a call. Saying so is
+        // cheaper than a second `address` column nobody would render.
+        ui.label(
+            RichText::new(
+                "A city or region. A street address is treated as personal data and redacted \
+                 before an evaluation or cover letter is sent.",
+            )
+            .weak()
+            .small(),
+        );
+        if address_like(&view_model.form.location) {
+            ui.label(
+                RichText::new(
+                    "This looks like a street address. It is saved as typed and redacted before \
+                     a model sees it.",
+                )
+                .color(ui.visuals().warn_fg_color),
+            );
+        }
 
         ui.add_space(4.0);
         labelled_multiline(ui, "Summary", &mut view_model.form.summary, 4);

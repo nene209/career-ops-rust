@@ -7,6 +7,7 @@
 
 use career_ops_core::llm::{LlmConfig, LlmProvider};
 use career_ops_core::preferences::Preferences;
+use career_ops_core::privacy::PrivacyConfig;
 
 /// The preferences as the form holds them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -103,6 +104,13 @@ pub struct SettingsViewModel {
     /// The whole LLM configuration as stored, so saving a provider or model
     /// does not reset the budget fields the form does not edit.
     saved_llm: LlmConfig,
+    /// The privacy toggle as the form holds it. The default is the stored
+    /// default: redaction is on.
+    pub privacy: PrivacyConfig,
+    saved_privacy: PrivacyConfig,
+    /// Whether the "Preview what the model sees" window is open. UI state, so it
+    /// lives here rather than in the app.
+    pub privacy_preview_open: bool,
 }
 
 impl SettingsViewModel {
@@ -112,6 +120,9 @@ impl SettingsViewModel {
             saved,
             llm: LlmForm::default(),
             saved_llm: LlmConfig::default(),
+            privacy: PrivacyConfig::default(),
+            saved_privacy: PrivacyConfig::default(),
+            privacy_preview_open: false,
         }
     }
 
@@ -179,6 +190,26 @@ impl SettingsViewModel {
     /// Take the typed key for storage, leaving the field empty.
     pub fn take_api_key(&mut self) -> String {
         std::mem::take(&mut self.llm.api_key)
+    }
+
+    /// Adopt the stored privacy choice.
+    pub fn set_privacy(&mut self, saved: PrivacyConfig) {
+        self.privacy = saved;
+        self.saved_privacy = saved;
+    }
+
+    /// `true` when the toggle differs from what is stored.
+    pub fn is_privacy_dirty(&self) -> bool {
+        self.privacy != self.saved_privacy
+    }
+
+    pub fn privacy_config(&self) -> PrivacyConfig {
+        self.privacy
+    }
+
+    /// Adopt the value that was just stored.
+    pub fn mark_privacy_saved(&mut self, saved: PrivacyConfig) {
+        self.set_privacy(saved);
     }
 }
 
@@ -398,5 +429,24 @@ mod tests {
         view.set_api_key_present(true);
         assert!(view.llm.has_api_key);
         assert!(view.llm.api_key.is_empty(), "a stored key is not shown");
+    }
+
+    #[test]
+    fn privacy_defaults_to_on_and_tracks_a_change() {
+        let mut view = SettingsViewModel::default();
+        assert!(view.privacy_config().redact_cv, "on out of the box");
+        assert!(!view.is_privacy_dirty());
+
+        view.privacy.redact_cv = false;
+        assert!(view.is_privacy_dirty());
+        assert!(!view.privacy_config().redact_cv);
+
+        view.mark_privacy_saved(view.privacy_config());
+        assert!(!view.is_privacy_dirty());
+
+        // A stored `false` survives loading, so the screen shows what is saved.
+        view.set_privacy(PrivacyConfig { redact_cv: false });
+        assert!(!view.privacy_config().redact_cv);
+        assert!(!view.is_privacy_dirty());
     }
 }

@@ -103,7 +103,13 @@ fn profile_fields_are_queryable_by_their_labels() {
     let mut harness = harness(state());
     harness.run();
 
-    for label in ["Name", "Email", "Phone", "Location", "Summary"] {
+    for label in [
+        "Name",
+        "Email",
+        "Phone",
+        "Location (city / region)",
+        "Summary",
+    ] {
         let _ = harness.get_by_label(label);
     }
 
@@ -111,6 +117,32 @@ fn profile_fields_are_queryable_by_their_labels() {
         harness.unnamed_widgets().is_empty(),
         "every text input must have an accessible name"
     );
+}
+
+const LOCATION_HINT: &str = "A city or region. A street address is treated as personal data and redacted before an evaluation or cover letter is sent.";
+const ADDRESS_WARNING: &str =
+    "This looks like a street address. It is saved as typed and redacted before a model sees it.";
+
+#[test]
+fn the_location_hint_is_shown_and_a_street_address_is_flagged() {
+    let mut city_case = state();
+    city_case.view_model.form.location = "Berlin, Germany".into();
+    let mut city = harness(city_case);
+    city.run();
+
+    let _ = city.get_by_label(LOCATION_HINT);
+    assert!(
+        city.query_by_label(ADDRESS_WARNING).is_none(),
+        "a city is not a street address"
+    );
+
+    let mut address_case = state();
+    address_case.view_model.form.location = "123 Main St, Springfield".into();
+    let mut address = harness(address_case);
+    address.run();
+
+    let _ = address.get_by_label(LOCATION_HINT);
+    let _ = address.get_by_label(ADDRESS_WARNING);
 }
 
 #[test]

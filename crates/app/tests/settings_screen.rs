@@ -4,10 +4,13 @@
 //! `app.rs` covers the storage round trip; these cover the form, the gates, and
 //! the actions.
 
-use career_ops_app::screens::settings::{self, SettingsAction, SettingsRenderState};
+use career_ops_app::screens::settings::{
+    self, PrivacyPreview, SettingsAction, SettingsRenderState,
+};
 use career_ops_app::view_models::settings::SettingsViewModel;
 use career_ops_core::llm::{LlmConfig, LlmProvider};
 use career_ops_core::preferences::Preferences;
+use career_ops_core::privacy::{PrivacyConfig, RedactionReport};
 use egui::accesskit::Role;
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
@@ -440,6 +443,139 @@ fn an_unusable_base_url_is_explained_beside_the_endpoint() {
         .get_by_role_and_label(Role::Button, "Test connection")
         .accesskit_node()
         .is_disabled());
+}
+
+// ---------------------------------------------------------------------
+// Privacy section (Phase 3.6 WS3)
+// ---------------------------------------------------------------------
+
+const REDACT_LABEL: &str = "Redact personal details before sending to the model";
+
+#[test]
+fn the_privacy_section_defaults_on_and_saves_a_change() {
+    let mut harness = harness(SettingsViewModel::default(), SettingsRenderState::default());
+    harness.run();
+
+    let _ = harness.get_by_label("Privacy");
+    let _ = harness.get_by_label("Removes: name, email, phone, street-address location.");
+    assert!(
+        harness.state().view_model.privacy.redact_cv,
+        "redaction is on out of the box"
+    );
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Button, "Save privacy settings")
+            .accesskit_node()
+            .is_disabled(),
+        "nothing to save yet"
+    );
+
+    harness.get_by_label(REDACT_LABEL).click();
+    harness.run();
+
+    assert!(!harness.state().view_model.privacy.redact_cv);
+    harness
+        .get_by_role_and_label(Role::Button, "Save privacy settings")
+        .click();
+    harness.run();
+
+    match harness.state().actions.as_slice() {
+        [SettingsAction::SavePrivacy(config)] => assert!(!config.redact_cv),
+        other => panic!("unexpected actions: {other:?}"),
+    }
+}
+
+#[test]
+fn a_stored_toggle_off_is_what_the_checkbox_shows() {
+    let mut view = SettingsViewModel::default();
+    view.set_privacy(PrivacyConfig { redact_cv: false });
+    let mut harness = harness(view, SettingsRenderState::default());
+    harness.run();
+
+    assert!(!harness.state().view_model.privacy.redact_cv);
+    assert!(!harness.state().view_model.is_privacy_dirty());
+}
+
+#[test]
+fn the_preview_button_asks_for_the_summary_and_opens_the_window() {
+    let mut harness = harness(SettingsViewModel::default(), SettingsRenderState::default());
+    harness.run();
+
+    harness
+        .get_by_role_and_label(Role::Button, "Preview what the model sees")
+        .click();
+    harness.run();
+
+    match harness.state().actions.as_slice() {
+        [SettingsAction::PreviewPrivacy { redact }] => {
+            assert!(*redact, "the form's current value is what is previewed")
+        }
+        other => panic!("unexpected actions: {other:?}"),
+    }
+    assert!(harness.state().view_model.privacy_preview_open);
+}
+
+#[test]
+fn the_window_shows_the_redacted_line_and_its_counts() {
+    let mut view = SettingsViewModel::default();
+    view.privacy_preview_open = true;
+    let render = SettingsRenderState {
+        privacy_preview: Some(PrivacyPreview {
+            text: "⟦NAME⟧ at ⟦EMAIL⟧",
+            redacted: true,
+            report: RedactionReport {
+                names: 1,
+                emails: 1,
+                phones: 0,
+                locations: 0,
+            },
+        }),
+        ..Default::default()
+    };
+    let mut harness = harness(view, render);
+    harness.run();
+
+    let _ = harness.get_by_label("What the model sees");
+    let _ = harness.get_by_label("2 replacements: 1 name, 1 email, 0 phones, 0 locations.");
+    let _ = harness.get_by_label("⟦NAME⟧ at ⟦EMAIL⟧");
+    assert!(
+        harness.query_by_label("Ada Lovelace").is_none(),
+        "the real name is not in the preview"
+    );
+}
+
+#[test]
+fn the_window_warns_when_redaction_is_off() {
+    let mut view = SettingsViewModel::default();
+    view.privacy_preview_open = true;
+    let render = SettingsRenderState {
+        privacy_preview: Some(PrivacyPreview {
+            text: "Ada Lovelace <ada@example.com>",
+            redacted: false,
+            report: RedactionReport::default(),
+        }),
+        ..Default::default()
+    };
+    let mut harness = harness(view, render);
+    harness.run();
+
+    let _ =
+        harness.get_by_label("Redaction is off: this is the summary exactly as it will be sent.");
+    let _ = harness.get_by_label("Ada Lovelace <ada@example.com>");
+}
+
+#[test]
+fn a_preview_that_could_not_be_built_says_why() {
+    let mut view = SettingsViewModel::default();
+    view.privacy_preview_open = true;
+    let render = SettingsRenderState {
+        privacy_preview_error: Some("Add your CV in CV / Profile first."),
+        ..Default::default()
+    };
+    let mut harness = harness(view, render);
+    harness.run();
+
+    let _ = harness.get_by_label("Add your CV in CV / Profile first.");
 }
 
 #[test]

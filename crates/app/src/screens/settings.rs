@@ -15,10 +15,11 @@
 //! choice in `settings`, and the API key in the OS keychain; one button would
 //! have to say which of the three failed.
 
-use egui::{Button, Color32, RichText, Ui};
+use egui::{Align2, Button, Color32, RichText, Ui};
 
 use career_ops_core::llm::{LlmConfig, LlmProvider};
 use career_ops_core::preferences::Preferences;
+use career_ops_core::privacy::{PrivacyConfig, RedactionReport};
 
 use crate::view_models::settings::SettingsViewModel;
 
@@ -38,6 +39,25 @@ pub enum SettingsAction {
     },
     DeleteApiKey(LlmProvider),
     TestConnection(LlmConfig),
+    /// The redaction toggle. Its own save, like the AI section: a failure has to
+    /// name what failed.
+    SavePrivacy(PrivacyConfig),
+    /// Ask the app for the CV summary as the model would see it, under the
+    /// toggle's **current** (possibly unsaved) value, so the preview can be
+    /// compared before committing.
+    PreviewPrivacy {
+        redact: bool,
+    },
+}
+
+/// The summary the preview modal renders.
+#[derive(Debug, Clone, Copy)]
+pub struct PrivacyPreview<'a> {
+    pub text: &'a str,
+    /// Whether `text` was redacted. When false the modal says so.
+    pub redacted: bool,
+    /// Counts only, for the line above the text.
+    pub report: RedactionReport,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -50,6 +70,10 @@ pub struct SettingsRenderState<'a> {
     pub llm_status: Option<&'a str>,
     pub error: Option<&'a str>,
     pub message: Option<&'a str>,
+    /// What the modal shows once the app has built it.
+    pub privacy_preview: Option<PrivacyPreview<'a>>,
+    pub privacy_preview_loading: bool,
+    pub privacy_preview_error: Option<&'a str>,
 }
 
 pub fn show(
@@ -165,7 +189,16 @@ pub fn show(
         ui.add_space(8.0);
 
         ai_section(ui, view_model, state, &mut action);
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        privacy_section(ui, view_model, state, &mut action);
     });
+
+    // Outside the scroll area: a window clipped by it would be unusable.
+    privacy_preview_modal(ui, view_model, state);
 
     action
 }
@@ -386,6 +419,168 @@ fn ai_section(
             ui.label(RichText::new("· unsaved changes").weak());
         }
     });
+}
+
+/// The redaction toggle, its own save, and the preview.
+///
+/// The copy does two jobs: it says exactly what is removed, and it says plainly
+/// that the matching is best-effort. An overstated promise would be worse than
+/// no promise, because the user would stop thinking about it.
+fn privacy_section(
+    ui: &mut Ui,
+    view_model: &mut SettingsViewModel,
+    state: SettingsRenderState<'_>,
+    action: &mut Option<SettingsAction>,
+) {
+    ui.label(RichText::new("Privacy").strong());
+    ui.label(
+        RichText::new(
+            "Before an evaluation or a cover letter is sent, your name, email, phone, and a \
+             street-address location are replaced with placeholders. The reply is put back \
+             together here, and the log records counts only.",
+        )
+        .weak(),
+    );
+    ui.add_space(6.0);
+
+    ui.checkbox(
+        &mut view_model.privacy.redact_cv,
+        "Redact personal details before sending to the model",
+    );
+    ui.label(
+        RichText::new("Removes: name, email, phone, street-address location.")
+            .weak()
+            .small(),
+    );
+    ui.label(
+        RichText::new(
+            "Best-effort: a nickname or an unusual format can slip through. Local / custom \
+             keeps everything on this machine.",
+        )
+        .weak()
+        .small(),
+    );
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                view_model.is_privacy_dirty() && !state.saving,
+                Button::new("Save privacy settings"),
+            )
+            .clicked()
+        {
+            *action = Some(SettingsAction::SavePrivacy(view_model.privacy_config()));
+        }
+        if ui
+            .add_enabled(
+                !state.privacy_preview_loading,
+                Button::new("Preview what the model sees"),
+            )
+            .on_hover_text("The CV summary, with or without the placeholders")
+            .clicked()
+        {
+            view_model.privacy_preview_open = true;
+            *action = Some(SettingsAction::PreviewPrivacy {
+                redact: view_model.privacy.redact_cv,
+            });
+        }
+        if state.privacy_preview_loading {
+            LoadingSpinner::show(ui);
+        }
+        if view_model.is_privacy_dirty() && !state.saving {
+            ui.label(RichText::new("· unsaved changes").weak());
+        }
+    });
+}
+
+/// The preview window.
+///
+/// It renders from the app's prepared text, so the screen never touches the
+/// database. A toggle the user has changed but not saved is what the preview
+/// reflects: the point is comparing before committing.
+fn privacy_preview_modal(
+    ui: &mut Ui,
+    view_model: &mut SettingsViewModel,
+    state: SettingsRenderState<'_>,
+) {
+    if !view_model.privacy_preview_open {
+        return;
+    }
+
+    let mut close = false;
+    let mut window_open = true;
+
+    egui::Window::new("What the model sees")
+        .collapsible(false)
+        .resizable(true)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(680.0)
+        .open(&mut window_open)
+        .show(ui.ctx(), |ui| {
+            if state.privacy_preview_loading {
+                ui.horizontal(|ui| {
+                    LoadingSpinner::show(ui);
+                    ui.label("Preparing the preview...");
+                });
+            } else if let Some(error) = state.privacy_preview_error {
+                ui.colored_label(Color32::from_rgb(0xc0, 0x39, 0x2b), error);
+            } else if let Some(preview) = state.privacy_preview {
+                if !preview.redacted {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "Redaction is off: this is the summary exactly as it will be sent.",
+                    );
+                } else if preview.report.is_empty() {
+                    ui.label(
+                        "Nothing to redact: no name, email, phone, or street-address location \
+                         was found in the summary.",
+                    );
+                } else {
+                    let report = preview.report;
+                    ui.label(format!(
+                        "{} replacement{}: {} name{}, {} email{}, {} phone{}, {} location{}.",
+                        report.total(),
+                        plural(report.total()),
+                        report.names,
+                        plural(report.names),
+                        report.emails,
+                        plural(report.emails),
+                        report.phones,
+                        plural(report.phones),
+                        report.locations,
+                        plural(report.locations),
+                    ));
+                }
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(preview.text).monospace())
+                                .selectable(true)
+                                .wrap(),
+                        );
+                    });
+            }
+
+            ui.add_space(8.0);
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+
+    if close || !window_open {
+        view_model.privacy_preview_open = false;
+    }
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 fn field(ui: &mut Ui, label: &str, value: &mut String, help: &str) {

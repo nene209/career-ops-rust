@@ -50,6 +50,7 @@ use career_ops_core::portals::service::{
     PortalWithHealth,
 };
 use career_ops_core::preferences::Preferences;
+use career_ops_core::privacy::{self, PrivacyConfig, ProfileIdentity, RedactionReport};
 use career_ops_core::prompt_render;
 use career_ops_core::repo::applications as application_repo;
 use career_ops_core::repo::cover_letters as cover_letter_repo;
@@ -82,7 +83,7 @@ use crate::screens::portals::{
     PortalsRenderState, PortalsView, PreviewInputs, PreviewSample, StalledWalk, SuggestionView,
 };
 use crate::screens::prompts::{PromptsAction, PromptsRenderState};
-use crate::screens::settings::{SettingsAction, SettingsRenderState};
+use crate::screens::settings::{PrivacyPreview, SettingsAction, SettingsRenderState};
 use crate::screens::usage::{UsageAction, UsageRenderState};
 use crate::state::{AppState, Screen};
 use crate::view_models::cv_profile::{CvEntryDraft, CvProfileViewModel};
@@ -98,6 +99,17 @@ type StateTask = AsyncTask<(AppState, CoreResult<()>)>;
 /// A finished key write: the stored config, whether a key is now present, and
 /// the line to show.
 type KeyTask = AsyncTask<CoreResult<(LlmConfig, bool, &'static str)>>;
+
+/// The CV summary as the privacy preview shows it.
+///
+/// The app owns the text; the screen borrows it through
+/// [`crate::screens::settings::PrivacyPreview`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedPreview {
+    text: String,
+    redacted: bool,
+    report: RedactionReport,
+}
 
 /// A page of recent jobs, paired with the status of the application attached
 /// to each job id, the ids that carry user-authored state, the latest match
@@ -393,7 +405,7 @@ pub struct CareerOpsApp {
     settings_loaded: bool,
     settings_error: Option<String>,
     settings_message: Option<String>,
-    settings_task: Option<AsyncTask<CoreResult<(Preferences, LlmStatus)>>>,
+    settings_task: Option<AsyncTask<CoreResult<(Preferences, LlmStatus, PrivacyConfig)>>>,
     settings_save_task: Option<AsyncTask<CoreResult<Preferences>>>,
     /// The AI configuration and whether a key is present, as last loaded.
     llm_status: Option<LlmStatus>,
@@ -404,6 +416,12 @@ pub struct CareerOpsApp {
     llm_test_task: Option<AsyncTask<CoreResult<()>>>,
     /// The provider a running connection test is for, for its message.
     llm_testing: Option<LlmProvider>,
+
+    /// The privacy toggle's save, and the CV summary the preview window shows.
+    privacy_save_task: Option<AsyncTask<CoreResult<PrivacyConfig>>>,
+    privacy_preview: Option<PreparedPreview>,
+    privacy_preview_error: Option<String>,
+    privacy_preview_task: Option<AsyncTask<CoreResult<PreparedPreview>>>,
 
     /// The read-only usage ledger. The screen is loaded lazily, like every
     /// other data-backed screen.
@@ -541,6 +559,10 @@ impl CareerOpsApp {
             api_key_task: None,
             llm_test_task: None,
             llm_testing: None,
+            privacy_save_task: None,
+            privacy_preview: None,
+            privacy_preview_error: None,
+            privacy_preview_task: None,
             usage: UsageViewModel::default(),
             usage_loaded: false,
             usage_error: None,
@@ -908,6 +930,8 @@ impl CareerOpsApp {
             SettingsAction::SaveApiKey { key, config } => self.start_api_key_write(key, config),
             SettingsAction::DeleteApiKey(provider) => self.start_api_key_delete(provider),
             SettingsAction::TestConnection(config) => self.start_llm_test(config),
+            SettingsAction::SavePrivacy(config) => self.start_privacy_save(config),
+            SettingsAction::PreviewPrivacy { redact } => self.start_privacy_preview(redact),
         }
     }
 
@@ -3216,10 +3240,12 @@ impl CareerOpsApp {
         self.settings_error = None;
         let task = self.spawn(async move {
             let preferences = profile_repo::preferences(&pool).await?;
-            // One round trip: the AI section and the key presence load with
-            // the preferences, so a reload cannot show a half-updated screen.
+            // One round trip: the AI section, the key presence, and the privacy
+            // toggle load with the preferences, so a reload cannot show a
+            // half-updated screen.
             let status = llm::status(&pool).await?;
-            Ok((preferences, status))
+            let privacy = PrivacyConfig::load(&pool).await?;
+            Ok((preferences, status, privacy))
         });
         self.settings_task = Some(task);
     }
@@ -3234,10 +3260,11 @@ impl CareerOpsApp {
             TaskPoll::Ready(result) => {
                 self.settings_task = None;
                 match result {
-                    Ok((preferences, status)) => {
+                    Ok((preferences, status, privacy)) => {
                         self.settings = SettingsViewModel::from_preferences(preferences);
                         self.settings
                             .set_llm(status.config.clone(), status.has_api_key);
+                        self.settings.set_privacy(privacy);
                         self.llm_status = Some(status);
                         self.settings_loaded = true;
                         self.settings_error = None;
@@ -3550,6 +3577,123 @@ impl CareerOpsApp {
                     self.llm_test_task = None;
                     self.llm_testing = None;
                     self.settings_error = Some("The connection test was interrupted.".into());
+                    repaint = true;
+                }
+            }
+        }
+
+        if repaint {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Store the redaction toggle.
+    fn start_privacy_save(&mut self, config: PrivacyConfig) {
+        if self.privacy_save_task.is_some() {
+            return;
+        }
+
+        let Some(pool) = self.pool() else {
+            self.settings_error = Some("The database is not open.".into());
+            return;
+        };
+
+        self.settings_error = None;
+        self.settings_message = None;
+        self.privacy_save_task = Some(self.spawn(async move {
+            config.save(&pool).await?;
+            Ok(config)
+        }));
+    }
+
+    /// Build the CV summary the preview window shows.
+    ///
+    /// `redact` is the toggle's value in the form, not the stored one: the
+    /// point of the preview is comparing the two before saving.
+    fn start_privacy_preview(&mut self, redact: bool) {
+        let Some(pool) = self.pool() else {
+            self.privacy_preview_error = Some("The database is not open.".into());
+            return;
+        };
+
+        // A second click replaces the first: the preview is cheap and the last
+        // click is what the user is looking at.
+        self.privacy_preview = None;
+        self.privacy_preview_error = None;
+        self.privacy_preview_task = Some(self.spawn(async move {
+            let summary = profile_repo::cv_summary(&pool).await?.ok_or_else(|| {
+                CoreError::Message(
+                    "Add your CV in CV / Profile first; there is no summary to preview.".into(),
+                )
+            })?;
+            let profile = profile_repo::ensure_singleton(&pool).await?;
+            let identity = ProfileIdentity::from_profile(&profile);
+            // The same budget an evaluation applies, so the preview is not
+            // longer than what would be sent.
+            let summary = prompt_render::take_chars(&summary, prompt_render::MAX_CV_CHARS);
+            let preview = privacy::redact(&summary, &identity, redact);
+            Ok(PreparedPreview {
+                text: preview.text,
+                redacted: redact,
+                report: preview.report,
+            })
+        }));
+    }
+
+    fn poll_privacy_tasks(&mut self, ctx: &egui::Context) {
+        let mut repaint = false;
+
+        if let Some(task) = self.privacy_save_task.as_mut() {
+            match task.try_recv() {
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50))
+                }
+                TaskPoll::Ready(result) => {
+                    self.privacy_save_task = None;
+                    match result {
+                        Ok(saved) => {
+                            self.settings.mark_privacy_saved(saved);
+                            self.settings_message = Some("Privacy settings saved.".into());
+                            self.settings_error = None;
+                        }
+                        Err(error) => {
+                            self.settings_message = None;
+                            self.settings_error =
+                                Some(format!("Could not save the privacy settings: {error}"));
+                        }
+                    }
+                    repaint = true;
+                }
+                TaskPoll::Cancelled => {
+                    self.privacy_save_task = None;
+                    self.settings_error = Some("The save was interrupted.".into());
+                    repaint = true;
+                }
+            }
+        }
+
+        if let Some(task) = self.privacy_preview_task.as_mut() {
+            match task.try_recv() {
+                TaskPoll::Pending => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50))
+                }
+                TaskPoll::Ready(result) => {
+                    self.privacy_preview_task = None;
+                    match result {
+                        Ok(preview) => {
+                            self.privacy_preview = Some(preview);
+                            self.privacy_preview_error = None;
+                        }
+                        Err(error) => {
+                            self.privacy_preview = None;
+                            self.privacy_preview_error = Some(error.to_string());
+                        }
+                    }
+                    repaint = true;
+                }
+                TaskPoll::Cancelled => {
+                    self.privacy_preview_task = None;
+                    self.privacy_preview_error = Some("The preview was interrupted.".into());
                     repaint = true;
                 }
             }
@@ -4505,6 +4649,7 @@ impl eframe::App for CareerOpsApp {
                 self.poll_settings_task(ui.ctx());
                 self.poll_preferences_save(ui.ctx());
                 self.poll_llm_tasks(ui.ctx());
+                self.poll_privacy_tasks(ui.ctx());
                 self.poll_usage_task(ui.ctx());
                 self.drain_batch_progress();
 
@@ -4651,6 +4796,16 @@ impl eframe::App for CareerOpsApp {
                     llm_status: llm_line.as_deref(),
                     error: self.settings_error.as_deref(),
                     message: self.settings_message.as_deref(),
+                    privacy_preview: self
+                        .privacy_preview
+                        .as_ref()
+                        .map(|prepared| PrivacyPreview {
+                            text: &prepared.text,
+                            redacted: prepared.redacted,
+                            report: prepared.report,
+                        }),
+                    privacy_preview_loading: self.privacy_preview_task.is_some(),
+                    privacy_preview_error: self.privacy_preview_error.as_deref(),
                 };
 
                 let usage_state = UsageRenderState {
@@ -5270,6 +5425,82 @@ mod tests {
             .is_some_and(|status| !status.ready()));
     }
 
+    /// The privacy toggle and its preview, through the app: redaction starts on,
+    /// the preview follows the form's value, and the save round-trips.
+    #[test]
+    fn privacy_settings_and_the_preview_round_trip_through_the_app() {
+        let _guard = KEYCHAIN_TEST_LOCK.lock().expect("keychain test lock");
+        career_ops_test_support::install();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, ctx) = unlocked_app(dir.path());
+
+        let pool = app.pool().expect("pool");
+        app.runtime()
+            .block_on(profile_repo::update_details(
+                &pool,
+                &ProfileDetails {
+                    name: "Ada Lovelace".into(),
+                    email: "ada@example.com".into(),
+                    phone: Some("+44 20 0000 0000".into()),
+                    location: Some("London".into()),
+                    summary: Some("Mathematician.".into()),
+                },
+            ))
+            .expect("profile");
+
+        app.start_settings_load();
+        wait_until(&mut app, &ctx, |app| {
+            app.settings_task.is_none() && app.settings_loaded
+        });
+        assert!(
+            app.settings.privacy_config().redact_cv,
+            "redaction is on out of the box"
+        );
+
+        // The preview shows placeholders while the toggle is on...
+        app.handle_settings_action(SettingsAction::PreviewPrivacy { redact: true });
+        wait_until(&mut app, &ctx, |app| app.privacy_preview_task.is_none());
+        let preview = app.privacy_preview.as_ref().expect("preview");
+        assert!(preview.redacted);
+        assert!(preview.text.contains("⟦NAME⟧"), "{}", preview.text);
+        assert!(preview.text.contains("⟦EMAIL⟧"));
+        assert!(!preview.text.contains("Ada Lovelace"));
+
+        // ...and the raw summary when it is off.
+        app.handle_settings_action(SettingsAction::PreviewPrivacy { redact: false });
+        wait_until(&mut app, &ctx, |app| app.privacy_preview_task.is_none());
+        let preview = app.privacy_preview.as_ref().expect("preview");
+        assert!(!preview.redacted);
+        assert!(preview.text.contains("Ada Lovelace"));
+
+        app.handle_settings_action(SettingsAction::SavePrivacy(PrivacyConfig {
+            redact_cv: false,
+        }));
+        wait_until(&mut app, &ctx, |app| {
+            app.privacy_save_task.is_none() && app.settings_message.is_some()
+        });
+        assert_eq!(
+            app.settings_message.as_deref(),
+            Some("Privacy settings saved.")
+        );
+        assert!(!app.settings.is_privacy_dirty());
+
+        // A later load reads the stored value, not the default.
+        app.settings = SettingsViewModel::default();
+        app.settings_loaded = false;
+        app.handle_settings_action(SettingsAction::Reload);
+        wait_until(&mut app, &ctx, |app| {
+            app.settings_task.is_none() && app.settings_loaded
+        });
+        assert!(!app.settings.privacy_config().redact_cv);
+
+        // Restore the default so a later test in this process is unaffected.
+        app.handle_settings_action(SettingsAction::SavePrivacy(PrivacyConfig {
+            redact_cv: true,
+        }));
+        wait_until(&mut app, &ctx, |app| app.privacy_save_task.is_none());
+    }
+
     /// The Logs screen is one click from a fetch failure, and opening it must
     /// not leave the drawer that would duplicate it on top.
     #[test]
@@ -5666,6 +5897,7 @@ mod tests {
             app.poll_settings_task(ctx);
             app.poll_preferences_save(ctx);
             app.poll_llm_tasks(ctx);
+            app.poll_privacy_tasks(ctx);
             app.poll_usage_task(ctx);
             app.drain_batch_progress();
             if condition(app) {
